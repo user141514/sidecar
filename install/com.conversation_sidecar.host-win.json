@@ -1,9 +1,0 @@
-{
-  "name": "com.conversation_sidecar.host",
-  "description": "Conversation Sidecar native host",
-  "path": "conversation-sidecar-host.bat",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/"
-  ]
-}

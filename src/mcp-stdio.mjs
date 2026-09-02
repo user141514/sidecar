@@ -27,6 +27,7 @@ async function forward(message, endpoint, fetchImpl) {
   if (!response.ok) {
     throw new Error(`Local MCP returned HTTP ${response.status}${raw ? `: ${raw}` : ''}`)
   }
+  if (!raw) throw new Error('Local MCP returned an empty response')
   return JSON.parse(raw)
 }
 

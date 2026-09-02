@@ -19,19 +19,6 @@ function waitForExit(child) {
   })
 }
 
-test('Windows native messaging manifest keeps the fixed host and extension identity', async () => {
-  const raw = await read('../install/com.conversation_sidecar.host-win.json')
-  assert.notEqual(raw, '')
-  if (!raw) return
-
-  const manifest = JSON.parse(raw)
-  assert.equal(manifest.name, 'com.conversation_sidecar.host')
-  assert.equal(manifest.path, 'conversation-sidecar-host.bat')
-  assert.equal(manifest.type, 'stdio')
-  assert.deepEqual(manifest.allowed_origins, [
-    'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/'
-  ])
-})
 
 test('Windows native host launcher delegates Chrome stdio to the Node sidecar', async () => {
   const source = await read('../install/conversation-sidecar-host.bat')
@@ -41,13 +28,11 @@ test('Windows native host launcher delegates Chrome stdio to the Node sidecar', 
   assert.doesNotMatch(source, /start\s+/i)
 })
 
-test('Windows installer registers the native messaging manifest for the current user', async () => {
+test('Windows installer delegates registration to the cross-platform Node installer', async () => {
   const source = await read('../install/install-host-win.bat')
   assert.notEqual(source, '')
-  assert.match(source, /HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com\.conversation_sidecar\.host/i)
-  assert.match(source, /\/ve\s+\/t\s+REG_SZ/i)
-  assert.match(source, /%~dp0com\.conversation_sidecar\.host-win\.json/i)
-  assert.match(source, /\/f/i)
+  assert.match(source, /where node\.exe/i)
+  assert.match(source, /node\.exe\s+"%~dp0install-host\.mjs"/i)
 })
 
 test('server starts when executed directly on Windows', { skip: process.platform !== 'win32' }, async () => {

@@ -1,9 +1,0 @@
-{
-  "name": "com.conversation_sidecar.host",
-  "description": "Conversation Sidecar native host",
-  "path": "/home/ad/gitproject/conversation-sidecar/src/server.mjs",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/"
-  ]
-}

@@ -18,12 +18,27 @@ The operational create/send/read path does **not** use an externally exposed CDP
 
 Chrome 136+ disables `--remote-debugging-port` and `--remote-debugging-pipe` for the default Chrome data directory. Google Chrome Stable also no longer accepts `--load-extension` as an unattended local-install path, while Linux external-extension deployment is administrator-controlled.
 
-Therefore V0 has one explicit one-time trust action:
+From a fresh Linux checkout, register the Native Messaging host before loading the extension:
+
+```bash
+cd <checkout>
+node install/install-host.mjs
+```
+
+Node.js 24+ must be available as `node`. The installer generates the current user's manifest at:
+
+```text
+~/.config/google-chrome/NativeMessagingHosts/com.conversation_sidecar.host.json
+```
+
+The manifest contains an absolute path to `<checkout>/install/conversation-sidecar-host`, which starts `<checkout>/src/server.mjs`. Re-run the installer after moving the checkout.
+
+Then complete V0's one explicit Chrome trust action:
 
 1. Open `chrome://extensions` in the user's existing Google Chrome profile.
 2. Enable **Developer mode**.
 3. Choose **Load unpacked**.
-4. Select `/home/ad/gitproject/conversation-sidecar/extension`.
+4. Select `<checkout>/extension`.
 
 Expected fixed extension ID:
 
@@ -32,12 +47,6 @@ cfifihieaffhniimpimnfmignbbdaalb
 ```
 
 After this one installation, Chrome persists the extension in the existing profile. Normal create/send/read operation and future Chrome starts require no recurring remote-debugging approval or sidecar reconnect action.
-
-The Native Messaging host is registered at:
-
-```text
-~/.config/google-chrome/NativeMessagingHosts/com.conversation_sidecar.host.json
-```
 
 When the extension starts, it calls `chrome.runtime.connectNative('com.conversation_sidecar.host')`; Chrome auto-starts `src/server.mjs`. The native connection keeps the sidecar and extension bridge alive.
 
@@ -57,7 +66,13 @@ This creates the current-user Chrome registry entry:
 HKCU\Software\Google\Chrome\NativeMessagingHosts\com.conversation_sidecar.host
 ```
 
-and points it at `install\com.conversation_sidecar.host-win.json`. That manifest launches the relative `install\conversation-sidecar-host.bat`, which delegates stdin/stdout directly to `node.exe ..\src\server.mjs`. Node.js 24+ must therefore be available as `node.exe` on the Windows user PATH visible to Chrome.
+It points to the installer-generated manifest at:
+
+```text
+%USERPROFILE%\AppData\Local\Conversation Sidecar\NativeMessagingHosts\com.conversation_sidecar.host.json
+```
+
+The registry value is the manifest's absolute path. The generated manifest launches the checkout's `install\conversation-sidecar-host.bat`, which delegates stdin/stdout directly to `node.exe ..\src\server.mjs`. Node.js 24+ must therefore be available as `node.exe` on the Windows user PATH visible to Chrome.
 
 The extension still has the same fixed ID. The one-time trust action is:
 
@@ -123,7 +138,7 @@ tunnel-client runtimes connect \
   --profile conversation-sidecar-linux \
   --tunnel-id "$CONTROL_PLANE_TUNNEL_ID" \
   --runtime-api-key env:CONTROL_PLANE_API_KEY \
-  --mcp-command "/usr/bin/node /home/ad/gitproject/conversation-sidecar/src/mcp-stdio.mjs"
+  --mcp-command "node <checkout>/src/mcp-stdio.mjs"
 
 tunnel-client runtimes status conversation-sidecar-linux --json
 ```

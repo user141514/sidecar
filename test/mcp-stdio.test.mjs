@@ -89,3 +89,33 @@ test('stdio adapter emits nothing for a notification acknowledged with HTTP 204'
     await close(server)
   }
 })
+
+test('stdio adapter turns an empty successful MCP response into a JSON-RPC transport error', async () => {
+  const { runStdioAdapter } = await loadModule()
+  assert.equal(typeof runStdioAdapter, 'function')
+  if (typeof runStdioAdapter !== 'function') return
+
+  const server = http.createServer(async (_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': 0 })
+    res.end()
+  })
+  const address = await listen(server)
+  const input = new PassThrough()
+  const output = new PassThrough()
+  let rendered = ''
+  output.on('data', (chunk) => { rendered += chunk.toString('utf8') })
+
+  try {
+    const running = runStdioAdapter({ input, output, endpoint: `http://127.0.0.1:${address.port}/mcp` })
+    input.end(`${JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'ping' })}\n`)
+    await running
+
+    assert.deepEqual(JSON.parse(rendered.trim()), {
+      jsonrpc: '2.0',
+      id: 9,
+      error: { code: -32000, message: 'Local MCP returned an empty response' }
+    })
+  } finally {
+    await close(server)
+  }
+})
