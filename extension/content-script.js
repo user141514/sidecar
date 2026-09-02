@@ -1,4 +1,5 @@
 const POLL_INTERVAL_MS = 500
+const RESPONSE_SETTLE_MS = 5_000
 const MONITOR_TIMEOUT_MS = 20 * 60 * 1000
 
 function sleep(ms) {
@@ -81,6 +82,8 @@ async function emitEvent(event) {
 
 async function monitorTurn({ conversationId, turnId, baselineAssistantCount }) {
   const deadline = Date.now() + MONITOR_TIMEOUT_MS
+  let lastText = ''
+  let lastTextChangedAt = null
   try {
     while (Date.now() < deadline) {
       await sleep(POLL_INTERVAL_MS)
@@ -88,16 +91,24 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount }) {
       const hasNewResponse = messages.length > baselineAssistantCount
       const last = messages.at(-1)
       const text = (last?.innerText || last?.textContent || '').trim()
-      if (hasNewResponse && !isGenerating() && text) {
-        await emitEvent({
-          type: 'response_completed',
-          conversationId,
-          turnId,
-          text,
-          externalUrl: location.href
-        })
-        return
+
+      if (!hasNewResponse || !text) continue
+      if (text !== lastText) {
+        lastText = text
+        lastTextChangedAt = Date.now()
+        continue
       }
+      if (isGenerating()) continue
+      if (lastTextChangedAt === null || Date.now() - lastTextChangedAt < RESPONSE_SETTLE_MS) continue
+
+      await emitEvent({
+        type: 'response_completed',
+        conversationId,
+        turnId,
+        text,
+        externalUrl: location.href
+      })
+      return
     }
     await emitEvent({
       type: 'error',

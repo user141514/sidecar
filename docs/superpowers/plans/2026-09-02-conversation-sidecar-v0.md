@@ -119,5 +119,16 @@
 - [x] Treat `/g/g-p-.../c/...` as a stable conversation URL for restart/reattach.
 - [x] Add `project_pin` to persist a default Project locally across sidecar restarts.
 - [x] Let an explicit `project_url` override the pinned default for one create.
-- [ ] Do not live-test Project conversation creation until explicitly authorized; when authorized, apply the staggered 15–20 second launch rule for probe-style requests.
+- [x] Live-test one pinned Project conversation only after explicit authorization: create once, wait 17 seconds, send one meaningful prompt, then observe completion only through `conversation_read`.
+- [x] Confirm the resulting canonical thread URL remains inside the pinned Project as `/g/g-p-.../c/...`.
+- [ ] Re-test response capture after the content-script completion-settle fix is loaded; do not send another live prompt before extension reload.
 - [ ] Keep automatic sidebar Project discovery and Project creation as a separate follow-up; do not mix brittle UI discovery into the URL-based pinning path.
+
+### Task 12: Streaming completion stability
+
+**Files:** `extension/content-script.js`, `test/content-script-runtime.test.mjs`
+
+- [x] Reproduce the real Project-page failure where a missing/unrecognized generation control caused `response_completed` to capture only the first streamed text fragment.
+- [x] Require assistant text to remain unchanged for 5 seconds, in addition to the existing generation-control check, before emitting a terminal completion.
+- [x] Cover streaming text with no visible stop control in an executable content-script runtime test.
+- [ ] Perform at most one slow live re-test after extension reload; no additional probe is needed if that single response is captured completely.
