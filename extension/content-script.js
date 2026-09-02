@@ -1,5 +1,6 @@
 const POLL_INTERVAL_MS = 500
 const RESPONSE_SETTLE_MS = 5_000
+const FALLBACK_RESPONSE_SETTLE_MS = 45_000
 const MONITOR_TIMEOUT_MS = 20 * 60 * 1000
 
 function sleep(ms) {
@@ -72,8 +73,21 @@ function isGenerating() {
   if (document.querySelector('[data-testid="stop-button"]')) return true
   return [...document.querySelectorAll('button')].some((button) => {
     const label = (button.getAttribute('aria-label') || button.textContent || '').trim().toLowerCase()
-    return label.includes('stop streaming') || label.includes('stop generating') || label.includes('停止生成') || label === 'stop'
+    return label.includes('stop streaming') ||
+      label.includes('stop generating') ||
+      label.includes('stop responding') ||
+      label.includes('stop response') ||
+      label.includes('停止生成') ||
+      label === 'stop'
   })
+}
+
+function hasCompletionAction(message) {
+  const turn = message?.closest?.('[data-testid^="conversation-turn-"]')
+  if (!turn?.querySelector) return false
+  return Boolean(turn.querySelector(
+    'button[data-testid="copy-turn-action-button"], button[aria-label*="Copy response" i]'
+  ))
 }
 
 async function emitEvent(event) {
@@ -99,7 +113,10 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount }) {
         continue
       }
       if (isGenerating()) continue
-      if (lastTextChangedAt === null || Date.now() - lastTextChangedAt < RESPONSE_SETTLE_MS) continue
+      if (lastTextChangedAt === null) continue
+      const stableForMs = Date.now() - lastTextChangedAt
+      if (stableForMs < RESPONSE_SETTLE_MS) continue
+      if (!hasCompletionAction(last) && stableForMs < FALLBACK_RESPONSE_SETTLE_MS) continue
 
       await emitEvent({
         type: 'response_completed',
