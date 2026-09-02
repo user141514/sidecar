@@ -228,7 +228,7 @@ async function startDefault() {
   })
 }
 
-if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   startDefault().catch((error) => {
     console.error(error instanceof Error ? error.stack : String(error))
     process.exitCode = 1

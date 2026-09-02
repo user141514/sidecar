@@ -41,6 +41,39 @@ The Native Messaging host is registered at:
 
 When the extension starts, it calls `chrome.runtime.connectNative('com.conversation_sidecar.host')`; Chrome auto-starts `src/server.mjs`. The native connection keeps the sidecar and extension bridge alive.
 
+### Windows registration
+
+The browser protocol and extension are shared with Linux. Windows only changes the Native Messaging installation boundary.
+
+From the Windows checkout, run:
+
+```bat
+install\install-host-win.bat
+```
+
+This creates the current-user Chrome registry entry:
+
+```text
+HKCU\Software\Google\Chrome\NativeMessagingHosts\com.conversation_sidecar.host
+```
+
+and points it at `install\com.conversation_sidecar.host-win.json`. That manifest launches the relative `install\conversation-sidecar-host.bat`, which delegates stdin/stdout directly to `node.exe ..\src\server.mjs`. Node.js 24+ must therefore be available as `node.exe` on the Windows user PATH visible to Chrome.
+
+The extension still has the same fixed ID. The one-time trust action is:
+
+1. Open `chrome://extensions` in the existing signed-in Chrome profile.
+2. Enable **Developer mode**.
+3. Choose **Load unpacked**.
+4. Select `<checkout>\extension`.
+
+Expected extension ID:
+
+```text
+cfifihieaffhniimpimnfmignbbdaalb
+```
+
+No CDP port, secondary Chrome profile, cookie copy, or recurring browser approval is introduced on Windows.
+
 ## Browser placement
 
 The first `conversation_create` establishes one sidecar-owned normal Chrome window, `window0`, using the existing signed-in profile. That first conversation uses window0's initial tab. Every later `conversation_create` uses `chrome.tabs.create({ windowId: window0 })`; it must not create another Chrome window. If the user closes window0, the next create establishes a replacement window0.
