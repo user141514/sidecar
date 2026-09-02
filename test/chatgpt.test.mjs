@@ -55,6 +55,11 @@ class FakeBridge extends EventEmitter {
   constructor() {
     super()
     this.requests = []
+    this.ackedEvents = []
+  }
+
+  ackEvent(eventId) {
+    this.ackedEvents.push(eventId)
   }
 
   async request(method, params) {
@@ -112,6 +117,36 @@ test('a fresh sidecar process sends to a ledger-backed conversation and records 
   const state = await waitForConversationStatus(restartedHost, created.id, 'completed')
   assert.equal(state.status, 'completed')
   assert.equal(state.latestResponse, 'AFTER_RESTART')
+})
+
+test('terminal extension events are durably recorded once before acknowledgement', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  const host = new ChatGptConversationHost({ bridge, store })
+  const created = await host.create()
+  const event = {
+    eventId: 'terminal:conv_test:turn_once:response_completed',
+    type: 'response_completed',
+    conversationId: created.id,
+    turnId: 'turn_once',
+    text: 'ONCE',
+    externalUrl: 'https://chatgpt.com/c/test'
+  }
+
+  bridge.emit('event', event)
+  await new Promise((resolve) => setImmediate(resolve))
+  bridge.emit('event', event)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(
+    store.events.filter((item) => item.type === 'response_completed' && item.turnId === 'turn_once').length,
+    1
+  )
+  assert.deepEqual(bridge.ackedEvents, [event.eventId, event.eventId])
 })
 
 test('extension-backed host creates a dedicated window, returns after send, and persists later completion events', async () => {

@@ -74,7 +74,7 @@ export class NativeMessageChannel extends EventEmitter {
 }
 
 export class ExtensionBridge extends EventEmitter {
-  constructor({ channel, requestTimeoutMs = 15_000 }) {
+  constructor({ channel, requestTimeoutMs = 30_000 }) {
     super()
     this.channel = channel
     this.requestTimeoutMs = requestTimeoutMs
@@ -82,6 +82,11 @@ export class ExtensionBridge extends EventEmitter {
     channel.on('message', (message) => this.#handle(message))
     channel.on('close', () => this.#rejectAll(new Error('Chrome extension bridge disconnected')))
     channel.on('error', (error) => this.emit('error', error))
+  }
+
+  ackEvent(eventId) {
+    if (typeof eventId !== 'string' || !eventId) return
+    this.channel.send({ kind: 'event_ack', eventId })
   }
 
   request(method, params = {}) {
@@ -109,7 +114,10 @@ export class ExtensionBridge extends EventEmitter {
     }
 
     if (message?.kind === 'event' && message.event && typeof message.event === 'object') {
-      this.emit('event', message.event)
+      this.emit('event', {
+        ...message.event,
+        eventId: typeof message.eventId === 'string' ? message.eventId : message.event.eventId
+      })
       return
     }
 

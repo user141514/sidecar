@@ -2,6 +2,7 @@ const NATIVE_HOST = 'com.conversation_sidecar.host'
 const CHATGPT_URL = 'https://chatgpt.com/'
 const STORAGE_PREFIX = 'conversation:'
 const PENDING_PREFIX = 'pending:'
+const OUTBOX_PREFIX = 'outbox:'
 const WINDOW0_KEY = 'window0'
 
 let nativePort = null
@@ -13,6 +14,14 @@ function storageKey(conversationId) {
 
 function pendingKey(conversationId) {
   return `${PENDING_PREFIX}${conversationId}`
+}
+
+function terminalEventId(event) {
+  return `terminal:${event.conversationId}:${event.turnId}:${event.type}`
+}
+
+function outboxKey(eventId) {
+  return `${OUTBOX_PREFIX}${eventId}`
 }
 
 function stableConversationUrl(url) {
@@ -83,6 +92,7 @@ function connectNative() {
       scheduleReconnect()
     })
     port.postMessage({ kind: 'bridge_ready', extensionVersion: chrome.runtime.getManifest().version })
+    void flushOutbox()
   } catch {
     nativePort = null
     scheduleReconnect()
@@ -111,6 +121,31 @@ async function loadPendingTurn(conversationId) {
 
 async function clearPendingTurn(conversationId) {
   await chrome.storage.local.remove(pendingKey(conversationId))
+}
+
+async function saveOutboxEvent(record) {
+  await chrome.storage.local.set({ [outboxKey(record.eventId)]: record })
+}
+
+async function clearOutboxEvent(eventId) {
+  await chrome.storage.local.remove(outboxKey(eventId))
+}
+
+async function loadOutboxEvents() {
+  const stored = await chrome.storage.local.get(null)
+  return Object.entries(stored)
+    .filter(([key, value]) => key.startsWith(OUTBOX_PREFIX) && value?.eventId && value?.event)
+    .map(([, value]) => value)
+}
+
+async function flushOutbox() {
+  try {
+    for (const record of await loadOutboxEvents()) {
+      postNative({ kind: 'event', eventId: record.eventId, event: record.event })
+    }
+  } catch {
+    scheduleReconnect()
+  }
 }
 
 async function loadWindow0() {
@@ -180,13 +215,18 @@ async function resolveConversationAttachment(conversationId, requestedUrl) {
       url: chooseConversationUrl(tabPageUrl(liveTab), expectedUrl)
     }
     await saveConversation(conversationId, state)
-    return { state, reattached: false }
+    return {
+      state,
+      reattached: false,
+      reloadOnReadinessFailure: liveTab.status === 'complete'
+    }
   }
 
   const window0 = await ensureWindow0(expectedUrl)
   let tab = window0.created
     ? window0.tab
     : await findMatchingConversationTab(window0.windowId, expectedUrl)
+  const matchedExistingTab = !window0.created && Boolean(tab)
 
   if (!tab) {
     tab = await chrome.tabs.create({
@@ -206,7 +246,11 @@ async function resolveConversationAttachment(conversationId, requestedUrl) {
     url: chooseConversationUrl(tabPageUrl(tab), expectedUrl)
   }
   await saveConversation(conversationId, state)
-  return { state, reattached: true }
+  return {
+    state,
+    reattached: true,
+    reloadOnReadinessFailure: matchedExistingTab && tab.status === 'complete'
+  }
 }
 
 async function pendingTurnForTab(tabId) {
@@ -219,9 +263,9 @@ async function pendingTurnForTab(tabId) {
   return null
 }
 
-async function waitForContentScript(tabId) {
+async function waitForContentScript(tabId, maxAttempts = 80) {
   let lastError = null
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       const response = await chrome.tabs.sendMessage(tabId, { type: 'sidecar_ping' })
       if (response?.ready === true) return
@@ -254,12 +298,18 @@ async function createConversation(params) {
 }
 
 async function sendConversation(params) {
-  const { state, reattached } = await resolveConversationAttachment(
+  const { state, reattached, reloadOnReadinessFailure } = await resolveConversationAttachment(
     params.conversationId,
     params.externalUrl
   )
 
-  await waitForContentScript(state.tabId)
+  try {
+    await waitForContentScript(state.tabId, reloadOnReadinessFailure ? 8 : 80)
+  } catch (error) {
+    if (!reloadOnReadinessFailure) throw error
+    await chrome.tabs.reload(state.tabId)
+    await waitForContentScript(state.tabId)
+  }
   const response = await chrome.tabs.sendMessage(state.tabId, {
     type: 'conversation_send',
     conversationId: params.conversationId,
@@ -312,6 +362,13 @@ async function executeRequest(message) {
 }
 
 async function handleNativeRequest(message) {
+  if (message?.kind === 'event_ack') {
+    if (typeof message.eventId === 'string' && message.eventId) {
+      await clearOutboxEvent(message.eventId)
+    }
+    return
+  }
+
   if (message?.kind !== 'request' || typeof message.requestId !== 'string') return
   try {
     const result = await executeRequest(message)
@@ -350,21 +407,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     }
 
+    const forwardedEvent = {
+      ...event,
+      tabId: sender.tab?.id,
+      windowId: sender.tab?.windowId
+    }
+
     if (event.type === 'response_completed' || event.type === 'error') {
       const pending = await loadPendingTurn(event.conversationId)
       if (!pending || pending.turnId !== event.turnId) return
+      const eventId = terminalEventId(event)
+      await saveOutboxEvent({ eventId, event: forwardedEvent })
       await clearPendingTurn(event.conversationId)
+      await flushOutbox()
+      return
     }
 
     try {
-      postNative({
-        kind: 'event',
-        event: {
-          ...event,
-          tabId: sender.tab?.id,
-          windowId: sender.tab?.windowId
-        }
-      })
+      postNative({ kind: 'event', event: forwardedEvent })
     } catch {
       scheduleReconnect()
     }

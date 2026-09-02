@@ -11,7 +11,7 @@ export class ChatGptConversationHost {
     this.bridge = bridge
     this.store = store
     bridge.on('event', (event) => {
-      void this.#recordExtensionEvent(event)
+      void this.#handleExtensionEvent(event)
     })
   }
 
@@ -97,28 +97,47 @@ export class ChatGptConversationHost {
     }
   }
 
+  async #handleExtensionEvent(event) {
+    const recorded = await this.#recordExtensionEvent(event)
+    if (!recorded || typeof event?.eventId !== 'string' || !event.eventId) return
+    try {
+      this.bridge.ackEvent(event.eventId)
+    } catch {
+      // The extension keeps the event in its durable outbox and will replay it.
+    }
+  }
+
   async #recordExtensionEvent(event) {
     const conversationId = event?.conversationId
-    if (typeof conversationId !== 'string') return
-    if (!await this.#loadConversation(conversationId)) return
+    if (typeof conversationId !== 'string') return false
+    const conversation = await this.#loadConversation(conversationId)
+    if (!conversation) return false
+    if (typeof event.eventId === 'string' && conversation.events?.some((item) => item.eventId === event.eventId)) {
+      return true
+    }
 
     if (event.type === 'response_completed') {
       await this.store.append(conversationId, {
+        eventId: event.eventId,
         type: 'response_completed',
         turnId: event.turnId,
         text: event.text ?? '',
         externalUrl: event.externalUrl
       })
-      return
+      return true
     }
 
     if (event.type === 'error') {
       await this.store.append(conversationId, {
+        eventId: event.eventId,
         type: 'error',
         turnId: event.turnId,
         message: event.message ?? 'Chrome extension error',
         externalUrl: event.externalUrl
       })
+      return true
     }
+
+    return false
   }
 }

@@ -5,8 +5,9 @@ import vm from 'node:vm'
 
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
 
-function makeHarness({ storage = {}, windows = [], tabs = [] } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [] } = {}) {
   const storageState = { ...storage }
+  const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
   const tabMap = new Map(tabs.map((tab) => [tab.id, { ...tab }]))
   const nativeMessages = []
@@ -14,7 +15,10 @@ function makeHarness({ storage = {}, windows = [], tabs = [] } = {}) {
   const sentToTabs = []
   const createdTabs = []
   const createdWindows = []
+  const reloadedTabs = []
   let nativeRequestListener = null
+  let nativeDisconnectListener = null
+  let failNativeEventPosts = false
   let nextTabId = 1000
   let nextWindowId = 2000
 
@@ -24,8 +28,15 @@ function makeHarness({ storage = {}, windows = [], tabs = [] } = {}) {
         nativeRequestListener = listener
       }
     },
-    onDisconnect: { addListener() {} },
+    onDisconnect: {
+      addListener(listener) {
+        nativeDisconnectListener = listener
+      }
+    },
     postMessage(message) {
+      if (failNativeEventPosts && message?.kind === 'event') {
+        throw new Error('Native host disconnected during event delivery')
+      }
       nativeMessages.push(message)
     }
   }
@@ -97,11 +108,19 @@ function makeHarness({ storage = {}, windows = [], tabs = [] } = {}) {
         createdTabs.push(tab)
         return { ...tab }
       },
+      async reload(tabId) {
+        if (!tabMap.has(tabId)) throw new Error(`No tab ${tabId}`)
+        reloadedTabs.push(tabId)
+        staleContentScriptTabs.delete(tabId)
+      },
       async sendMessage(tabId, message) {
         const tab = tabMap.get(tabId)
         if (!tab) throw new Error(`No tab ${tabId}`)
         sentToTabs.push({ tabId, message })
-        if (message.type === 'sidecar_ping') return { ready: true, url: tab.url }
+        if (message.type === 'sidecar_ping') {
+          if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
+          return { ready: true, url: tab.url }
+        }
         if (message.type === 'conversation_send') {
           return { accepted: true, url: tab.url, baselineAssistantCount: 0 }
         }
@@ -146,15 +165,67 @@ function makeHarness({ storage = {}, windows = [], tabs = [] } = {}) {
     }
   }
 
+  async function sendNativeMessage(message) {
+    if (!nativeRequestListener) throw new Error('Native request listener was not registered')
+    nativeRequestListener(message)
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+  }
+
+  async function reconnectNative() {
+    failNativeEventPosts = false
+    if (!nativeDisconnectListener) throw new Error('Native disconnect listener was not registered')
+    nativeDisconnectListener()
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+  }
+
   return {
     storageState,
     sentToTabs,
     createdTabs,
     createdWindows,
+    reloadedTabs,
+    nativeMessages,
     request,
-    emitRuntimeMessage
+    emitRuntimeMessage,
+    sendNativeMessage,
+    reconnectNative,
+    setFailNativeEventPosts(value) {
+      failNativeEventPosts = value
+    }
   }
 }
+
+test('send reloads a matching tab whose content script was invalidated by extension reload', async () => {
+  const externalUrl = 'https://chatgpt.com/c/pre-reload-123'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl, status: 'complete' }],
+    staleContentScriptTabIds: [20]
+  })
+
+  const response = await harness.request('conversation_send', {
+    conversationId: 'conv_existing',
+    turnId: 'turn_reload',
+    text: 'continue',
+    externalUrl
+  })
+
+  assert.equal(response.ok, true)
+  assert.deepEqual(harness.reloadedTabs, [20])
+  assert.equal(harness.createdTabs.length, 0)
+  assert.equal(
+    harness.sentToTabs.some(({ tabId, message }) => tabId === 20 && message.type === 'conversation_send'),
+    true
+  )
+})
 
 test('send reattaches a stale tab binding to an already-open matching ChatGPT conversation', async () => {
   const externalUrl = 'https://chatgpt.com/c/persistent-123'
@@ -234,6 +305,51 @@ test('send replaces stale physical window0 and attaches the old logical conversa
     harness.storageState['conversation:conv_existing'].tabId,
     harness.createdWindows[0].tabs[0].id
   )
+})
+
+test('terminal events stay in a durable outbox until the native host acknowledges them', async () => {
+  const externalUrl = 'https://chatgpt.com/c/outbox-123'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 30, url: externalUrl },
+      'pending:conv_existing': {
+        conversationId: 'conv_existing',
+        turnId: 'turn_outbox',
+        tabId: 30,
+        baselineAssistantCount: 0,
+        startedAt: 1
+      }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 30, windowId: 10, url: externalUrl }]
+  })
+
+  harness.setFailNativeEventPosts(true)
+  await harness.emitRuntimeMessage({
+    kind: 'conversation_event',
+    event: {
+      type: 'response_completed',
+      conversationId: 'conv_existing',
+      turnId: 'turn_outbox',
+      text: 'durable result',
+      externalUrl
+    }
+  }, { tab: { id: 30, windowId: 10, url: externalUrl } })
+
+  const eventId = 'terminal:conv_existing:turn_outbox:response_completed'
+  const outboxKey = `outbox:${eventId}`
+  assert.equal(harness.storageState['pending:conv_existing'], undefined)
+  assert.equal(harness.storageState[outboxKey]?.eventId, eventId)
+  assert.equal(harness.storageState[outboxKey]?.event?.text, 'durable result')
+
+  await harness.reconnectNative()
+  const replayed = harness.nativeMessages.find((message) => message.kind === 'event' && message.eventId === eventId)
+  assert.equal(replayed?.event?.text, 'durable result')
+  assert.notEqual(harness.storageState[outboxKey], undefined)
+
+  await harness.sendNativeMessage({ kind: 'event_ack', eventId })
+  assert.equal(harness.storageState[outboxKey], undefined)
 })
 
 test('completion events persist the canonical ChatGPT URL before forwarding the event', async () => {

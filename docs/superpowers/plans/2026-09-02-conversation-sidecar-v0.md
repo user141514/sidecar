@@ -88,10 +88,24 @@
 - [x] Resolve browser attachment before every send: reuse the registered live tab when valid; otherwise match the stable URL inside logical window0; otherwise reopen that URL in window0 and persist the new `tabId/windowId`.
 - [x] If the physical window0 no longer exists, allow `ensureWindow0()` to create one replacement physical window and attach the old logical conversation to its initial tab.
 - [x] Prove sidecar-process restart recovery and stale-tab reattachment with automated tests before implementation.
-- [ ] Do not force-close or restart the user's current Chrome during automated verification; real browser-restart recovery remains a natural-future live gate.
+- [x] Restart only the native sidecar process, then prove the same logical conversation continues on the same canonical ChatGPT URL without restarting Chrome.
+- [x] Keep full Chrome-restart recovery as a natural-future live gate rather than forcing a browser restart for testing.
+- [x] Recover a pre-extension-reload matching tab by reloading that settled tab when its content script is no longer reachable.
+- [x] Keep the native bridge request timeout above the extension's maximum content-script readiness budget.
 
-### Task 9: Git boundary
+### Task 9: Durable terminal-event delivery
 
-- [ ] Initialize this directory as its own Git repository when workspace tooling permits.
-- [ ] Create branch `feat/chatgpt-conversation-linux`.
-- [ ] Confirm no DevSpace or Orca source file changed.
+**Files:** `extension/service-worker.js`, `src/native-messaging.mjs`, `src/chatgpt.mjs`, `test/extension-runtime.test.mjs`, `test/native-messaging.test.mjs`, `test/chatgpt.test.mjs`
+
+- [x] Persist `response_completed` / `error` in `chrome.storage.local` outbox before clearing the pending turn.
+- [x] Replay outbox events after Native Messaging reconnect.
+- [x] Acknowledge terminal events only after the sidecar has durably recorded them.
+- [x] Deduplicate replayed terminal events by stable `eventId` before acknowledging them.
+- [x] Delete an outbox record only after its `event_ack` arrives from the sidecar.
+
+### Task 10: Git boundary
+
+- [x] Initialize this directory as its own Git repository.
+- [x] Create branch `feat/chatgpt-conversation-linux`.
+- [x] Push `feat/chatgpt-conversation-linux` to `origin`.
+- [x] Keep DevSpace and Orca source outside this repository and untouched by this feature work.
