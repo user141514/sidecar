@@ -6,6 +6,19 @@ function turnId() {
   return `turn_${Date.now()}_${randomUUID().slice(0, 8)}`
 }
 
+function normalizeProjectHomeUrl(value) {
+  if (typeof value !== 'string' || !value) return null
+  const parsed = new URL(value)
+  if (parsed.origin !== 'https://chatgpt.com') {
+    throw new Error('project_url must use https://chatgpt.com')
+  }
+  const path = parsed.pathname.replace(/\/+$/, '')
+  if (!/^\/g\/g-p-[^/]+\/project$/.test(path)) {
+    throw new Error('project_url must be a ChatGPT Project home URL')
+  }
+  return `${parsed.origin}${path}`
+}
+
 export class ChatGptConversationHost {
   constructor({ bridge, store }) {
     this.bridge = bridge
@@ -15,22 +28,30 @@ export class ChatGptConversationHost {
     })
   }
 
-  async create() {
+  async pinProject(projectUrl) {
+    const normalized = normalizeProjectHomeUrl(projectUrl)
+    await this.store.setDefaultProjectUrl(normalized)
+    return { projectUrl: normalized }
+  }
+
+  async create({ projectUrl } = {}) {
+    const pinnedProjectUrl = projectUrl ? null : await this.store.getDefaultProjectUrl()
+    const createUrl = normalizeProjectHomeUrl(projectUrl || pinnedProjectUrl) || DEFAULT_CHATGPT_URL
     const created = await this.store.create({
       backend: 'chatgpt-web-extension',
-      externalUrl: DEFAULT_CHATGPT_URL
+      externalUrl: createUrl
     })
 
     try {
       const browser = await this.bridge.request('conversation_create', {
         conversationId: created.id,
-        url: DEFAULT_CHATGPT_URL
+        url: createUrl
       })
       await this.store.append(created.id, {
         type: 'browser_attached',
         windowId: browser.windowId,
         tabId: browser.tabId,
-        externalUrl: browser.url || DEFAULT_CHATGPT_URL
+        externalUrl: browser.url || createUrl
       })
       return { ...created, windowId: browser.windowId, tabId: browser.tabId }
     } catch (error) {

@@ -29,8 +29,10 @@ function stableConversationUrl(url) {
   try {
     const parsed = new URL(url)
     if (parsed.origin !== 'https://chatgpt.com') return null
-    const match = parsed.pathname.match(/^\/c\/[^/]+/)
-    return match ? `${parsed.origin}${match[0]}` : null
+    const rootMatch = parsed.pathname.match(/^\/c\/[^/]+/)
+    if (rootMatch) return `${parsed.origin}${rootMatch[0]}`
+    const projectMatch = parsed.pathname.match(/^\/g\/g-p-[^/]+\/c\/[^/]+/)
+    return projectMatch ? `${parsed.origin}${projectMatch[0]}` : null
   } catch {
     return null
   }

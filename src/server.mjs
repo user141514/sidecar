@@ -7,9 +7,23 @@ import { ConversationStore } from './store.mjs'
 
 const TOOLS = [
   {
+    name: 'project_pin',
+    description: 'Persist one ChatGPT Project home as the default destination for future conversation_create calls.',
+    inputSchema: {
+      type: 'object',
+      properties: { project_url: { type: 'string' } },
+      required: ['project_url'],
+      additionalProperties: false
+    }
+  },
+  {
     name: 'conversation_create',
-    description: 'Create a new ChatGPT conversation in the already-running signed-in Chrome profile.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+    description: 'Create a new ChatGPT conversation in the already-running signed-in Chrome profile, optionally inside a specific ChatGPT Project.',
+    inputSchema: {
+      type: 'object',
+      properties: { project_url: { type: 'string' } },
+      additionalProperties: false
+    }
   },
   {
     name: 'conversation_send',
@@ -68,7 +82,15 @@ function writeJson(res, statusCode, body) {
 }
 
 async function dispatchTool(conversationHost, name, args = {}) {
-  if (name === 'conversation_create') return conversationHost.create()
+  if (name === 'project_pin') {
+    if (typeof args.project_url !== 'string') {
+      throw new TypeError('project_pin requires project_url')
+    }
+    return conversationHost.pinProject(args.project_url)
+  }
+  if (name === 'conversation_create') {
+    return conversationHost.create({ projectUrl: args.project_url })
+  }
   if (name === 'conversation_send') {
     if (typeof args.conversation_id !== 'string' || typeof args.text !== 'string') {
       throw new TypeError('conversation_send requires conversation_id and text')

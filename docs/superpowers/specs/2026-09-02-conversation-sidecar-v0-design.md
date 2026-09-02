@@ -2,7 +2,7 @@
 
 ## Goal
 
-Prove one thing only: one external ChatGPT web conversation can be created in the user's existing Chrome, prompted, monitored after the caller returns, persisted locally, and read back through three MCP tools without recurring user interaction.
+Prove one thing only: one external ChatGPT web conversation can be created in the user's existing Chrome, prompted, monitored after the caller returns, persisted locally, and read back through MCP without recurring user interaction. A later bounded extension may pin one ChatGPT Project as the default creation target without changing the conversation identity model.
 
 ## Hard boundaries
 
@@ -51,9 +51,9 @@ Sidecar -> extension:
 Extension -> sidecar:
 
 - request responses correlated by `requestId`
-- asynchronous `conversation_event` records such as `response_completed` or `error`
+- asynchronous terminal events such as `response_completed` or `error`, each carrying a stable `eventId`
 
-The service worker reconnects its native messaging port after disconnect. Chrome launches the native host process from the registered user-level native host manifest.
+The service worker persists terminal events in a local outbox before clearing pending-turn state. The sidecar deduplicates by `eventId`, durably appends the event, then returns `event_ack`; only that acknowledgement removes the extension outbox entry. The service worker reconnects its native messaging port after disconnect and replays unacknowledged outbox events. Chrome launches the native host process from the registered user-level native host manifest.
 
 ## Browser identity and window0 invariant
 
@@ -101,10 +101,17 @@ window0         != windowId
 
 A completed browser event updates the extension's persisted conversation URL before forwarding the event to the native host, so a later browser restart can recover the old ChatGPT conversation even if its original tab ID no longer exists.
 
+## Project-scoped creation
+
+A ChatGPT Project home is represented by its canonical URL, for example `https://chatgpt.com/g/g-p-<project-id>[-slug]/project`. `project_pin` persists one such URL locally as the default creation target. `conversation_create` may also receive an explicit `project_url` for a one-off override. Opening the Project home in a fresh managed tab provides the new-chat composer for that Project; once the first prompt is accepted, the durable thread identity is the canonical `/g/g-p-.../c/...` URL.
+
+Project name discovery and automatic Project creation remain separate UI-automation concerns and are not required for URL-based pinning.
+
 ## MCP surface
 
-The native host binds an HTTP MCP endpoint on localhost with exactly three tools:
+The native host binds an HTTP MCP endpoint on localhost with four tools:
 
+- `project_pin`
 - `conversation_create`
 - `conversation_send`
 - `conversation_read`
@@ -145,4 +152,4 @@ V0 succeeds only when all of these are observed on the real Linux host:
 
 ## Deferred
 
-Windows/Edge, ChatGPT Project selection, simultaneous sends, semantic search, summaries, task protocols, supervisor logic, and remote MCP exposure/authentication are deferred until V0 passes.
+Windows/Edge, automatic ChatGPT Project discovery/creation, simultaneous sends, semantic search, summaries, task protocols, supervisor logic, and remote MCP exposure/authentication are deferred until V0 passes.

@@ -47,11 +47,20 @@ The first `conversation_create` establishes one sidecar-owned normal Chrome wind
 
 ## MCP tools
 
-- `conversation_create` — create a ChatGPT conversation tab inside managed `window0`.
+- `project_pin` — persist one ChatGPT Project home URL as the default destination for future creates.
+- `conversation_create` — create a ChatGPT conversation tab inside managed `window0`; optional `project_url` overrides the pinned Project for that create.
 - `conversation_send` — submit one prompt and return after the browser accepted it.
 - `conversation_read` — read durable status/raw response from the local JSONL ledger only.
 
-Local data lives under `data/conversations/<conversation-id>/` and is ignored by Git.
+A Project home URL has the form:
+
+```text
+https://chatgpt.com/g/g-p-<project-id>[-slug]/project
+```
+
+After `project_pin`, later `conversation_create` calls without arguments start from that Project home. Project-scoped threads are persisted and reattached using their canonical `/g/g-p-.../c/...` URLs. Automatic sidebar project discovery/creation is intentionally separate from this URL-based pinning path.
+
+Local conversation data and the pinned Project configuration live under `data/conversations/` and are ignored by Git.
 
 ## Secure MCP Tunnel
 

@@ -227,6 +227,30 @@ test('send reloads a matching tab whose content script was invalidated by extens
   )
 })
 
+test('send reattaches a project conversation to an already-open matching project thread', async () => {
+  const externalUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-456'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_project': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 30, windowId: 10, url: externalUrl }]
+  })
+
+  const response = await harness.request('conversation_send', {
+    conversationId: 'conv_project',
+    turnId: 'turn_project',
+    text: 'continue',
+    externalUrl
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.reattached, true)
+  assert.equal(harness.createdTabs.length, 0)
+  assert.equal(harness.storageState['conversation:conv_project'].tabId, 30)
+})
+
 test('send reattaches a stale tab binding to an already-open matching ChatGPT conversation', async () => {
   const externalUrl = 'https://chatgpt.com/c/persistent-123'
   const harness = makeHarness({

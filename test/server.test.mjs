@@ -10,8 +10,22 @@ async function loadServerModule() {
 }
 
 class FakeHost {
-  async create() {
-    return { id: 'conv_1', status: 'idle', externalUrl: 'https://chatgpt.com/' }
+  constructor() {
+    this.createCalls = []
+  }
+
+  async create(options = {}) {
+    this.createCalls.push(options)
+    return {
+      id: 'conv_1',
+      status: 'idle',
+      externalUrl: options.projectUrl || 'https://chatgpt.com/'
+    }
+  }
+
+  async pinProject(projectUrl) {
+    this.pinnedProjectUrl = projectUrl
+    return { projectUrl }
   }
 
   async send(id, text) {
@@ -32,7 +46,7 @@ async function rpc(baseUrl, body) {
   return { status: response.status, body: response.status === 204 ? null : await response.json() }
 }
 
-test('server exposes health and exactly three conversation tools', async () => {
+test('server exposes health, project pinning, and the three conversation tools', async () => {
   const { createSidecarServer } = await loadServerModule()
   assert.equal(typeof createSidecarServer, 'function')
   if (typeof createSidecarServer !== 'function') return
@@ -57,7 +71,7 @@ test('server exposes health and exactly three conversation tools', async () => {
     const listed = await rpc(baseUrl, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
     assert.deepEqual(
       listed.body.result.tools.map((tool) => tool.name),
-      ['conversation_create', 'conversation_send', 'conversation_read']
+      ['project_pin', 'conversation_create', 'conversation_send', 'conversation_read']
     )
   } finally {
     await app.close()
@@ -69,14 +83,29 @@ test('tools/call dispatches create, send, and read to the conversation host', as
   assert.equal(typeof createSidecarServer, 'function')
   if (typeof createSidecarServer !== 'function') return
 
-  const app = createSidecarServer({ conversationHost: new FakeHost() })
+  const host = new FakeHost()
+  const app = createSidecarServer({ conversationHost: host })
   const address = await app.listen({ host: '127.0.0.1', port: 0 })
   const baseUrl = `http://127.0.0.1:${address.port}`
   try {
+    const projectUrl = 'https://chatgpt.com/g/g-p-project123-agent/project'
+    const pinned = await rpc(baseUrl, {
+      jsonrpc: '2.0', id: 9, method: 'tools/call', params: {
+        name: 'project_pin',
+        arguments: { project_url: projectUrl }
+      }
+    })
+    assert.equal(JSON.parse(pinned.body.result.content[0].text).projectUrl, projectUrl)
+    assert.equal(host.pinnedProjectUrl, projectUrl)
+
     const created = await rpc(baseUrl, {
-      jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'conversation_create', arguments: {} }
+      jsonrpc: '2.0', id: 10, method: 'tools/call', params: {
+        name: 'conversation_create',
+        arguments: { project_url: projectUrl }
+      }
     })
     assert.equal(JSON.parse(created.body.result.content[0].text).id, 'conv_1')
+    assert.deepEqual(host.createCalls, [{ projectUrl }])
 
     const sent = await rpc(baseUrl, {
       jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'conversation_send', arguments: { conversation_id: 'conv_1', text: 'hello' } }

@@ -56,6 +56,24 @@ test('ConversationStore persists append-only events and reconstructs latest stat
   }
 })
 
+test('ConversationStore persists a default ChatGPT Project URL across sidecar restarts', async () => {
+  const { ConversationStore } = await loadStoreModule()
+  assert.equal(typeof ConversationStore, 'function')
+  if (typeof ConversationStore !== 'function') return
+
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-store-'))
+  try {
+    const projectUrl = 'https://chatgpt.com/g/g-p-project123-agent/project'
+    const first = new ConversationStore(root)
+    await first.setDefaultProjectUrl(projectUrl)
+
+    const restarted = new ConversationStore(root)
+    assert.equal(await restarted.getDefaultProjectUrl(), projectUrl)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('ConversationStore records errors as durable terminal state', async () => {
   const { ConversationStore } = await loadStoreModule()
   assert.equal(typeof ConversationStore, 'function')

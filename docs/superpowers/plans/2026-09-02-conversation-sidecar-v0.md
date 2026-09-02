@@ -109,3 +109,15 @@
 - [x] Create branch `feat/chatgpt-conversation-linux`.
 - [x] Push `feat/chatgpt-conversation-linux` to `origin`.
 - [x] Keep DevSpace and Orca source outside this repository and untouched by this feature work.
+
+### Task 11: Project-scoped conversation foundation
+
+**Files:** `src/server.mjs`, `src/chatgpt.mjs`, `src/store.mjs`, `extension/service-worker.js`, `README.md`, project-related tests.
+
+- [x] Accept an explicit ChatGPT Project home URL on `conversation_create`.
+- [x] Restrict Project targets to canonical `https://chatgpt.com/g/g-p-.../project` URLs.
+- [x] Treat `/g/g-p-.../c/...` as a stable conversation URL for restart/reattach.
+- [x] Add `project_pin` to persist a default Project locally across sidecar restarts.
+- [x] Let an explicit `project_url` override the pinned default for one create.
+- [ ] Do not live-test Project conversation creation until explicitly authorized; when authorized, apply the staggered 15–20 second launch rule for probe-style requests.
+- [ ] Keep automatic sidebar Project discovery and Project creation as a separate follow-up; do not mix brittle UI discovery into the URL-based pinning path.

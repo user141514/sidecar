@@ -17,6 +17,7 @@ async function loadChatGptModule() {
 class MemoryStore {
   constructor() {
     this.events = []
+    this.defaultProjectUrl = null
   }
 
   async create({ backend, externalUrl }) {
@@ -27,6 +28,14 @@ class MemoryStore {
 
   async append(_id, event) {
     this.events.push(event)
+  }
+
+  async setDefaultProjectUrl(projectUrl) {
+    this.defaultProjectUrl = projectUrl
+  }
+
+  async getDefaultProjectUrl() {
+    return this.defaultProjectUrl
   }
 
   async read(id) {
@@ -73,6 +82,41 @@ class FakeBridge extends EventEmitter {
     throw new Error(`unexpected method ${method}`)
   }
 }
+
+test('create can target a specific ChatGPT Project home', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  const host = new ChatGptConversationHost({ bridge, store })
+  const projectUrl = 'https://chatgpt.com/g/g-p-project123-agent/project'
+
+  const created = await host.create({ projectUrl })
+
+  assert.equal(created.externalUrl, projectUrl)
+  assert.equal(bridge.requests[0].method, 'conversation_create')
+  assert.equal(bridge.requests[0].params.url, projectUrl)
+})
+
+test('a pinned Project becomes the default target for later conversation_create calls', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  const host = new ChatGptConversationHost({ bridge, store })
+  const projectUrl = 'https://chatgpt.com/g/g-p-project123-agent/project'
+
+  const pinned = await host.pinProject(projectUrl)
+  const created = await host.create()
+
+  assert.equal(pinned.projectUrl, projectUrl)
+  assert.equal(created.externalUrl, projectUrl)
+  assert.equal(bridge.requests[0].params.url, projectUrl)
+})
 
 test('a fresh sidecar process sends to a ledger-backed conversation and records its later completion', async (t) => {
   const { ChatGptConversationHost } = await loadChatGptModule()

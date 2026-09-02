@@ -41,6 +41,23 @@ export class ConversationStore {
     return join(this.rootDir, id)
   }
 
+  async setDefaultProjectUrl(projectUrl) {
+    await mkdir(this.rootDir, { recursive: true })
+    const config = { defaultProjectUrl: projectUrl }
+    await writeFile(join(this.rootDir, 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8')
+    return config
+  }
+
+  async getDefaultProjectUrl() {
+    try {
+      const config = JSON.parse(await readFile(join(this.rootDir, 'config.json'), 'utf8'))
+      return typeof config.defaultProjectUrl === 'string' ? config.defaultProjectUrl : null
+    } catch (error) {
+      if (error?.code === 'ENOENT') return null
+      throw error
+    }
+  }
+
   async create({ backend, externalUrl }) {
     const id = `conv_${randomUUID()}`
     const dir = this.conversationDir(id)
