@@ -1,0 +1,14 @@
+{
+  "name": "conversation-sidecar",
+  "version": "0.0.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/server.mjs",
+    "mcp:stdio": "node src/mcp-stdio.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Conversation Sidecar Bridge",
+  "version": "0.0.2",
+  "description": "Unattended local bridge between Conversation Sidecar and the signed-in ChatGPT web app.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4uYzUbZs01dEER6meKznOjAzRDMddqlSRSs7iIuL7WEnS7Q+CbAu1GBU6Y81gy+FB3KishyxLwrEp5oPDi8ZzSC+SwkH8ZRtig8jJRy8xaoi7Eai5aWMNCx/umR6Z0OcfZ/Z5ZsMYhDwdrpvH30EEFXgHRYB6sJR6t/4ArNpGbfnEPmcMoqGK/6pLdd+pxmISt/YfO3BR1GIp1oG7nTIAwVlYi7i9I4bLYdFS4/UUHQ9eikfaUSs6YcgT9FinzjeP7Py1FHHIynW14DXK7vFCSfROEhbkRp8aqv5RFmYEI7o3nQATZmd4vMtLfnt1MJUZwISowPjpovkZEdaRRgeqQIDAQAB",
+  "minimum_chrome_version": "105",
+  "permissions": ["nativeMessaging", "windows", "tabs", "storage"],
+  "host_permissions": ["https://chatgpt.com/*"],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["content-script.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
