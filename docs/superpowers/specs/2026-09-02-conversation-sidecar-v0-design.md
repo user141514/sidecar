@@ -103,14 +103,15 @@ A completed browser event updates the extension's persisted conversation URL bef
 
 ## Project-scoped creation
 
-A ChatGPT Project home is represented by its canonical URL, for example `https://chatgpt.com/g/g-p-<project-id>[-slug]/project`. `project_pin` persists one such URL locally as the default creation target. `conversation_create` may also receive an explicit `project_url` for a one-off override. Opening the Project home in a fresh managed tab provides the new-chat composer for that Project; once the first prompt is accepted, the durable thread identity is the canonical `/g/g-p-.../c/...` URL.
+A ChatGPT Project home is represented by its canonical URL, for example `https://chatgpt.com/g/g-p-<project-id>[-slug]/project`. `project_create(name)` is an explicit web-UI mutation that creates one Project in logical `window0`, waits until that tab reaches a canonical Project home URL, and returns that URL; it never changes the machine-local pin. `project_pin` persists one existing Project URL locally as the default creation target. `conversation_create` may also receive an explicit `project_url` for a one-off override. Without either explicit or pinned Project state, `conversation_create()` remains rooted at `https://chatgpt.com/`. Opening a Project home in a fresh managed tab provides the new-chat composer for that Project; once the first prompt is accepted, the durable thread identity is the canonical `/g/g-p-.../c/...` URL.
 
-Project name discovery and automatic Project creation remain separate UI-automation concerns and are not required for URL-based pinning.
+Project creation UI automation must identify a Project-specific dialog and Project-name input before clicking its scoped Create control; it must fail rather than falling back to the first generic dialog/input. Automatic Project discovery by sidebar/name remains a separate concern.
 
 ## MCP surface
 
-The native host binds an HTTP MCP endpoint on localhost with four tools:
+The native host binds an HTTP MCP endpoint on localhost with five tools:
 
+- `project_create`
 - `project_pin`
 - `conversation_create`
 - `conversation_send`
@@ -152,4 +153,4 @@ V0 succeeds only when all of these are observed on the real Linux host:
 
 ## Deferred
 
-Windows/Edge, automatic ChatGPT Project discovery/creation, simultaneous sends, semantic search, summaries, task protocols, supervisor logic, and remote MCP exposure/authentication are deferred until V0 passes.
+Windows/Edge, automatic ChatGPT Project discovery by sidebar/name, simultaneous sends, semantic search, summaries, task protocols, supervisor logic, and remote MCP exposure/authentication are deferred until V0 passes.

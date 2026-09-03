@@ -122,7 +122,7 @@
 - [x] Live-test one pinned Project conversation only after explicit authorization: create once, wait 17 seconds, send one meaningful prompt, then observe completion only through `conversation_read`.
 - [x] Confirm the resulting canonical thread URL remains inside the pinned Project as `/g/g-p-.../c/...`.
 - [ ] Re-test response capture after the content-script completion-settle fix is loaded; do not send another live prompt before extension reload.
-- [ ] Keep automatic sidebar Project discovery and Project creation as a separate follow-up; do not mix brittle UI discovery into the URL-based pinning path.
+- [ ] Keep automatic sidebar Project discovery by name as a separate follow-up; Project identity remains URL-based.
 
 ### Task 12: Streaming completion stability
 
@@ -132,3 +132,18 @@
 - [x] Require assistant text to remain unchanged for 5 seconds, in addition to the existing generation-control check, before emitting a terminal completion.
 - [x] Cover streaming text with no visible stop control in an executable content-script runtime test.
 - [ ] Perform at most one slow live re-test after extension reload; no additional probe is needed if that single response is captured completely.
+
+### Task 13: Explicit ChatGPT Project creation
+
+**Files:** `src/server.mjs`, `src/chatgpt.mjs`, `extension/service-worker.js`, `extension/content-script.js`, related runtime tests and docs.
+
+- [x] Add `project_create(name)` as an explicit MCP tool and validate a non-empty trimmed name.
+- [x] Drive Project creation through one root ChatGPT tab in logical `window0`; when window0 already exists, create at most one new tab and no new Chrome window.
+- [x] Return success only after the tab reaches a canonical `/g/g-p-.../project` URL.
+- [x] Keep `project_create` separate from `project_pin`; creating a Project never changes machine-local defaults.
+- [x] Preserve root `https://chatgpt.com/` as the code default for `conversation_create()` when neither an explicit Project URL nor machine-local pin exists.
+- [x] Add executable host/service-worker/content-script tests and keep the existing persistence/outbox/conversation suites green.
+- [x] Run a read-only Orca-sub/Codex boundary review; fix its blocker by requiring a Project-specific dialog plus a named Project input and refusing generic dialog/input fallback.
+- [x] Run a final read-only Orca-sub/Codex review after the blocker fix; it reported no P0/P1 findings and verdict `SAFE` for one later slow live Project-create test after extension reload and explicit authorization.
+- [x] Add the final review's non-blocking negative tests for generic-only dialogs and noncanonical Project URLs.
+- [ ] Do not live-create a ChatGPT Project until the extension has been reloaded and a deliberate account-level Project creation is authorized.

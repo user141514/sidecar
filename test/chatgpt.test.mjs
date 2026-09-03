@@ -73,6 +73,14 @@ class FakeBridge extends EventEmitter {
 
   async request(method, params) {
     this.requests.push({ method, params })
+    if (method === 'project_create') {
+      return {
+        name: params.name,
+        projectUrl: 'https://chatgpt.com/g/g-p-created-test/project',
+        windowId: 111,
+        tabId: 222
+      }
+    }
     if (method === 'conversation_create') {
       return { windowId: 101, tabId: 202, url: 'https://chatgpt.com/' }
     }
@@ -82,6 +90,50 @@ class FakeBridge extends EventEmitter {
     throw new Error(`unexpected method ${method}`)
   }
 }
+
+test('project_create returns a created Project URL without changing the pinned default', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  const host = new ChatGptConversationHost({ bridge, store })
+
+  const result = await host.createProject('  subagents  ')
+
+  assert.deepEqual(result, {
+    name: 'subagents',
+    projectUrl: 'https://chatgpt.com/g/g-p-created-test/project',
+    windowId: 111,
+    tabId: 222
+  })
+  assert.deepEqual(bridge.requests[0], {
+    method: 'project_create',
+    params: { name: 'subagents' }
+  })
+  assert.equal(await store.getDefaultProjectUrl(), null)
+})
+
+test('project_create rejects a noncanonical Project URL returned by the browser', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  bridge.request = async (method, params) => {
+    bridge.requests.push({ method, params })
+    return {
+      name: params.name,
+      projectUrl: 'https://chatgpt.com/',
+      windowId: 111,
+      tabId: 222
+    }
+  }
+  const host = new ChatGptConversationHost({ bridge, store: new MemoryStore() })
+
+  await assert.rejects(host.createProject('subagents'), /Project home URL/)
+})
 
 test('create can target a specific ChatGPT Project home', async () => {
   const { ChatGptConversationHost } = await loadChatGptModule()

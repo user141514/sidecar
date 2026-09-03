@@ -24,6 +24,18 @@ function outboxKey(eventId) {
   return `${OUTBOX_PREFIX}${eventId}`
 }
 
+function projectHomeUrl(url) {
+  if (typeof url !== 'string' || !url) return null
+  try {
+    const parsed = new URL(url)
+    if (parsed.origin !== 'https://chatgpt.com') return null
+    const match = parsed.pathname.match(/^\/g\/g-p-[^/]+\/project\/?$/)
+    return match ? `${parsed.origin}${match[0].replace(/\/$/, '')}` : null
+  } catch {
+    return null
+  }
+}
+
 function stableConversationUrl(url) {
   if (typeof url !== 'string' || !url) return null
   try {
@@ -279,6 +291,49 @@ async function waitForContentScript(tabId, maxAttempts = 80) {
   throw lastError ?? new Error('ChatGPT content script did not become ready')
 }
 
+async function waitForProjectHome(tabId) {
+  let lastUrl = null
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const tab = await chrome.tabs.get(tabId)
+    lastUrl = tabPageUrl(tab)
+    const projectUrl = projectHomeUrl(lastUrl)
+    if (projectUrl) return projectUrl
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new Error(`Timed out waiting for ChatGPT Project creation${lastUrl ? `; last URL was ${lastUrl}` : ''}`)
+}
+
+async function createProject(params) {
+  const name = typeof params.name === 'string' ? params.name.trim() : ''
+  if (!name) throw new Error('Project name is required')
+
+  const window0 = await ensureWindow0(CHATGPT_URL)
+  const tab = window0.created
+    ? window0.tab
+    : await chrome.tabs.create({ windowId: window0.windowId, url: CHATGPT_URL, active: false })
+
+  if (!tab || typeof tab.id !== 'number') {
+    throw new Error('Chrome did not return a tab for Project creation')
+  }
+
+  await waitForContentScript(tab.id)
+  const response = await chrome.tabs.sendMessage(tab.id, {
+    type: 'project_create',
+    name
+  })
+  if (response?.accepted !== true) {
+    throw new Error(response?.error || 'ChatGPT content script rejected Project creation')
+  }
+
+  const projectUrl = await waitForProjectHome(tab.id)
+  return {
+    name,
+    projectUrl,
+    windowId: window0.windowId,
+    tabId: tab.id
+  }
+}
+
 async function createConversation(params) {
   const url = params.url || CHATGPT_URL
   const window0 = await ensureWindow0(url)
@@ -358,6 +413,7 @@ async function sendConversation(params) {
 }
 
 async function executeRequest(message) {
+  if (message.method === 'project_create') return createProject(message.params ?? {})
   if (message.method === 'conversation_create') return createConversation(message.params ?? {})
   if (message.method === 'conversation_send') return sendConversation(message.params ?? {})
   throw new Error(`Unknown native request method: ${message.method}`)

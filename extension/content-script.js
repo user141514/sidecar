@@ -65,6 +65,98 @@ async function waitAndSubmit() {
   throw new Error('ChatGPT send button did not become available')
 }
 
+function controlLabel(node) {
+  return (node?.getAttribute?.('aria-label') || node?.textContent || '').trim().toLowerCase()
+}
+
+function findEnabledButton(root, labels) {
+  const wanted = new Set(labels.map((label) => label.toLowerCase()))
+  return [...root.querySelectorAll('button')].find((button) => {
+    return !button.disabled && wanted.has(controlLabel(button))
+  })
+}
+
+async function waitForEnabledButton(rootProvider, labels) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const root = rootProvider()
+    if (root?.querySelectorAll) {
+      const button = findEnabledButton(root, labels)
+      if (button) return button
+    }
+    await sleep(125)
+  }
+  throw new Error(`ChatGPT control was not found: ${labels[0]}`)
+}
+
+function findProjectNameInput(dialog) {
+  const inputs = [...dialog.querySelectorAll('input')]
+  return inputs.find((input) => {
+    const hint = [
+      input.getAttribute?.('aria-label'),
+      input.getAttribute?.('placeholder'),
+      input.getAttribute?.('name')
+    ].filter(Boolean).join(' ').toLowerCase()
+    return hint.includes('project') || hint.includes('name') || hint.includes('项目') || hint.includes('名称')
+  }) || null
+}
+
+function isProjectDialog(dialog) {
+  const label = controlLabel(dialog)
+  const isProjectLabeled = label.includes('new project') ||
+    label.includes('create project') ||
+    label.includes('新建项目') ||
+    label.includes('创建项目')
+  return isProjectLabeled && Boolean(findProjectNameInput(dialog))
+}
+
+async function waitForProjectDialog() {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const dialog = [...document.querySelectorAll('[role="dialog"]')].find(isProjectDialog)
+    if (dialog) return dialog
+    await sleep(125)
+  }
+  throw new Error('ChatGPT Project dialog was not found')
+}
+
+async function waitForProjectNameInput(dialog) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const input = findProjectNameInput(dialog)
+    if (input) return input
+    await sleep(125)
+  }
+  throw new Error('ChatGPT Project name input was not found')
+}
+
+function setTextInput(input, text) {
+  input.focus()
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+  if (setter) setter.call(input, text)
+  else input.value = text
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }))
+}
+
+async function handleProjectCreate(message) {
+  const name = typeof message.name === 'string' ? message.name.trim() : ''
+  if (!name) throw new Error('Project name is required')
+
+  const newProjectButton = await waitForEnabledButton(
+    () => document,
+    ['new project', '新建项目', '创建项目', '新项目']
+  )
+  newProjectButton.click()
+
+  const dialog = await waitForProjectDialog()
+  const input = await waitForProjectNameInput(dialog)
+  setTextInput(input, name)
+
+  const createButton = await waitForEnabledButton(
+    () => dialog,
+    ['create', 'create project', '创建', '创建项目']
+  )
+  createButton.click()
+  return { accepted: true, name }
+}
+
 function assistantMessages() {
   return [...document.querySelectorAll('[data-message-author-role="assistant"]')]
 }
@@ -176,6 +268,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'sidecar_ping') {
     sendResponse({ ready: true, url: location.href })
     return
+  }
+
+  if (message?.type === 'project_create') {
+    void handleProjectCreate(message)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({
+        accepted: false,
+        error: error instanceof Error ? error.message : String(error)
+      }))
+    return true
   }
 
   if (message?.type === 'conversation_monitor_start') {

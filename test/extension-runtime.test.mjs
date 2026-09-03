@@ -105,7 +105,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         if (!windowMap.has(windowId)) throw new Error(`No window ${windowId}`)
         const tab = { id: nextTabId++, windowId, url, active }
         tabMap.set(tab.id, tab)
-        createdTabs.push(tab)
+        createdTabs.push({ ...tab })
         return { ...tab }
       },
       async reload(tabId) {
@@ -120,6 +120,10 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         if (message.type === 'sidecar_ping') {
           if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
           return { ready: true, url: tab.url }
+        }
+        if (message.type === 'project_create') {
+          tab.url = 'https://chatgpt.com/g/g-p-created-test/project'
+          return { accepted: true, name: message.name }
         }
         if (message.type === 'conversation_send') {
           return { accepted: true, url: tab.url, baselineAssistantCount: 0 }
@@ -198,6 +202,27 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     }
   }
 }
+
+test('project_create opens one root tab in window0 and returns its canonical Project URL', async () => {
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 } },
+    windows: [{ id: 10 }]
+  })
+
+  const response = await harness.request('project_create', { name: 'subagents' })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.name, 'subagents')
+  assert.equal(response.result.projectUrl, 'https://chatgpt.com/g/g-p-created-test/project')
+  assert.equal(response.result.windowId, 10)
+  assert.equal(harness.createdWindows.length, 0)
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.createdTabs[0].url, 'https://chatgpt.com/')
+  assert.equal(
+    harness.sentToTabs.some(({ message }) => message.type === 'project_create' && message.name === 'subagents'),
+    true
+  )
+})
 
 test('send reloads a matching tab whose content script was invalidated by extension reload', async () => {
   const externalUrl = 'https://chatgpt.com/c/pre-reload-123'

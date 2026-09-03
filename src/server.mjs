@@ -7,6 +7,16 @@ import { ConversationStore } from './store.mjs'
 
 const TOOLS = [
   {
+    name: 'project_create',
+    description: 'Create one ChatGPT Project through the signed-in ChatGPT web UI and return its canonical Project URL.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+      additionalProperties: false
+    }
+  },
+  {
     name: 'project_pin',
     description: 'Persist one ChatGPT Project home as the default destination for future conversation_create calls.',
     inputSchema: {
@@ -82,6 +92,12 @@ function writeJson(res, statusCode, body) {
 }
 
 async function dispatchTool(conversationHost, name, args = {}) {
+  if (name === 'project_create') {
+    if (typeof args.name !== 'string') {
+      throw new TypeError('project_create requires name')
+    }
+    return conversationHost.createProject(args.name)
+  }
   if (name === 'project_pin') {
     if (typeof args.project_url !== 'string') {
       throw new TypeError('project_pin requires project_url')
@@ -125,7 +141,7 @@ async function handleRpc(conversationHost, message) {
         protocolVersion: message.params?.protocolVersion ?? '2025-06-18',
         capabilities: { tools: {} },
         serverInfo: { name: 'conversation-sidecar', version: '0.0.2' },
-        instructions: 'Use conversation_create, conversation_send, and conversation_read. Raw local events are the source of truth.'
+        instructions: 'Use project_create/project_pin for optional Project setup and conversation_create/conversation_send/conversation_read for conversations. Raw local events are the source of truth.'
       })
     }
   }

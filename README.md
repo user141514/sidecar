@@ -47,7 +47,8 @@ The first `conversation_create` establishes one sidecar-owned normal Chrome wind
 
 ## MCP tools
 
-- `project_pin` — persist one ChatGPT Project home URL as the default destination for future creates.
+- `project_create` — explicitly create one ChatGPT Project through the signed-in web UI and return its canonical Project home URL; it does not pin the result.
+- `project_pin` — persist one existing ChatGPT Project home URL as the machine-local default destination for future creates.
 - `conversation_create` — create a ChatGPT conversation tab inside managed `window0`; optional `project_url` overrides the pinned Project for that create.
 - `conversation_send` — submit one prompt and return after the browser accepted it.
 - `conversation_read` — read durable status/raw response from the local JSONL ledger only.
@@ -58,7 +59,7 @@ A Project home URL has the form:
 https://chatgpt.com/g/g-p-<project-id>[-slug]/project
 ```
 
-After `project_pin`, later `conversation_create` calls without arguments start from that Project home. Project-scoped threads are persisted and reattached using their canonical `/g/g-p-.../c/...` URLs. Automatic sidebar project discovery/creation is intentionally separate from this URL-based pinning path.
+Without a machine-local pin, `conversation_create()` defaults to a root `https://chatgpt.com/` conversation. After `project_pin`, later `conversation_create` calls without arguments start from that Project home; an explicit `project_url` overrides the pin for one create. Project-scoped threads are persisted and reattached using their canonical `/g/g-p-.../c/...` URLs. `project_create` is an explicit onboarding mutation and never changes the pin automatically; automatic sidebar Project discovery remains separate.
 
 Local conversation data and the pinned Project configuration live under `data/conversations/` and are ignored by Git.
 
