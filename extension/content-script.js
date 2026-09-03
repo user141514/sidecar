@@ -135,6 +135,31 @@ function setTextInput(input, text) {
   input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }))
 }
 
+function canonicalProjectHomeFromHref(href) {
+  if (typeof href !== 'string' || !href) return null
+  try {
+    const parsed = new URL(href, location.href)
+    if (parsed.origin !== 'https://chatgpt.com') return null
+    const path = parsed.pathname.replace(/\/+$/, '')
+    return /^\/g\/g-p-[^/]+\/project$/.test(path) ? `${parsed.origin}${path}` : null
+  } catch {
+    return null
+  }
+}
+
+async function handleProjectFind(message) {
+  const name = typeof message.name === 'string' ? message.name.trim() : ''
+  if (!name) throw new Error('Project name is required')
+  const wanted = name.toLowerCase()
+  for (const link of document.querySelectorAll('a[href]')) {
+    const label = (link.textContent || '').trim().toLowerCase()
+    if (label !== wanted) continue
+    const projectUrl = canonicalProjectHomeFromHref(link.getAttribute?.('href'))
+    if (projectUrl) return { found: true, name, projectUrl }
+  }
+  return { found: false, name }
+}
+
 async function handleProjectCreate(message) {
   const name = typeof message.name === 'string' ? message.name.trim() : ''
   if (!name) throw new Error('Project name is required')
@@ -268,6 +293,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'sidecar_ping') {
     sendResponse({ ready: true, url: location.href })
     return
+  }
+
+  if (message?.type === 'project_find') {
+    void handleProjectFind(message)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({
+        found: false,
+        error: error instanceof Error ? error.message : String(error)
+      }))
+    return true
   }
 
   if (message?.type === 'project_create') {

@@ -17,6 +17,16 @@ const TOOLS = [
     }
   },
   {
+    name: 'project_find',
+    description: 'Find an already-visible ChatGPT Project by exact name in currently open ChatGPT tabs without creating or navigating browser state.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+      additionalProperties: false
+    }
+  },
+  {
     name: 'project_pin',
     description: 'Persist one ChatGPT Project home as the default destination for future conversation_create calls.',
     inputSchema: {
@@ -98,6 +108,12 @@ async function dispatchTool(conversationHost, name, args = {}) {
     }
     return conversationHost.createProject(args.name)
   }
+  if (name === 'project_find') {
+    if (typeof args.name !== 'string') {
+      throw new TypeError('project_find requires name')
+    }
+    return conversationHost.findProject(args.name)
+  }
   if (name === 'project_pin') {
     if (typeof args.project_url !== 'string') {
       throw new TypeError('project_pin requires project_url')
@@ -141,7 +157,7 @@ async function handleRpc(conversationHost, message) {
         protocolVersion: message.params?.protocolVersion ?? '2025-06-18',
         capabilities: { tools: {} },
         serverInfo: { name: 'conversation-sidecar', version: '0.0.2' },
-        instructions: 'Use project_create/project_pin for optional Project setup and conversation_create/conversation_send/conversation_read for conversations. Raw local events are the source of truth.'
+        instructions: 'Use project_create/project_pin for optional Project setup and conversation_create/conversation_send/conversation_read for conversations. Raw local events are the source of truth. Reasoning effort is configured manually by the user in ChatGPT; the sidecar does not change it.'
       })
     }
   }

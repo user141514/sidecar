@@ -5,6 +5,80 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
 
+test('project_find returns the canonical Project URL from the current sidebar without clicking', async () => {
+  let runtimeListener = null
+  const links = [
+    {
+      textContent: 'agent',
+      getAttribute(name) {
+        return name === 'href' ? '/g/g-p-agent-test-agent/project' : null
+      }
+    },
+    {
+      textContent: 'subagents',
+      getAttribute(name) {
+        return name === 'href' ? '/g/g-p-subagents-test/project' : null
+      }
+    }
+  ]
+  const document = {
+    querySelector() {
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === 'a[href]') return links
+      if (selector === 'button') return []
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      return []
+    },
+    execCommand() {
+      return true
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/c/current' },
+    chrome: {
+      runtime: {
+        async sendMessage() {
+          return null
+        },
+        onMessage: {
+          addListener(listener) {
+            runtimeListener = listener
+          }
+        }
+      }
+    },
+    HTMLInputElement: class {},
+    HTMLTextAreaElement: class {},
+    InputEvent: class {},
+    Date,
+    Promise,
+    Object,
+    URL,
+    console,
+    setTimeout(callback) {
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  const response = await new Promise((resolve) => {
+    const keepOpen = runtimeListener({ type: 'project_find', name: 'subagents' }, {}, resolve)
+    assert.equal(keepOpen, true)
+  })
+
+  assert.equal(response.found, true)
+  assert.equal(response.name, 'subagents')
+  assert.equal(response.projectUrl, 'https://chatgpt.com/g/g-p-subagents-test/project')
+})
+
 test('project_create opens the New project dialog, submits a name, and acknowledges the UI action', async () => {
   let runtimeListener = null
   let dialogOpen = false

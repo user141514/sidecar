@@ -24,6 +24,15 @@ class FakeHost {
     }
   }
 
+  async findProject(name) {
+    this.projectFindName = name
+    return {
+      found: true,
+      name,
+      projectUrl: 'https://chatgpt.com/g/g-p-subagents-test/project'
+    }
+  }
+
   async create(options = {}) {
     this.createCalls.push(options)
     return {
@@ -81,7 +90,7 @@ test('server exposes health, project pinning, and the three conversation tools',
     const listed = await rpc(baseUrl, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
     assert.deepEqual(
       listed.body.result.tools.map((tool) => tool.name),
-      ['project_create', 'project_pin', 'conversation_create', 'conversation_send', 'conversation_read']
+      ['project_create', 'project_find', 'project_pin', 'conversation_create', 'conversation_send', 'conversation_read']
     )
   } finally {
     await app.close()
@@ -109,6 +118,18 @@ test('tools/call dispatches create, send, and read to the conversation host', as
       'https://chatgpt.com/g/g-p-created-test/project'
     )
     assert.equal(host.projectCreateName, 'subagents')
+
+    const found = await rpc(baseUrl, {
+      jsonrpc: '2.0', id: 81, method: 'tools/call', params: {
+        name: 'project_find',
+        arguments: { name: 'subagents' }
+      }
+    })
+    assert.equal(
+      JSON.parse(found.body.result.content[0].text).projectUrl,
+      'https://chatgpt.com/g/g-p-subagents-test/project'
+    )
+    assert.equal(host.projectFindName, 'subagents')
 
     const projectUrl = 'https://chatgpt.com/g/g-p-project123-agent/project'
     const pinned = await rpc(baseUrl, {

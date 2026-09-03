@@ -96,9 +96,9 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         if (!tab) throw new Error(`No tab ${tabId}`)
         return { ...tab }
       },
-      async query({ windowId }) {
+      async query({ windowId } = {}) {
         return [...tabMap.values()]
-          .filter((tab) => tab.windowId === windowId)
+          .filter((tab) => windowId === undefined || tab.windowId === windowId)
           .map((tab) => ({ ...tab }))
       },
       async create({ windowId, url, active }) {
@@ -124,6 +124,12 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         if (message.type === 'project_create') {
           tab.url = 'https://chatgpt.com/g/g-p-created-test/project'
           return { accepted: true, name: message.name }
+        }
+        if (message.type === 'project_find') {
+          if (tab.projectName === message.name && tab.projectUrl) {
+            return { found: true, name: message.name, projectUrl: tab.projectUrl }
+          }
+          return { found: false, name: message.name }
         }
         if (message.type === 'conversation_send') {
           return { accepted: true, url: tab.url, baselineAssistantCount: 0 }
@@ -202,6 +208,26 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     }
   }
 }
+
+test('project_find scans existing ChatGPT tabs and returns a canonical matching Project URL without creating browser state', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-subagents-test/project'
+  const harness = makeHarness({
+    windows: [{ id: 10 }, { id: 11 }],
+    tabs: [
+      { id: 20, windowId: 10, url: 'https://chatgpt.com/c/other', projectName: 'agent', projectUrl: 'https://chatgpt.com/g/g-p-agent-test/project' },
+      { id: 21, windowId: 11, url: 'https://chatgpt.com/c/current', projectName: 'subagents', projectUrl }
+    ]
+  })
+
+  const response = await harness.request('project_find', { name: 'subagents' })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.found, true)
+  assert.equal(response.result.name, 'subagents')
+  assert.equal(response.result.projectUrl, projectUrl)
+  assert.equal(harness.createdTabs.length, 0)
+  assert.equal(harness.createdWindows.length, 0)
+})
 
 test('project_create opens one root tab in window0 and returns its canonical Project URL', async () => {
   const harness = makeHarness({

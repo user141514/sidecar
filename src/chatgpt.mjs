@@ -41,6 +41,19 @@ export class ChatGptConversationHost {
     }
   }
 
+  async findProject(name) {
+    const normalizedName = typeof name === 'string' ? name.trim() : ''
+    if (!normalizedName) throw new TypeError('project name is required')
+
+    const result = await this.bridge.request('project_find', { name: normalizedName })
+    if (result.found !== true) return { found: false, name: normalizedName }
+    return {
+      found: true,
+      name: normalizedName,
+      projectUrl: normalizeProjectHomeUrl(result.projectUrl)
+    }
+  }
+
   async pinProject(projectUrl) {
     const normalized = normalizeProjectHomeUrl(projectUrl)
     await this.store.setDefaultProjectUrl(normalized)

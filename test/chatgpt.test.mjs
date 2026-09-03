@@ -81,6 +81,13 @@ class FakeBridge extends EventEmitter {
         tabId: 222
       }
     }
+    if (method === 'project_find') {
+      return {
+        found: true,
+        name: params.name,
+        projectUrl: 'https://chatgpt.com/g/g-p-subagents-test/project'
+      }
+    }
     if (method === 'conversation_create') {
       return { windowId: 101, tabId: 202, url: 'https://chatgpt.com/' }
     }
@@ -90,6 +97,29 @@ class FakeBridge extends EventEmitter {
     throw new Error(`unexpected method ${method}`)
   }
 }
+
+test('project_find returns a canonical current-page Project URL without changing the pinned default', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  const host = new ChatGptConversationHost({ bridge, store })
+
+  const result = await host.findProject('  subagents  ')
+
+  assert.deepEqual(result, {
+    found: true,
+    name: 'subagents',
+    projectUrl: 'https://chatgpt.com/g/g-p-subagents-test/project'
+  })
+  assert.deepEqual(bridge.requests[0], {
+    method: 'project_find',
+    params: { name: 'subagents' }
+  })
+  assert.equal(await store.getDefaultProjectUrl(), null)
+})
 
 test('project_create returns a created Project URL without changing the pinned default', async () => {
   const { ChatGptConversationHost } = await loadChatGptModule()

@@ -303,6 +303,37 @@ async function waitForProjectHome(tabId) {
   throw new Error(`Timed out waiting for ChatGPT Project creation${lastUrl ? `; last URL was ${lastUrl}` : ''}`)
 }
 
+async function findProject(params) {
+  const name = typeof params.name === 'string' ? params.name.trim() : ''
+  if (!name) throw new Error('Project name is required')
+
+  const tabs = await chrome.tabs.query({})
+  for (const tab of tabs) {
+    const url = tabPageUrl(tab)
+    if (typeof tab.id !== 'number' || !chatGptPageUrl(url)) continue
+    try {
+      const response = await chrome.tabs.sendMessage(tab.id, {
+        type: 'project_find',
+        name
+      })
+      if (response?.found !== true) continue
+      const canonical = projectHomeUrl(response.projectUrl)
+      if (!canonical) continue
+      return {
+        found: true,
+        name,
+        projectUrl: canonical,
+        windowId: tab.windowId,
+        tabId: tab.id
+      }
+    } catch {
+      // A stale or loading ChatGPT tab is not authoritative; continue scanning.
+    }
+  }
+
+  return { found: false, name }
+}
+
 async function createProject(params) {
   const name = typeof params.name === 'string' ? params.name.trim() : ''
   if (!name) throw new Error('Project name is required')
@@ -354,12 +385,7 @@ async function createConversation(params) {
   return state
 }
 
-async function sendConversation(params) {
-  const { state, reattached, reloadOnReadinessFailure } = await resolveConversationAttachment(
-    params.conversationId,
-    params.externalUrl
-  )
-
+async function ensureContentScriptForAttachment(state, reloadOnReadinessFailure) {
   try {
     await waitForContentScript(state.tabId, reloadOnReadinessFailure ? 8 : 80)
   } catch (error) {
@@ -367,6 +393,15 @@ async function sendConversation(params) {
     await chrome.tabs.reload(state.tabId)
     await waitForContentScript(state.tabId)
   }
+}
+
+async function sendConversation(params) {
+  const { state, reattached, reloadOnReadinessFailure } = await resolveConversationAttachment(
+    params.conversationId,
+    params.externalUrl
+  )
+
+  await ensureContentScriptForAttachment(state, reloadOnReadinessFailure)
   const response = await chrome.tabs.sendMessage(state.tabId, {
     type: 'conversation_send',
     conversationId: params.conversationId,
@@ -413,6 +448,7 @@ async function sendConversation(params) {
 }
 
 async function executeRequest(message) {
+  if (message.method === 'project_find') return findProject(message.params ?? {})
   if (message.method === 'project_create') return createProject(message.params ?? {})
   if (message.method === 'conversation_create') return createConversation(message.params ?? {})
   if (message.method === 'conversation_send') return sendConversation(message.params ?? {})
