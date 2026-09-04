@@ -51,9 +51,10 @@ test('server direct-entry detection uses filesystem paths rather than URL pathna
 
 test('Windows batch launcher starts the shared server and preserves Native Messaging stdin', { skip: process.platform !== 'win32' }, async () => {
   const launcherPath = fileURLToPath(new URL('../install/conversation-sidecar-host.bat', import.meta.url))
-  const child = spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', `call "${launcherPath}"`], {
+  const child = spawn(launcherPath, [], {
     env: { ...process.env, SIDECAR_PORT: '0' },
-    stdio: ['pipe', 'ignore', 'pipe']
+    stdio: ['pipe', 'ignore', 'pipe'],
+    shell: true
   })
   let stderr = ''
 

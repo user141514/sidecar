@@ -54,8 +54,7 @@ export async function installNativeHost({
 } = {}) {
   if (!['linux', 'win32'].includes(platform)) throw new Error(`Unsupported platform: ${platform}`)
 
-  const targetPath = platform === 'win32' ? win32 : posix
-  await mkdir(targetPath.dirname(manifestPath), { recursive: true })
+  await mkdir(dirname(manifestPath), { recursive: true })
   if (platform === 'linux') await chmodHost(hostPath, 0o755)
   await writeFile(manifestPath, `${JSON.stringify({
     name: hostName,
