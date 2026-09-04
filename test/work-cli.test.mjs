@@ -37,6 +37,7 @@ test('work CLI maps create, append, decide, dispatch, collect and state to MCP t
   await runCli(['append', 'work_1', 'observation', '{"fact":"done"}'], { fetchImpl })
   await runCli(['state', 'work_1'], { fetchImpl })
   await runCli(['decide', 'work_1', '{"action":"CONTINUE","reason":"keep going"}'], { fetchImpl })
+  await runCli(['checkpoint', 'work_1', '{"based_on_event_count":4,"evidence_event_indexes":[3],"decision":{"action":"CONTINUE","reason":"commit current state"}}'], { fetchImpl })
   await runCli(['dispatch', 'work_1', 'f1'], { fetchImpl })
   await runCli(['collect', 'work_1'], { fetchImpl })
   await runCli(['read', 'work_1'], { fetchImpl })
@@ -49,6 +50,7 @@ test('work CLI maps create, append, decide, dispatch, collect and state to MCP t
     ['work_append', { work_id: 'work_1', type: 'observation', payload: { fact: 'done' } }],
     ['work_state', { work_id: 'work_1' }],
     ['work_decide', { work_id: 'work_1', decision: { action: 'CONTINUE', reason: 'keep going' } }],
+    ['work_checkpoint', { work_id: 'work_1', based_on_event_count: 4, evidence_event_indexes: [3], decision: { action: 'CONTINUE', reason: 'commit current state' } }],
     ['work_dispatch', { work_id: 'work_1', frontier_id: 'f1' }],
     ['work_collect', { work_id: 'work_1' }],
     ['work_read', { work_id: 'work_1' }],
@@ -73,6 +75,10 @@ test('work CLI rejects surplus positional arguments before contacting the sideca
     runCli(['decide', 'work_1', '{"action":"CONTINUE","reason":"keep going"}', 'extra'], { fetchImpl }),
     /decide requires work_id and decision_json/
   )
+  await assert.rejects(
+    runCli(['checkpoint', 'work_1', '{}', 'extra'], { fetchImpl }),
+    /checkpoint requires work_id and checkpoint_json/
+  )
   assert.equal(calls.length, 0)
 })
 
@@ -84,6 +90,7 @@ test('work CLI rejects empty identifiers before contacting the sidecar', async (
   const calls = []
   const fetchImpl = fakeFetch(calls)
   await assert.rejects(runCli(['state', ''], { fetchImpl }), /state requires work_id/)
+  await assert.rejects(runCli(['checkpoint', '', '{}'], { fetchImpl }), /checkpoint requires work_id and checkpoint_json/)
   await assert.rejects(runCli(['dispatch', 'work_1', '   '], { fetchImpl }), /dispatch requires work_id and frontier_id/)
   await assert.rejects(runCli(['collect', ' '], { fetchImpl }), /collect requires work_id/)
   await assert.rejects(runCli(['read', ''], { fetchImpl }), /read requires work_id/)
@@ -101,6 +108,17 @@ test('work CLI rejects malformed memory command arguments before contacting the 
   await assert.rejects(runCli(['memory-query', 'work_1', '{bad'], { fetchImpl }), /invalid JSON/)
   await assert.rejects(runCli(['memory-query', 'work_1', '{"similarity":0.8}'], { fetchImpl }), /unsupported memory query field/)
   await assert.rejects(runCli(['memory-read', 'work_1', '', 'mem_1'], { fetchImpl }), /memory-read requires work_id, retrieval_id, and memory_id/)
+  assert.equal(calls.length, 0)
+})
+
+test('work CLI rejects malformed checkpoint JSON before contacting the sidecar', async () => {
+  const { runCli } = await loadModule()
+  assert.equal(typeof runCli, 'function')
+  if (typeof runCli !== 'function') return
+
+  const calls = []
+  await assert.rejects(runCli(['checkpoint', 'work_1', '{bad'], { fetchImpl: fakeFetch(calls) }), /invalid JSON/)
+  await assert.rejects(runCli(['checkpoint', 'work_1', '[]'], { fetchImpl: fakeFetch(calls) }), /checkpoint requires checkpoint_json object/)
   assert.equal(calls.length, 0)
 })
 

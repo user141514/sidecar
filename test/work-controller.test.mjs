@@ -20,6 +20,13 @@ class FakeLedger {
     return event
   }
 
+  async appendIfEventCount(_id, expectedCount, type, payload) {
+    if (this.events.length !== expectedCount) {
+      throw new Error(`stale work state: expected ${expectedCount}, current ${this.events.length}`)
+    }
+    return this.append(_id, type, payload)
+  }
+
   async read(id) {
     return { id, createdAt: '2026-09-03T00:00:00.000Z', events: [...this.events] }
   }
@@ -423,6 +430,97 @@ test('WorkController serializes concurrent dispatch admission and applies pacing
   assert.equal(blocked.reason, 'pacing')
   assert.equal(blocked.retryAfterMs, 120_000)
   assert.equal(host.created.length, 1)
+})
+
+test('WorkController checkpoint commits one decision against an exact state revision and evidence set', async () => {
+  const { WorkController } = await loadModule()
+  assert.equal(typeof WorkController, 'function')
+  if (typeof WorkController !== 'function') return
+
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    { at: '2026-09-03T08:01:00.000Z', type: 'observation', payload: { fact: 'two independent frontiers emerged' } }
+  ])
+  const controller = new WorkController({ ledger, conversationHost: new FakeHost(), now: () => FakeLedger.now })
+  const before = await controller.state('work_test')
+  assert.equal(before.eventCount, 2)
+
+  const state = await controller.checkpoint('work_test', {
+    based_on_event_count: 2,
+    evidence_event_indexes: [1],
+    decision: {
+      action: 'SPLIT',
+      reason: 'commit the split against the observed state',
+      frontiers: [{ id: 'f1', task: 'inspect recovery', depends_on: [] }]
+    }
+  })
+
+  assert.equal(state.eventCount, 3)
+  assert.equal(state.latestDecision.action, 'SPLIT')
+  assert.deepEqual(state.latestDecision.checkpoint, {
+    based_on_event_count: 2,
+    evidence_event_indexes: [1]
+  })
+  assert.equal(state.frontiers[0].id, 'f1')
+})
+
+test('WorkController checkpoint rejects stale state without appending a decision', async () => {
+  const { WorkController } = await loadModule()
+  assert.equal(typeof WorkController, 'function')
+  if (typeof WorkController !== 'function') return
+
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    { at: '2026-09-03T08:01:00.000Z', type: 'observation', payload: { fact: 'old evidence' } }
+  ])
+  const controller = new WorkController({ ledger, conversationHost: new FakeHost(), now: () => FakeLedger.now })
+  await ledger.append('work_test', 'observation', { fact: 'new evidence arrived' })
+
+  await assert.rejects(
+    controller.checkpoint('work_test', {
+      based_on_event_count: 2,
+      evidence_event_indexes: [1],
+      decision: { action: 'CONTINUE', reason: 'stale continuation' }
+    }),
+    /stale work state: expected 2, current 3/
+  )
+  assert.equal(ledger.events.length, 3)
+})
+
+test('WorkController checkpoint uses outer evidence for REVISE and rejects invalid evidence', async () => {
+  const { WorkController } = await loadModule()
+  assert.equal(typeof WorkController, 'function')
+  if (typeof WorkController !== 'function') return
+
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    { at: '2026-09-03T08:01:00.000Z', type: 'observation', payload: { fact: 'plan is wrong' } }
+  ])
+  const controller = new WorkController({ ledger, conversationHost: new FakeHost(), now: () => FakeLedger.now })
+  const plan = {
+    objective: 'resolve the failure',
+    approach: 'change route',
+    current_focus: 'new route',
+    assumptions: [],
+    open_questions: []
+  }
+
+  const state = await controller.checkpoint('work_test', {
+    based_on_event_count: 2,
+    evidence_event_indexes: [1],
+    decision: { action: 'REVISE', reason: 'evidence changed the plan', plan, orchestration: { mode: 'EXECUTE' } }
+  })
+  assert.deepEqual(state.latestDecision.evidence_event_indexes, [1])
+  assert.equal(state.currentPlan.objective, 'resolve the failure')
+
+  await assert.rejects(
+    controller.checkpoint('work_test', {
+      based_on_event_count: 3,
+      evidence_event_indexes: [99],
+      decision: { action: 'CONTINUE', reason: 'bad evidence' }
+    }),
+    /invalid evidence event index/
+  )
 })
 
 test('WorkController validates the minimal decision action schema', async () => {

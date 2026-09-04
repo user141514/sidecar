@@ -134,3 +134,45 @@ test('WorkLedger rejects event types outside the minimal schema', async () => {
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('WorkLedger compare-and-append accepts the exact current event count', async () => {
+  const { WorkLedger } = await loadModule()
+  assert.equal(typeof WorkLedger, 'function')
+  if (typeof WorkLedger !== 'function') return
+
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-work-ledger-'))
+  try {
+    const ledger = new WorkLedger(root)
+    const work = await ledger.create('checkpoint')
+    const event = await ledger.appendIfEventCount(work.id, 1, 'decision', {
+      action: 'CONTINUE',
+      reason: 'state is current'
+    })
+    assert.equal(event.type, 'decision')
+    assert.equal((await ledger.read(work.id)).events.length, 2)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('WorkLedger compare-and-append rejects stale state after another queued append', async () => {
+  const { WorkLedger } = await loadModule()
+  assert.equal(typeof WorkLedger, 'function')
+  if (typeof WorkLedger !== 'function') return
+
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-work-ledger-'))
+  try {
+    const ledger = new WorkLedger(root)
+    const work = await ledger.create('checkpoint')
+    const first = ledger.append(work.id, 'observation', { fact: 'new evidence' })
+    const stale = ledger.appendIfEventCount(work.id, 1, 'decision', {
+      action: 'CONTINUE',
+      reason: 'based on old state'
+    })
+    await first
+    await assert.rejects(stale, /stale work state: expected 1, current 2/)
+    assert.equal((await ledger.read(work.id)).events.length, 2)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

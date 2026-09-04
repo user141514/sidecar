@@ -17,6 +17,7 @@ function usage() {
     'conversation-work append <work_id> <type> <payload_json>',
     'conversation-work state <work_id>',
     'conversation-work decide <work_id> <decision_json>',
+    'conversation-work checkpoint <work_id> <checkpoint_json>',
     'conversation-work dispatch <work_id> <frontier_id>',
     'conversation-work collect <work_id>',
     'conversation-work read <work_id>',
@@ -48,6 +49,20 @@ function commandToCall(argv) {
     const [workId, decision] = args
     if (args.length !== 2 || !workId || decision === undefined) throw new TypeError('decide requires work_id and decision_json')
     return ['work_decide', { work_id: workId, decision: parseJson(decision) }]
+  }
+  if (command === 'checkpoint') {
+    const [workId, checkpointRaw] = args
+    if (args.length !== 2 || !workId?.trim() || checkpointRaw === undefined) {
+      throw new TypeError('checkpoint requires work_id and checkpoint_json')
+    }
+    const checkpoint = parseJson(checkpointRaw)
+    if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) {
+      throw new TypeError('checkpoint requires checkpoint_json object')
+    }
+    const allowed = new Set(['based_on_event_count', 'evidence_event_indexes', 'decision'])
+    const unsupported = Object.keys(checkpoint).find((key) => !allowed.has(key))
+    if (unsupported) throw new TypeError(`unsupported checkpoint field: ${unsupported}`)
+    return ['work_checkpoint', { work_id: workId, ...checkpoint }]
   }
   if (command === 'dispatch') {
     if (args.length !== 2 || !args[0]?.trim() || !args[1]?.trim()) throw new TypeError('dispatch requires work_id and frontier_id')

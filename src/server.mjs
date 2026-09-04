@@ -186,6 +186,74 @@ const TOOLS = [
     }
   },
   {
+    name: 'work_checkpoint',
+    description: 'Optimistically commit one validated control decision against an exact Work Ledger event count and explicit evidence set.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        work_id: { type: 'string' },
+        based_on_event_count: { type: 'integer', minimum: 0 },
+        evidence_event_indexes: {
+          type: 'array',
+          minItems: 1,
+          items: { type: 'integer', minimum: 0 }
+        },
+        decision: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['CONTINUE', 'SPLIT', 'PRUNE', 'REVISE', 'STOP'] },
+            reason: { type: 'string' },
+            plan: {
+              type: 'object',
+              properties: {
+                objective: { type: 'string' },
+                approach: { type: 'string' },
+                current_focus: { type: 'string' },
+                assumptions: { type: 'array', items: { type: 'string' } },
+                open_questions: { type: 'array', items: { type: 'string' } }
+              },
+              required: ['objective', 'approach', 'current_focus', 'assumptions', 'open_questions'],
+              additionalProperties: false
+            },
+            orchestration: {
+              type: 'object',
+              properties: {
+                mode: { type: 'string', enum: ['EXPLORE', 'EXECUTE', 'ADVERSARIAL', 'SYNTHESIZE'] }
+              },
+              required: ['mode'],
+              additionalProperties: false
+            },
+            frontiers: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  task: { type: 'string' },
+                  prompt: { type: 'string' },
+                  depends_on: { type: 'array', items: { type: 'string' } }
+                },
+                required: ['id', 'task'],
+                additionalProperties: false
+              }
+            },
+            frontier_ids: { type: 'array', items: { type: 'string' } }
+          },
+          required: ['action', 'reason'],
+          allOf: [
+            {
+              if: { properties: { action: { const: 'REVISE' } }, required: ['action'] },
+              then: { required: ['plan', 'orchestration'] }
+            }
+          ],
+          additionalProperties: false
+        }
+      },
+      required: ['work_id', 'based_on_event_count', 'evidence_event_indexes', 'decision'],
+      additionalProperties: false
+    }
+  },
+  {
     name: 'work_dispatch',
     description: 'Dispatch one ready frontier through the managed depth-1 worker path with dependency and pacing checks.',
     inputSchema: {
@@ -351,6 +419,25 @@ async function dispatchTool(conversationHost, workLedger, workController, memory
       throw new TypeError('work_decide requires work_id and decision')
     }
     return workController.decide(args.work_id, args.decision)
+  }
+  if (name === 'work_checkpoint') {
+    if (!workController) throw new Error('work controller unavailable')
+    assertOnlyKeys(args, ['work_id', 'based_on_event_count', 'evidence_event_indexes', 'decision'], 'work_checkpoint')
+    if (typeof args.work_id !== 'string' || !Number.isInteger(args.based_on_event_count) || args.based_on_event_count < 0) {
+      throw new TypeError('work_checkpoint requires work_id and based_on_event_count')
+    }
+    if (!Array.isArray(args.evidence_event_indexes) || args.evidence_event_indexes.length === 0) {
+      throw new TypeError('work_checkpoint requires evidence_event_indexes')
+    }
+    if (!args.decision || typeof args.decision !== 'object' || Array.isArray(args.decision)) {
+      throw new TypeError('work_checkpoint requires decision')
+    }
+    assertOnlyKeys(args.decision, ['action', 'reason', 'plan', 'orchestration', 'frontiers', 'frontier_ids'], 'work_checkpoint decision')
+    return workController.checkpoint(args.work_id, {
+      based_on_event_count: args.based_on_event_count,
+      evidence_event_indexes: args.evidence_event_indexes,
+      decision: args.decision
+    })
   }
   if (name === 'work_dispatch') {
     if (!workController) throw new Error('work controller unavailable')

@@ -45,6 +45,11 @@ class FakeWorkController {
     return { id, latestDecision: decision, frontiers: decision.frontiers ?? [] }
   }
 
+  async checkpoint(id, checkpoint) {
+    this.calls.push({ method: 'checkpoint', id, checkpoint })
+    return { id, eventCount: checkpoint.based_on_event_count + 1, latestDecision: checkpoint.decision, frontiers: [] }
+  }
+
   async dispatch(id, frontierId) {
     this.calls.push({ method: 'dispatch', id, frontierId })
     return { dispatched: true, frontierId, conversationId: 'conv_worker' }
@@ -158,7 +163,7 @@ test('server exposes health, project pinning, and the three conversation tools',
     const listed = await rpc(baseUrl, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
     assert.deepEqual(
       listed.body.result.tools.map((tool) => tool.name),
-      ['project_create', 'project_find', 'project_pin', 'conversation_create', 'conversation_send', 'conversation_read', 'work_create', 'work_append', 'work_read', 'work_state', 'work_decide', 'work_dispatch', 'work_collect', 'work_memory_publish', 'work_memory_query', 'work_memory_read']
+      ['project_create', 'project_find', 'project_pin', 'conversation_create', 'conversation_send', 'conversation_read', 'work_create', 'work_append', 'work_read', 'work_state', 'work_decide', 'work_checkpoint', 'work_dispatch', 'work_collect', 'work_memory_publish', 'work_memory_query', 'work_memory_read']
     )
     const workDecide = listed.body.result.tools.find((tool) => tool.name === 'work_decide')
     const decisionSchema = workDecide.inputSchema.properties.decision
@@ -169,6 +174,10 @@ test('server exposes health, project pinning, and the three conversation tools',
     assert.equal(decisionSchema.properties.orchestration.properties.mode.enum.includes('ADVERSARIAL'), true)
     assert.deepEqual(decisionSchema.allOf[0].if.properties.action, { const: 'REVISE' })
     assert.deepEqual(decisionSchema.allOf[0].then.required, ['evidence_event_indexes', 'plan', 'orchestration'])
+    const checkpointTool = listed.body.result.tools.find((tool) => tool.name === 'work_checkpoint')
+    assert.deepEqual(checkpointTool.inputSchema.required, ['work_id', 'based_on_event_count', 'evidence_event_indexes', 'decision'])
+    assert.equal(checkpointTool.inputSchema.properties.evidence_event_indexes.minItems, 1)
+    assert.equal(checkpointTool.inputSchema.properties.decision.properties.action.enum.includes('STOP'), true)
   } finally {
     await app.close()
   }
@@ -250,6 +259,18 @@ test('dynamic work tools expose structured decision and deterministic dispatch c
     })
     assert.equal(JSON.parse(state.body.result.content[0].text).id, 'work_1')
 
+    const checkpoint = {
+      based_on_event_count: 2,
+      evidence_event_indexes: [1],
+      decision: { action: 'CONTINUE', reason: 'commit current interpretation' }
+    }
+    const checkpointed = await rpc(baseUrl, {
+      jsonrpc: '2.0', id: 301, method: 'tools/call', params: {
+        name: 'work_checkpoint', arguments: { work_id: 'work_1', ...checkpoint }
+      }
+    })
+    assert.equal(JSON.parse(checkpointed.body.result.content[0].text).eventCount, 3)
+
     const decision = {
       action: 'SPLIT',
       reason: 'two independent frontiers emerged',
@@ -277,6 +298,7 @@ test('dynamic work tools expose structured decision and deterministic dispatch c
     assert.equal(JSON.parse(collected.body.result.content[0].text).collected, 1)
     assert.deepEqual(workController.calls, [
       { method: 'state', id: 'work_1' },
+      { method: 'checkpoint', id: 'work_1', checkpoint },
       { method: 'decide', id: 'work_1', decision },
       { method: 'dispatch', id: 'work_1', frontierId: 'f1' },
       { method: 'collect', id: 'work_1' }

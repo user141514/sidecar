@@ -32,8 +32,8 @@ function normalizeOrchestration(orchestration) {
   return { mode }
 }
 
-function normalizeEvidenceIndexes(indexes, eventCount) {
-  if (!Array.isArray(indexes) || indexes.length === 0) throw new TypeError('REVISE requires evidence_event_indexes')
+function normalizeEvidenceIndexes(indexes, eventCount, missingMessage = 'REVISE requires evidence_event_indexes') {
+  if (!Array.isArray(indexes) || indexes.length === 0) throw new TypeError(missingMessage)
   if (indexes.some((index) => !Number.isInteger(index) || index < 0 || index >= eventCount)) {
     throw new TypeError('invalid evidence event index')
   }
@@ -58,6 +58,77 @@ function normalizeFrontier(frontier) {
     ...(prompt ? { prompt } : {}),
     depends_on: [...new Set(dependsOn.map((value) => value.trim()))]
   }
+}
+
+function normalizeDecisionPayload(decision, current, evidenceOverride) {
+  if (!decision || typeof decision !== 'object' || Array.isArray(decision)) {
+    throw new TypeError('work decision must be an object')
+  }
+  const action = requireString(decision.action, 'work decision action is required').toUpperCase()
+  if (!DECISION_ACTIONS.has(action)) throw new TypeError(`unsupported work decision action: ${action}`)
+  const reason = requireString(decision.reason, 'work decision reason is required')
+  const existingIds = new Set(current.frontiers.map((frontier) => frontier.id))
+
+  if (action === 'REVISE') {
+    return {
+      action,
+      reason,
+      evidence_event_indexes: normalizeEvidenceIndexes(
+        evidenceOverride ?? decision.evidence_event_indexes,
+        current.events.length,
+        evidenceOverride === undefined ? 'REVISE requires evidence_event_indexes' : 'checkpoint requires evidence_event_indexes'
+      ),
+      plan: normalizePlan(decision.plan),
+      orchestration: normalizeOrchestration(decision.orchestration)
+    }
+  }
+
+  if (action === 'SPLIT') {
+    if (!Array.isArray(decision.frontiers) || decision.frontiers.length === 0) {
+      throw new TypeError('SPLIT requires frontiers')
+    }
+    const frontiers = decision.frontiers.map(normalizeFrontier)
+    const ids = new Set()
+    for (const frontier of frontiers) {
+      if (ids.has(frontier.id) || existingIds.has(frontier.id)) throw new TypeError(`duplicate frontier id: ${frontier.id}`)
+      ids.add(frontier.id)
+    }
+    const knownIds = new Set([...existingIds, ...ids])
+    for (const frontier of frontiers) {
+      for (const dependency of frontier.depends_on) {
+        if (!knownIds.has(dependency)) throw new TypeError(`unknown frontier dependency: ${dependency}`)
+        if (dependency === frontier.id) throw new TypeError(`frontier cannot depend on itself: ${frontier.id}`)
+      }
+    }
+    const newById = new Map(frontiers.map((frontier) => [frontier.id, frontier]))
+    const visiting = new Set()
+    const visited = new Set()
+    const visit = (id) => {
+      if (visited.has(id)) return
+      if (visiting.has(id)) throw new TypeError(`frontier dependency cycle: ${id}`)
+      visiting.add(id)
+      for (const dependency of newById.get(id)?.depends_on ?? []) {
+        if (newById.has(dependency)) visit(dependency)
+      }
+      visiting.delete(id)
+      visited.add(id)
+    }
+    for (const id of ids) visit(id)
+    return { action, reason, frontiers }
+  }
+
+  if (action === 'PRUNE') {
+    if (!Array.isArray(decision.frontier_ids) || decision.frontier_ids.length === 0) {
+      throw new TypeError('PRUNE requires frontier_ids')
+    }
+    const frontierIds = [...new Set(decision.frontier_ids.map((id) => requireString(id, 'frontier id is required')))]
+    for (const id of frontierIds) {
+      if (!existingIds.has(id)) throw new TypeError(`unknown frontier id: ${id}`)
+    }
+    return { action, reason, frontier_ids: frontierIds }
+  }
+
+  return { action, reason }
 }
 
 function deriveState(work) {
@@ -140,6 +211,7 @@ function deriveState(work) {
     id: work.id,
     createdAt: work.createdAt,
     goal,
+    eventCount: work.events.length,
     latestDecision,
     completed,
     stopped,
@@ -196,71 +268,43 @@ export class WorkController {
   }
 
   async #decide(workId, decision) {
-    if (!decision || typeof decision !== 'object' || Array.isArray(decision)) {
-      throw new TypeError('work decision must be an object')
-    }
-    const action = requireString(decision.action, 'work decision action is required').toUpperCase()
-    if (!DECISION_ACTIONS.has(action)) throw new TypeError(`unsupported work decision action: ${action}`)
-    const reason = requireString(decision.reason, 'work decision reason is required')
     const current = await this.state(workId)
     if (current.stopped || current.completed) throw new Error('work is stopped')
-    const existingIds = new Set(current.frontiers.map((frontier) => frontier.id))
-    let payload
-
-    if (action === 'REVISE') {
-      payload = {
-        action,
-        reason,
-        evidence_event_indexes: normalizeEvidenceIndexes(decision.evidence_event_indexes, current.events.length),
-        plan: normalizePlan(decision.plan),
-        orchestration: normalizeOrchestration(decision.orchestration)
-      }
-    } else if (action === 'SPLIT') {
-      if (!Array.isArray(decision.frontiers) || decision.frontiers.length === 0) {
-        throw new TypeError('SPLIT requires frontiers')
-      }
-      const frontiers = decision.frontiers.map(normalizeFrontier)
-      const ids = new Set()
-      for (const frontier of frontiers) {
-        if (ids.has(frontier.id) || existingIds.has(frontier.id)) throw new TypeError(`duplicate frontier id: ${frontier.id}`)
-        ids.add(frontier.id)
-      }
-      const knownIds = new Set([...existingIds, ...ids])
-      for (const frontier of frontiers) {
-        for (const dependency of frontier.depends_on) {
-          if (!knownIds.has(dependency)) throw new TypeError(`unknown frontier dependency: ${dependency}`)
-          if (dependency === frontier.id) throw new TypeError(`frontier cannot depend on itself: ${frontier.id}`)
-        }
-      }
-      const newById = new Map(frontiers.map((frontier) => [frontier.id, frontier]))
-      const visiting = new Set()
-      const visited = new Set()
-      const visit = (id) => {
-        if (visited.has(id)) return
-        if (visiting.has(id)) throw new TypeError(`frontier dependency cycle: ${id}`)
-        visiting.add(id)
-        for (const dependency of newById.get(id)?.depends_on ?? []) {
-          if (newById.has(dependency)) visit(dependency)
-        }
-        visiting.delete(id)
-        visited.add(id)
-      }
-      for (const id of ids) visit(id)
-      payload = { action, reason, frontiers }
-    } else if (action === 'PRUNE') {
-      if (!Array.isArray(decision.frontier_ids) || decision.frontier_ids.length === 0) {
-        throw new TypeError('PRUNE requires frontier_ids')
-      }
-      const frontierIds = [...new Set(decision.frontier_ids.map((id) => requireString(id, 'frontier id is required')))]
-      for (const id of frontierIds) {
-        if (!existingIds.has(id)) throw new TypeError(`unknown frontier id: ${id}`)
-      }
-      payload = { action, reason, frontier_ids: frontierIds }
-    } else {
-      payload = { action, reason }
-    }
-
+    const payload = normalizeDecisionPayload(decision, current)
     await this.ledger.append(workId, 'decision', payload)
+    return this.state(workId)
+  }
+
+  async checkpoint(workId, checkpoint) {
+    const run = this.decisionQueue.then(() => this.#checkpoint(workId, checkpoint))
+    this.decisionQueue = run.catch(() => {})
+    return run
+  }
+
+  async #checkpoint(workId, checkpoint) {
+    if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) {
+      throw new TypeError('work checkpoint must be an object')
+    }
+    const basedOnEventCount = checkpoint.based_on_event_count
+    if (!Number.isInteger(basedOnEventCount) || basedOnEventCount < 0) {
+      throw new TypeError('checkpoint based_on_event_count must be a non-negative integer')
+    }
+    const current = await this.state(workId)
+    if (current.stopped || current.completed) throw new Error('work is stopped')
+    if (current.eventCount !== basedOnEventCount) {
+      throw new Error(`stale work state: expected ${basedOnEventCount}, current ${current.eventCount}`)
+    }
+    const evidence = normalizeEvidenceIndexes(
+      checkpoint.evidence_event_indexes,
+      current.eventCount,
+      'checkpoint requires evidence_event_indexes'
+    )
+    const payload = normalizeDecisionPayload(checkpoint.decision, current, evidence)
+    payload.checkpoint = {
+      based_on_event_count: basedOnEventCount,
+      evidence_event_indexes: evidence
+    }
+    await this.ledger.appendIfEventCount(workId, basedOnEventCount, 'decision', payload)
     return this.state(workId)
   }
 

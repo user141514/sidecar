@@ -18,9 +18,19 @@ function now() {
   return new Date().toISOString()
 }
 
+function validateEvent(type, payload) {
+  if (!EVENT_TYPES.has(type)) throw new TypeError(`unsupported work event type: ${type}`)
+  if (JSON.stringify(payload) === undefined) throw new TypeError('payload must be JSON-serializable')
+}
+
+function eventCount(raw) {
+  return raw.split('\n').filter(Boolean).length
+}
+
 export class WorkLedger {
   constructor(rootDir) {
     this.rootDir = rootDir
+    this.writeQueues = new Map()
   }
 
   workDir(id) {
@@ -46,13 +56,39 @@ export class WorkLedger {
     return meta
   }
 
+  enqueueWrite(id, operation) {
+    const previous = this.writeQueues.get(id) ?? Promise.resolve()
+    const run = previous.then(operation)
+    this.writeQueues.set(id, run.catch(() => {}))
+    return run
+  }
+
   async append(id, type, payload = {}) {
-    if (!EVENT_TYPES.has(type)) throw new TypeError(`unsupported work event type: ${type}`)
-    if (JSON.stringify(payload) === undefined) throw new TypeError('payload must be JSON-serializable')
-    const dir = await this.checkedWorkDir(id)
-    const event = { at: now(), type, payload }
-    await appendFile(join(dir, 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8')
-    return event
+    validateEvent(type, payload)
+    return this.enqueueWrite(id, async () => {
+      const dir = await this.checkedWorkDir(id)
+      const event = { at: now(), type, payload }
+      await appendFile(join(dir, 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8')
+      return event
+    })
+  }
+
+  async appendIfEventCount(id, expectedCount, type, payload = {}) {
+    if (!Number.isInteger(expectedCount) || expectedCount < 0) throw new TypeError('expected event count must be a non-negative integer')
+    validateEvent(type, payload)
+    return this.enqueueWrite(id, async () => {
+      const dir = await this.checkedWorkDir(id)
+      const raw = await readFile(join(dir, 'events.jsonl'), 'utf8')
+      const currentCount = eventCount(raw)
+      if (currentCount !== expectedCount) {
+        const error = new Error(`stale work state: expected ${expectedCount}, current ${currentCount}`)
+        error.code = 'WORK_STALE'
+        throw error
+      }
+      const event = { at: now(), type, payload }
+      await appendFile(join(dir, 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8')
+      return event
+    })
   }
 
   async read(id) {
