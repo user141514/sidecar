@@ -1,29 +1,78 @@
-# conversation-sidecar
+# sidecar
 
-Linux-first unattended bridge for one external ChatGPT web conversation.
+Cross-platform local sidecar for durable ChatGPT browser conversations, Work Ledger state, plan revision, historical memory, checkpoints, and bounded worker coordination. Linux and Windows share one application runtime; OS differences are confined to Native Messaging installation and launch.
 
-## V0 runtime
+## Runtime
 
 ```text
-MCP caller
-  -> conversation-sidecar native host + localhost MCP
+MCP / Skill / host LLM
+  -> sidecar localhost MCP + durable Work state
+  -> ChatGPT conversation provider / bounded workers
   -> Chrome Native Messaging
   -> installed Manifest V3 extension
-  -> existing signed-in ChatGPT profile in one managed Chrome window0
+  -> existing signed-in ChatGPT profile
 ```
 
-The operational create/send/read path does **not** use an externally exposed CDP port, `DevToolsActivePort`, Playwright, Puppeteer, cookie copying, or a second browser profile.
+The operational browser path does **not** use an externally exposed CDP port, `DevToolsActivePort`, Playwright, Puppeteer, cookie copying, or a second browser profile.
 
 ## One-time installation boundary
 
-Chrome 136+ disables `--remote-debugging-port` and `--remote-debugging-pipe` for the default Chrome data directory. Google Chrome Stable also no longer accepts `--load-extension` as an unattended local-install path, while Linux external-extension deployment is administrator-controlled.
+The application runtime and browser protocol are shared on Linux and Windows. Only Native Messaging registration and the tiny launcher differ by operating system.
 
-Therefore V0 has one explicit one-time trust action:
+From the checkout on either platform, register the native host with:
 
-1. Open `chrome://extensions` in the user's existing Google Chrome profile.
+```bash
+npm run install:host
+```
+
+The installer generates a user-local manifest containing an absolute launcher path. Re-run it after moving the checkout.
+
+### Linux
+
+The generated manifest is:
+
+```text
+~/.config/google-chrome/NativeMessagingHosts/com.conversation_sidecar.host.json
+```
+
+It launches:
+
+```text
+<checkout>/install/conversation-sidecar-host
+```
+
+The POSIX launcher `exec`s the shared `src/server.mjs` so Chrome owns the same stdin/stdout process lifecycle.
+
+### Windows
+
+The same installer generates:
+
+```text
+%USERPROFILE%\AppData\Local\Conversation Sidecar\NativeMessagingHosts\com.conversation_sidecar.host.json
+```
+
+and registers that manifest path for the current user under:
+
+```text
+HKCU\Software\Google\Chrome\NativeMessagingHosts\com.conversation_sidecar.host
+```
+
+The manifest launches:
+
+```text
+<checkout>\install\conversation-sidecar-host.bat
+```
+
+which delegates Chrome stdin/stdout directly to `node.exe <checkout>\src\server.mjs`. For cmd users, `install\install-host-win.bat` is a thin wrapper around the same Node installer.
+
+Node.js 24+ must be visible as `node` / `node.exe` to Chrome's user environment.
+
+### Shared Chrome trust action
+
+1. Open `chrome://extensions` in the existing signed-in Google Chrome profile.
 2. Enable **Developer mode**.
 3. Choose **Load unpacked**.
-4. Select `/home/ad/gitproject/conversation-sidecar/extension`.
+4. Select `<checkout>/extension` (or `<checkout>\extension` on Windows).
 
 Expected fixed extension ID:
 
@@ -31,27 +80,35 @@ Expected fixed extension ID:
 cfifihieaffhniimpimnfmignbbdaalb
 ```
 
-After this one installation, Chrome persists the extension in the existing profile. Normal create/send/read operation and future Chrome starts require no recurring remote-debugging approval or sidecar reconnect action.
-
-The Native Messaging host is registered at:
+The Native Messaging host identity also remains shared:
 
 ```text
-~/.config/google-chrome/NativeMessagingHosts/com.conversation_sidecar.host.json
+com.conversation_sidecar.host
 ```
 
-When the extension starts, it calls `chrome.runtime.connectNative('com.conversation_sidecar.host')`; Chrome auto-starts `src/server.mjs`. The native connection keeps the sidecar and extension bridge alive.
+After this one installation, Chrome persists the extension. When it starts, it connects to the Native Messaging host, which launches the same `src/server.mjs` on both operating systems. No recurring browser approval is introduced.
 
 ## Browser placement
 
 The first `conversation_create` establishes one sidecar-owned normal Chrome window, `window0`, using the existing signed-in profile. That first conversation uses window0's initial tab. Every later `conversation_create` uses `chrome.tabs.create({ windowId: window0 })`; it must not create another Chrome window. If the user closes window0, the next create establishes a replacement window0.
 
-## MCP tools
+## MCP surface
 
-- `project_create` — explicitly create one ChatGPT Project through the signed-in web UI and return its canonical Project home URL; it does not pin the result.
-- `project_pin` — persist one existing ChatGPT Project home URL as the machine-local default destination for future creates.
-- `conversation_create` — create a ChatGPT conversation tab inside managed `window0`; optional `project_url` overrides the pinned Project for that create.
-- `conversation_send` — submit one prompt and return after the browser accepted it.
-- `conversation_read` — read durable status/raw response from the local JSONL ledger only.
+The repository currently contains both the replaceable ChatGPT conversation provider and the integrated control-plane primitives used during rapid single-developer iteration.
+
+Provider tools include:
+
+- `project_create`, `project_find`, `project_pin`
+- `conversation_create`, `conversation_send`, `conversation_read`
+
+Control tools include:
+
+- `work_create`, `work_append`, `work_read`, `work_state`
+- `work_decide`, `work_checkpoint`
+- `work_dispatch`, `work_collect`
+- `work_memory_publish`, `work_memory_query`, `work_memory_read`
+
+The semantic routing policy remains outside the runtime in Agent Skills. The deterministic runtime owns durable state, validation, pacing, provenance, and bounded execution effects.
 
 A Project home URL has the form:
 
@@ -59,53 +116,38 @@ A Project home URL has the form:
 https://chatgpt.com/g/g-p-<project-id>[-slug]/project
 ```
 
-Without a machine-local pin, `conversation_create()` defaults to a root `https://chatgpt.com/` conversation. After `project_pin`, later `conversation_create` calls without arguments start from that Project home; an explicit `project_url` overrides the pin for one create. Project-scoped threads are persisted and reattached using their canonical `/g/g-p-.../c/...` URLs. `project_create` is an explicit onboarding mutation and never changes the pin automatically; automatic sidebar Project discovery remains separate.
+Without a machine-local pin, `conversation_create()` defaults to a root `https://chatgpt.com/` conversation. After `project_pin`, later creates start from that Project home unless an explicit `project_url` overrides it. Project-scoped threads are persisted and reattached using their canonical `/g/g-p-.../c/...` URLs.
 
-Local conversation data and the pinned Project configuration live under `data/conversations/` and are ignored by Git.
+Runtime state lives under `data/` and is ignored by Git.
 
 ## Secure MCP Tunnel
 
-ChatGPT should reach the sidecar through OpenAI Secure MCP Tunnel, not by adding another public Tailscale Funnel route. The local tunnel target is the stdio adapter:
+A remote MCP client can reach the local sidecar through OpenAI Secure MCP Tunnel. The local stdio adapter is:
 
 ```bash
 npm run mcp:stdio
 ```
 
-It forwards newline-delimited MCP JSON-RPC to the already-running local endpoint at `http://127.0.0.1:7337/mcp`. The adapter never controls Chrome directly.
+It forwards newline-delimited MCP JSON-RPC to the already-running local endpoint at `http://127.0.0.1:7337/mcp`; it does not control Chrome directly.
 
-This host has the official `tunnel-client` installed at `~/.local/bin/tunnel-client`. Its outbound control-plane traffic currently requires the existing local Clash proxy:
-
-```bash
-export HTTPS_PROXY=http://127.0.0.1:7897
-export HTTP_PROXY=http://127.0.0.1:7897
-```
-
-After creating an OpenAI Platform tunnel and a restricted runtime API key with Tunnels Read + Use, attach the managed runtime without storing the key in this repository:
+Example managed runtime command:
 
 ```bash
 export CONTROL_PLANE_TUNNEL_ID=tunnel_...
 export CONTROL_PLANE_API_KEY=...
 
 tunnel-client runtimes connect \
-  --alias conversation-sidecar-linux \
-  --profile conversation-sidecar-linux \
+  --alias sidecar \
+  --profile sidecar \
   --tunnel-id "$CONTROL_PLANE_TUNNEL_ID" \
   --runtime-api-key env:CONTROL_PLANE_API_KEY \
-  --mcp-command "/usr/bin/node /home/ad/gitproject/conversation-sidecar/src/mcp-stdio.mjs"
-
-tunnel-client runtimes status conversation-sidecar-linux --json
+  --mcp-command "node <checkout>/src/mcp-stdio.mjs"
 ```
-
-The tunnel runtime is not considered ready until `runtimes status` reports the managed process healthy and ready.
-
-## Linux integration
-
-GNOME's `google-chrome.desktop` remains a normal Chrome launcher; conversation-sidecar does not wrap Chrome startup.
 
 ## Development
 
 ```bash
-node --test
+npm test
 ```
 
-No third-party runtime dependencies are required for V0.
+No third-party runtime dependencies are required. Platform-specific behavior should stay confined to the Native Messaging installation/launcher boundary unless a concrete OS requirement proves otherwise.

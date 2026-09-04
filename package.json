@@ -6,7 +6,8 @@
   "scripts": {
     "test": "node --test",
     "start": "node src/server.mjs",
-    "mcp:stdio": "node src/mcp-stdio.mjs"
+    "mcp:stdio": "node src/mcp-stdio.mjs",
+    "install:host": "node install/install-host.mjs"
   },
   "engines": {
     "node": ">=24"
