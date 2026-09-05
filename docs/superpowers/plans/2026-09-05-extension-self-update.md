@@ -17,10 +17,12 @@
 - Old releases without the reload handler require ONE manual bootstrap reload. This is not silently bypassed through CDP/UI.
 - Do not modify the active checkout or its native-host registration during implementation. Use an isolated worktree; preserve previous dirty changes.
 - Git fetch/push use SSH. main is an unrelated initial-commit root, so do not rebase unrelated histories.
-- Independent provider remote remains unconfirmed; do not label a detached worktree as a published second repository.
+- Both SSH remotes are verified: user141514/sidecar.git and user141514/chatgpt-conversation.git. Preserve the independent provider's existing main ancestry (00a14e9); a local detached worktree is not publication evidence.
 - Linux-executed Windows fixtures are contract evidence, NOT a real Windows Chrome gate.
 
 ## Step 1 — shared lifecycle and reconnect controller
+
+**Status: implemented; focused tests and adversarial self-audit passed.**
 
 Files: extension/lifecycle.js, src/extension-control.mjs, test/extension-update.test.mjs.
 
@@ -31,6 +33,8 @@ Files: extension/lifecycle.js, src/extension-control.mjs, test/extension-update.
 - [ ] Audit safety, same-token retry, and native-host replacement boundaries.
 
 ## Step 2 — wire runtime, build identity and shared CLI/MCP
+
+**Status: implemented; runtime, reconnect and compatibility tests passed.**
 
 Files: extension/service-worker.js, extension/content-script.js, extension/manifest.json, extension/build-info.js, scripts/extension-build.mjs, src/server.mjs, src/cli.mjs, related tests.
 
@@ -43,6 +47,8 @@ Files: extension/service-worker.js, extension/content-script.js, extension/manif
 
 ## Step 3 — platform links and standalone packaging
 
+**Status: implemented; both local suites and all 37 shared-file comparisons passed. SSH publication and remote Windows execution are separate gates.**
+
 Files: install/platform-link.mjs, install/install-host.mjs, package.json, skills/chatgpt-subagents/SKILL.md, .github/workflows/test.yml, scripts/export-provider.mjs.
 
 - [ ] Move OS path/registry/launcher choices into one link adapter; retain shared manifest identity and stdio semantics.
@@ -54,7 +60,7 @@ Files: install/platform-link.mjs, install/install-host.mjs, package.json, skills
 
 ## Step 4 — deployment gate
 
-- [ ] Inspect real installed status without browser UI. If old version lacks handler, stop at manual bootstrap.
+- [x] Inspect real installed status without browser UI. Old version reports Unknown tool: extension_status; stop at manual bootstrap.
 - [ ] After bootstrap, invoke CLI update; verify a new instance, token/build match and no pending loss. No fresh child is needed to test reload itself.
 - [ ] Report separately: implementation/tests, repository publication, Linux live reload, Windows live reload. Never merge these into one success claim.
 
@@ -66,10 +72,10 @@ Injection: https://developer.chrome.com/docs/extensions/reference/api/scripting
 
 ## Final validation and deployment status
 
-- Shared suite: 123 tests, 121 passed, 0 failed, 2 Windows-only skipped on Linux.
-- Standalone suite in `/home/ad/gitproject/chatgpt-conversation`: 79 tests, 77 passed, 0 failed, 2 Windows-only skipped.
-- Independent local repository created on `feat/shared-extension-update`, commit `31b9b83`; no remote is configured because the separate SSH destination has not been supplied.
-- Ten critical shared source files compared byte-for-byte with the independent repository: zero mismatches. Extension build `96751ceac4c301c99d615252728f40356f6a3f27dd7162690abc80eb1ce79834`, fixed ID `cfifihieaffhniimpimnfmignbbdaalb`.
+- Shared suite: 130 tests, 128 passed, 0 failed, 2 Windows-only skipped on Linux.
+- Standalone suite in `/home/ad/gitproject/chatgpt-conversation`: 86 tests, 84 passed, 0 failed, 2 Windows-only skipped.
+- Independent local repository created on `feat/shared-extension-update`; initial generated snapshot 31b9b83 is retained as a backup. Public repository discovery followed by SSH fetch verified the existing remote main at 00a14e9. The final publication must be parented to that remote history, not to an unrelated generated root.
+- All 37 allowlisted shared files compared byte-for-byte with the independent repository: zero mismatches. Extension build `c1ed6706f950cf62c0809033fc747ef3497143dcfe036a94cabc8329c9720c1a`, fixed ID `cfifihieaffhniimpimnfmignbbdaalb`.
 - Syntax check: 24 JS/MJS files, zero failures. `git diff --check` clean.
 - CodeRabbit invocation reached reviewing but was stopped at the 100-second budget, exit 124; no completed external review verdict is claimed.
 - Actual installed read-only probe returned `Unknown tool: extension_status`. Native host PID remained 1255120, launched from the original checkout. No GUI automation, reload, new child, native-host re-registration or global CLI replacement was performed.
@@ -82,6 +88,10 @@ Step 1 audit: nine initial missing-feature tests were RED, then GREEN. Follow-up
 
 Step 2 audit: content-script reinjection now has an isolated closure, captured build identity and disposal of the prior listener/monitor. Existing conversation runtime tests remain unchanged in behavior; tests address the runtime through its explicit object rather than leaked global functions. No page/window navigation is in the updater.
 
+Step 3 compatibility audit: preserved the original provider's CLI, installer command and endpoint environment-variable contracts. Tests caught a broken installed-bin symlink and lost CHATGPT_CONVERSATION_MCP_URL support; both were RED and then GREEN after correction. The legacy install entry delegates to the same platform adapter. Windows startup tests derive the expected service identity from the package rather than assuming the integrated Sidecar brand.
+
+Reinjection audit: an invalidated old extension context may throw during disposal. A real content-script execution test reproduced this; the new script now continues bootstrapping safely. The uncorrelated-restart test exercises a fresh instance with the wrong receipt, not only an unchanged old instance.
+
 Step 3 audit: standalone allowlist export was RED before implementation. Package equality covers extension/CLI/schema/Skill/link files; standalone suite runs inside an independent distribution with no work/memory/controller modules. Native path and launcher tests pass on Linux; actual Windows execution is not yet observed.
 
-Baseline: 105 tests, existing dirty protocol work captured as 6b8340b796f5f3ad3a03dae69250b7b93643cb05; active checkout untouched. origin/main has an unrelated root (11/1 divergence, no merge base). Provider source 00a14e9 exists only as a detached worktree. GitHub CLI is not authenticated; a separate remote cannot be inferred from it.
+Baseline: 105 tests, existing dirty protocol work captured as 6b8340b796f5f3ad3a03dae69250b7b93643cb05; active checkout untouched. origin/main has an unrelated root (11/1 divergence, no merge base). Initial local discovery found provider source 00a14e9 only in a detached worktree, and GitHub CLI was unauthenticated. Later public API discovery and SSH fetch independently confirmed git@github.com:user141514/chatgpt-conversation.git at that exact commit.

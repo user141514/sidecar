@@ -5,6 +5,9 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { encodeNativeMessage } from '../src/native-messaging.mjs'
 
+const { name: serviceName } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+const serviceMarker = `"service":${JSON.stringify(serviceName)}`
+
 async function read(relativePath) {
   try {
     return await readFile(new URL(relativePath, import.meta.url), 'utf8')
@@ -64,7 +67,7 @@ test('Windows batch launcher starts the shared server and preserves Native Messa
         child.stderr.setEncoding('utf8')
         child.stderr.on('data', (chunk) => {
           stderr += chunk
-          if (stderr.includes('"service":"conversation-sidecar"')) resolve()
+          if (stderr.includes(serviceMarker)) resolve()
         })
         child.once('exit', (code, signal) => {
           reject(new Error(`launcher exited before startup: code=${code} signal=${signal} stderr=${stderr}`))
@@ -105,7 +108,7 @@ test('server starts when executed directly on Windows', { skip: process.platform
         child.stderr.setEncoding('utf8')
         child.stderr.on('data', (chunk) => {
           stderr += chunk
-          if (stderr.includes('"service":"conversation-sidecar"')) resolve()
+          if (stderr.includes(serviceMarker)) resolve()
         })
         child.once('exit', (code, signal) => {
           reject(new Error(`server exited before startup: code=${code} signal=${signal} stderr=${stderr}`))
@@ -114,7 +117,7 @@ test('server starts when executed directly on Windows', { skip: process.platform
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out waiting for startup: ${stderr}`)), 2_000))
     ])
-    assert.match(stderr, /"service":"conversation-sidecar"/)
+    assert.ok(stderr.includes(serviceMarker), `Missing expected service startup: ${stderr}`)
   } finally {
     child.stdin.end()
     if (child.exitCode === null && child.signalCode === null) {

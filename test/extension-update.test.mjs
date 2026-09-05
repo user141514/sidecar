@@ -186,9 +186,15 @@ test('independent updater tolerates lost reload ACK and verifies the correlated 
 
 test('old epoch or uncorrelated restart can never be reported as updated', async () => {
   const update = await updater()
-  let time = 0
-  const callTool = async (name) => name === 'extension_reload' ? { accepted: true } : oldStatus
-  await assert.rejects(update(callTool, { expectedBuildId: 'b'.repeat(64), now: () => time, sleep: async () => { time += 250 }, timeoutMs: 500 }), /not verified/i)
+  for (const after of [oldStatus, { ...oldStatus, instanceId: 'uncorrelated-new', buildId: 'b'.repeat(64), lastReload: { requestId: 'another-request', previousInstanceId: 'epoch-old' } }]) {
+    let time = 0
+    let requested = false
+    const callTool = async (name) => {
+      if (name === 'extension_reload') { requested = true; return { accepted: true } }
+      return requested ? after : oldStatus
+    }
+    await assert.rejects(update(callTool, { expectedBuildId: 'b'.repeat(64), now: () => time, sleep: async () => { time += 250 }, timeoutMs: 500 }), /not verified/i)
+  }
 })
 
 test('new instance with the wrong build fails rather than returning successful reload', async () => {
