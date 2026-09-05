@@ -5,13 +5,14 @@ import vm from 'node:vm'
 
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [] } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
   const tabMap = new Map(tabs.map((tab) => [tab.id, { ...tab }]))
   const nativeMessages = []
   const runtimeMessageListeners = []
+  let tabUpdatedListener = null
   const sentToTabs = []
   const createdTabs = []
   const createdWindows = []
@@ -91,6 +92,11 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
       }
     },
     tabs: {
+      onUpdated: {
+        addListener(listener) {
+          tabUpdatedListener = listener
+        }
+      },
       async get(tabId) {
         const tab = tabMap.get(tabId)
         if (!tab) throw new Error(`No tab ${tabId}`)
@@ -116,7 +122,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
       async sendMessage(tabId, message) {
         const tab = tabMap.get(tabId)
         if (!tab) throw new Error(`No tab ${tabId}`)
-        sentToTabs.push({ tabId, message })
+        sentToTabs.push({ tabId, message, storageSnapshot: structuredClone(storageState) })
         if (message.type === 'sidecar_ping') {
           if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
           return { ready: true, url: tab.url }
@@ -130,6 +136,13 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
             return { found: true, name: message.name, projectUrl: tab.projectUrl }
           }
           return { found: false, name: message.name }
+        }
+        if (message.type === 'conversation_prepare') {
+          return { prepared: true, url: tab.url, baselineAssistantCount: 0 }
+        }
+        if (message.type === 'conversation_submit') {
+          if (submitTransportFailure) throw new Error('submit response lost during navigation')
+          return { accepted: true, url: tab.url }
         }
         if (message.type === 'conversation_send') {
           return { accepted: true, url: tab.url, baselineAssistantCount: 0 }
@@ -169,16 +182,32 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
   }
 
   async function emitRuntimeMessage(message, sender) {
-    for (const listener of runtimeMessageListeners) listener(message, sender, () => {})
+    let response
+    for (const listener of runtimeMessageListeners) {
+      listener(message, sender, (value) => {
+        response = value
+      })
+    }
     for (let attempt = 0; attempt < 4; attempt += 1) {
       await new Promise((resolve) => setImmediate(resolve))
     }
+    return response
   }
 
   async function sendNativeMessage(message) {
     if (!nativeRequestListener) throw new Error('Native request listener was not registered')
     nativeRequestListener(message)
     for (let attempt = 0; attempt < 4; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+  }
+
+  async function updateTab(tabId, changes) {
+    const tab = tabMap.get(tabId)
+    if (!tab) throw new Error(`No tab ${tabId}`)
+    Object.assign(tab, changes)
+    if (tabUpdatedListener) tabUpdatedListener(tabId, { ...changes }, { ...tab })
+    for (let attempt = 0; attempt < 6; attempt += 1) {
       await new Promise((resolve) => setImmediate(resolve))
     }
   }
@@ -202,6 +231,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     request,
     emitRuntimeMessage,
     sendNativeMessage,
+    updateTab,
     reconnectNative,
     setFailNativeEventPosts(value) {
       failNativeEventPosts = value
@@ -250,6 +280,60 @@ test('project_create opens one root tab in window0 and returns its canonical Pro
   )
 })
 
+test('send persists pending state before the irreversible submit click', async () => {
+  const externalUrl = 'https://chatgpt.com/c/prepared-before-submit'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+
+  const response = await harness.request('conversation_send', {
+    conversationId: 'conv_existing',
+    turnId: 'turn_prepare',
+    text: 'continue',
+    externalUrl
+  })
+
+  assert.equal(response.ok, true)
+  const prepareIndex = harness.sentToTabs.findIndex(({ message }) => message.type === 'conversation_prepare')
+  const submitIndex = harness.sentToTabs.findIndex(({ message }) => message.type === 'conversation_submit')
+  assert.ok(prepareIndex >= 0, 'send must prepare the editor before creating the pending record')
+  assert.ok(submitIndex > prepareIndex, 'submit must happen after prepare')
+  const submitRecord = harness.sentToTabs[submitIndex]
+  assert.equal(submitRecord.storageSnapshot['pending:conv_existing']?.turnId, 'turn_prepare')
+  assert.equal(submitRecord.storageSnapshot['pending:conv_existing']?.promptText, 'continue')
+  assert.equal(submitRecord.storageSnapshot['pending:conv_existing']?.phase, 'submitting')
+})
+
+test('send preserves recoverable pending state when submit response is lost during navigation', async () => {
+  const externalUrl = 'https://chatgpt.com/c/submit-response-lost'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }],
+    submitTransportFailure: true
+  })
+
+  const response = await harness.request('conversation_send', {
+    conversationId: 'conv_existing',
+    turnId: 'turn_submit_race',
+    text: 'continue',
+    externalUrl
+  })
+
+  assert.equal(response.ok, false)
+  assert.match(response.error, /submit response lost/)
+  assert.equal(harness.storageState['pending:conv_existing']?.turnId, 'turn_submit_race')
+  assert.equal(harness.storageState['pending:conv_existing']?.phase, 'submitting')
+})
+
 test('send reloads a matching tab whose content script was invalidated by extension reload', async () => {
   const externalUrl = 'https://chatgpt.com/c/pre-reload-123'
   const harness = makeHarness({
@@ -273,7 +357,7 @@ test('send reloads a matching tab whose content script was invalidated by extens
   assert.deepEqual(harness.reloadedTabs, [20])
   assert.equal(harness.createdTabs.length, 0)
   assert.equal(
-    harness.sentToTabs.some(({ tabId, message }) => tabId === 20 && message.type === 'conversation_send'),
+    harness.sentToTabs.some(({ tabId, message }) => tabId === 20 && message.type === 'conversation_submit'),
     true
   )
 })
@@ -325,7 +409,7 @@ test('send reattaches a stale tab binding to an already-open matching ChatGPT co
   assert.equal(harness.createdTabs.length, 0)
   assert.equal(harness.storageState['conversation:conv_existing'].tabId, 30)
   assert.equal(
-    harness.sentToTabs.some(({ tabId, message }) => tabId === 30 && message.type === 'conversation_send'),
+    harness.sentToTabs.some(({ tabId, message }) => tabId === 30 && message.type === 'conversation_submit'),
     true
   )
 })
@@ -425,6 +509,178 @@ test('terminal events stay in a durable outbox until the native host acknowledge
 
   await harness.sendNativeMessage({ kind: 'event_ack', eventId })
   assert.equal(harness.storageState[outboxKey], undefined)
+})
+
+test('terminal runtime events acknowledge only after the durable outbox write', async () => {
+  const externalUrl = 'https://chatgpt.com/c/durable-ack'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 30, url: externalUrl },
+      'pending:conv_existing': {
+        conversationId: 'conv_existing',
+        turnId: 'turn_ack',
+        tabId: 30,
+        baselineAssistantCount: 0,
+        startedAt: 1
+      }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 30, windowId: 10, url: externalUrl }]
+  })
+
+  const response = await harness.emitRuntimeMessage({
+    kind: 'conversation_event',
+    event: {
+      type: 'response_completed',
+      conversationId: 'conv_existing',
+      turnId: 'turn_ack',
+      text: 'done',
+      externalUrl
+    }
+  }, { tab: { id: 30, windowId: 10, url: externalUrl } })
+
+  const eventId = 'terminal:conv_existing:turn_ack:response_completed'
+  assert.equal(response?.durable, true)
+  assert.equal(response?.eventId, eventId)
+  assert.equal(harness.storageState[`outbox:${eventId}`]?.event?.text, 'done')
+  assert.equal(harness.storageState['pending:conv_existing'], undefined)
+})
+
+test('terminal event from the wrong tab cannot mutate attachment, pending, or outbox', async () => {
+  const externalUrl = 'https://chatgpt.com/c/right-thread'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 30, url: externalUrl },
+      'pending:conv_existing': {
+        conversationId: 'conv_existing',
+        turnId: 'turn_right',
+        tabId: 30,
+        baselineAssistantCount: 0,
+        startedAt: 1
+      }
+    },
+    windows: [{ id: 10 }],
+    tabs: [
+      { id: 30, windowId: 10, url: externalUrl },
+      { id: 31, windowId: 10, url: 'https://chatgpt.com/c/wrong-thread' }
+    ]
+  })
+
+  const response = await harness.emitRuntimeMessage({
+    kind: 'conversation_event',
+    event: {
+      type: 'response_completed',
+      conversationId: 'conv_existing',
+      turnId: 'turn_right',
+      text: 'wrong source',
+      externalUrl: 'https://chatgpt.com/c/wrong-thread'
+    }
+  }, { tab: { id: 31, windowId: 10, url: 'https://chatgpt.com/c/wrong-thread' } })
+
+  assert.equal(response?.durable, false)
+  assert.equal(response?.reason, 'stale_source')
+  assert.equal(harness.storageState['conversation:conv_existing'].tabId, 30)
+  assert.equal(harness.storageState['conversation:conv_existing'].url, externalUrl)
+  assert.equal(harness.storageState['pending:conv_existing'].turnId, 'turn_right')
+  assert.equal(harness.storageState['outbox:terminal:conv_existing:turn_right:response_completed'], undefined)
+})
+
+test('navigation recovery claims a newer monitor owner and rejects the stale project monitor terminal', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-project123-agent/project'
+  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-owned'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 30, url: projectUrl },
+      'pending:conv_existing': {
+        conversationId: 'conv_existing',
+        turnId: 'turn_owned',
+        tabId: 30,
+        promptText: 'inspect',
+        startedAt: 1,
+        monitorVersion: 1
+      }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 30, windowId: 10, url: threadUrl }]
+  })
+
+  const claimed = await harness.emitRuntimeMessage(
+    { kind: 'pending_turn_lookup' },
+    { tab: { id: 30, windowId: 10, url: threadUrl } }
+  )
+
+  assert.equal(claimed?.monitorVersion, 2)
+  assert.equal(harness.storageState['pending:conv_existing'].monitorVersion, 2)
+  assert.equal(harness.storageState['conversation:conv_existing'].url, threadUrl)
+
+  const stale = await harness.emitRuntimeMessage({
+    kind: 'conversation_event',
+    event: {
+      type: 'error',
+      conversationId: 'conv_existing',
+      turnId: 'turn_owned',
+      monitorVersion: 1,
+      message: 'old project monitor timed out',
+      externalUrl: projectUrl
+    }
+  }, { tab: { id: 30, windowId: 10, url: threadUrl } })
+
+  assert.equal(stale?.durable, false)
+  assert.equal(stale?.reason, 'stale_monitor')
+  assert.equal(harness.storageState['pending:conv_existing'].monitorVersion, 2)
+  assert.equal(harness.storageState['outbox:terminal:conv_existing:turn_owned:error'], undefined)
+
+  const current = await harness.emitRuntimeMessage({
+    kind: 'conversation_event',
+    event: {
+      type: 'response_completed',
+      conversationId: 'conv_existing',
+      turnId: 'turn_owned',
+      monitorVersion: 2,
+      text: 'owned result',
+      externalUrl: threadUrl
+    }
+  }, { tab: { id: 30, windowId: 10, url: threadUrl } })
+
+  assert.equal(current?.durable, true)
+  assert.equal(harness.storageState['pending:conv_existing'], undefined)
+})
+
+test('same-document thread URL transition claims recovery ownership and updates attachment', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-project123-agent/project'
+  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-spa'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 30, url: projectUrl },
+      'pending:conv_existing': {
+        conversationId: 'conv_existing',
+        turnId: 'turn_spa',
+        tabId: 30,
+        promptText: 'inspect',
+        startedAt: 1,
+        monitorVersion: 1,
+        phase: 'submitted'
+      }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 30, windowId: 10, url: projectUrl }]
+  })
+
+  await harness.updateTab(30, { url: threadUrl, status: 'complete' })
+
+  assert.equal(harness.storageState['pending:conv_existing'].monitorVersion, 2)
+  assert.equal(harness.storageState['conversation:conv_existing'].url, threadUrl)
+  const kick = harness.sentToTabs.find(({ tabId, message }) => (
+    tabId === 30 &&
+    message.type === 'conversation_monitor_start' &&
+    message.turnId === 'turn_spa' &&
+    message.monitorVersion === 2
+  ))
+  assert.equal(kick?.message?.recovery, true)
 })
 
 test('completion events persist the canonical ChatGPT URL before forwarding the event', async () => {

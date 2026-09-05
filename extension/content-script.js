@@ -1,6 +1,6 @@
 const POLL_INTERVAL_MS = 500
-const RESPONSE_SETTLE_MS = 5_000
-const FALLBACK_RESPONSE_SETTLE_MS = 45_000
+const SNAPSHOT_INTERVAL_MS = 5_000
+const SNAPSHOT_QUIESCENCE_MS = 10_000
 const MONITOR_TIMEOUT_MS = 20 * 60 * 1000
 
 function sleep(ms) {
@@ -186,6 +186,28 @@ function assistantMessages() {
   return [...document.querySelectorAll('[data-message-author-role="assistant"]')]
 }
 
+function userMessages() {
+  return [...document.querySelectorAll('[data-message-author-role="user"]')]
+}
+
+function assistantObservation({ baselineAssistantCount, recovery, promptText }) {
+  const messages = assistantMessages()
+  const last = messages.at(-1)
+  if (!recovery || typeof promptText !== 'string' || !promptText.trim()) {
+    return { present: messages.length > baselineAssistantCount, last }
+  }
+
+  const users = userMessages()
+  const lastUser = users.at(-1)
+  const lastUserText = (lastUser?.innerText || lastUser?.textContent || '').trim()
+  const relation = lastUser?.compareDocumentPosition?.(last)
+  const followsPrompt = typeof relation === 'number' && (relation & 4) !== 0
+  return {
+    present: Boolean(last && lastUserText === promptText.trim() && followsPrompt),
+    last
+  }
+}
+
 function isGenerating() {
   if (document.querySelector('[data-testid="stop-button"]')) return true
   return [...document.querySelectorAll('button')].some((button) => {
@@ -195,97 +217,151 @@ function isGenerating() {
       label.includes('stop responding') ||
       label.includes('stop response') ||
       label.includes('停止生成') ||
+      label.includes('停止回答') ||
       label === 'stop'
   })
 }
 
-function hasCompletionAction(message) {
+function hasRecoveryTerminalEvidence(message) {
   const turn = message?.closest?.('[data-testid^="conversation-turn-"]')
   if (!turn?.querySelector) return false
   return Boolean(turn.querySelector(
-    'button[data-testid="copy-turn-action-button"], button[aria-label*="Copy response" i]'
+    'button[data-testid="copy-turn-action-button"], button[aria-label*="Copy response" i], button[aria-label*="复制回复"]'
   ))
 }
 
-async function emitEvent(event) {
-  await chrome.runtime.sendMessage({ kind: 'conversation_event', event })
+async function emitTerminalEvent(event) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await chrome.runtime.sendMessage({ kind: 'conversation_event', event })
+      if (response?.durable === true) return true
+    } catch {
+      // Retry the same logical terminal event; the service worker de-duplicates it.
+    }
+    if (attempt < 2) await sleep(500)
+  }
+  return false
 }
 
-async function monitorTurn({ conversationId, turnId, baselineAssistantCount }) {
-  const deadline = Date.now() + MONITOR_TIMEOUT_MS
-  let lastText = ''
-  let lastTextChangedAt = null
+async function monitorTurn({ conversationId, turnId, baselineAssistantCount, promptText, startedAt, monitorVersion, recovery = false }) {
+  let inactivityDeadline = Number.isFinite(startedAt)
+    ? Number(startedAt) + MONITOR_TIMEOUT_MS
+    : Date.now() + MONITOR_TIMEOUT_MS
+  let observedGenerating = false
+  let candidateText = null
+  let stableSnapshotSince = null
+  let lastSnapshotAt = null
   try {
-    while (Date.now() < deadline) {
+    while (Date.now() < inactivityDeadline) {
       await sleep(POLL_INTERVAL_MS)
-      const messages = assistantMessages()
-      const hasNewResponse = messages.length > baselineAssistantCount
-      const last = messages.at(-1)
-      const text = (last?.innerText || last?.textContent || '').trim()
 
-      if (!hasNewResponse || !text) continue
-      if (text !== lastText) {
-        lastText = text
-        lastTextChangedAt = Date.now()
+      if (isGenerating()) {
+        observedGenerating = true
+        inactivityDeadline = Date.now() + MONITOR_TIMEOUT_MS
+        candidateText = null
+        stableSnapshotSince = null
+        lastSnapshotAt = null
         continue
       }
-      if (isGenerating()) continue
-      if (lastTextChangedAt === null) continue
-      const stableForMs = Date.now() - lastTextChangedAt
-      if (stableForMs < RESPONSE_SETTLE_MS) continue
-      if (!hasCompletionAction(last) && stableForMs < FALLBACK_RESPONSE_SETTLE_MS) continue
+      if (!observedGenerating && !recovery) continue
 
-      await emitEvent({
+      const now = Date.now()
+      if (lastSnapshotAt !== null && now - lastSnapshotAt < SNAPSHOT_INTERVAL_MS) continue
+      lastSnapshotAt = now
+
+      const observation = assistantObservation({ baselineAssistantCount, recovery, promptText })
+      const last = observation.last
+      const text = (last?.innerText || last?.textContent || '').trim()
+
+      if (!observation.present || !text) {
+        candidateText = null
+        stableSnapshotSince = null
+        continue
+      }
+      if (!observedGenerating && recovery && !hasRecoveryTerminalEvidence(last)) {
+        candidateText = null
+        stableSnapshotSince = null
+        continue
+      }
+
+      if (text !== candidateText) {
+        candidateText = text
+        stableSnapshotSince = now
+        inactivityDeadline = now + MONITOR_TIMEOUT_MS
+        continue
+      }
+      if (stableSnapshotSince === null || now - stableSnapshotSince < SNAPSHOT_QUIESCENCE_MS) continue
+
+      const durable = await emitTerminalEvent({
         type: 'response_completed',
         conversationId,
         turnId,
+        monitorVersion,
         text,
         externalUrl: location.href
       })
-      return
+      if (durable) return
     }
-    await emitEvent({
+    await emitTerminalEvent({
       type: 'error',
       conversationId,
       turnId,
+      monitorVersion,
       message: 'Timed out waiting for ChatGPT generation to complete',
       externalUrl: location.href
     })
   } catch (error) {
-    await emitEvent({
+    await emitTerminalEvent({
       type: 'error',
       conversationId,
       turnId,
+      monitorVersion,
       message: error instanceof Error ? error.message : String(error),
       externalUrl: location.href
     })
   }
 }
 
-async function handleSend(message) {
+async function handlePrepare(message) {
   if (typeof message.text !== 'string' || !message.text.trim()) throw new Error('Prompt text is required')
   const baselineAssistantCount = assistantMessages().length
   const editor = await waitForPromptEditor()
   setPromptText(editor, message.text)
-  await waitAndSubmit()
   return {
-    accepted: true,
+    prepared: true,
     url: location.href,
     baselineAssistantCount
   }
 }
 
+async function handleSubmit() {
+  await waitAndSubmit()
+  return {
+    accepted: true,
+    url: location.href
+  }
+}
+
 async function resumePendingTurn() {
-  try {
-    const pending = await chrome.runtime.sendMessage({ kind: 'pending_turn_lookup' })
-    if (!pending?.conversationId || !pending?.turnId) return
-    void monitorTurn({
-      conversationId: pending.conversationId,
-      turnId: pending.turnId,
-      baselineAssistantCount: Number(pending.baselineAssistantCount ?? 0)
-    })
-  } catch {
-    // No service worker/pending turn yet; normal for a freshly opened page.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      const pending = await chrome.runtime.sendMessage({ kind: 'pending_turn_lookup' })
+      if (pending?.conversationId && pending?.turnId) {
+        void monitorTurn({
+          conversationId: pending.conversationId,
+          turnId: pending.turnId,
+          baselineAssistantCount: Number(pending.baselineAssistantCount ?? 0),
+          promptText: pending.promptText,
+          startedAt: pending.startedAt,
+          monitorVersion: pending.monitorVersion,
+          recovery: true
+        })
+      }
+      return
+    } catch {
+      // A freshly loaded document can race the service worker becoming ready.
+    }
+    if (attempt < 7) await sleep(250)
   }
 }
 
@@ -319,21 +395,37 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     void monitorTurn({
       conversationId: message.conversationId,
       turnId: message.turnId,
-      baselineAssistantCount: Number(message.baselineAssistantCount ?? 0)
+      baselineAssistantCount: Number(message.baselineAssistantCount ?? 0),
+      promptText: message.promptText,
+      startedAt: message.startedAt,
+      monitorVersion: message.monitorVersion,
+      recovery: message.recovery === true
     })
     sendResponse({ started: true })
     return
   }
 
-  if (message?.type !== 'conversation_send') return
+  if (message?.type === 'conversation_prepare') {
+    void handlePrepare(message)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({
+        prepared: false,
+        error: error instanceof Error ? error.message : String(error)
+      }))
+    return true
+  }
 
-  void handleSend(message)
-    .then((result) => sendResponse(result))
-    .catch((error) => sendResponse({
-      accepted: false,
-      error: error instanceof Error ? error.message : String(error)
-    }))
-  return true
+  if (message?.type === 'conversation_submit') {
+    void handleSubmit()
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({
+        accepted: false,
+        error: error instanceof Error ? error.message : String(error)
+      }))
+    return true
+  }
+
+  return
 })
 
 void resumePendingTurn()

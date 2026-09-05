@@ -333,59 +333,233 @@ test('project_create fails closed when only an unrelated generic dialog is prese
   assert.equal(unrelatedCreated, false)
 })
 
-test('completion waits for assistant text to settle when generation controls are absent', async () => {
-  const emitted = []
+test('resume retries pending lookup when a new document loads before pending persistence', async () => {
+  let pendingLookups = 0
   let now = 0
-  let poll = 0
-  const stream = [
-    '',
-    '当前',
-    '当前这个',
-    '当前这个 Project',
-    '当前这个 Project 的主题',
-    '当前这个 Project 的主题是 agent',
-    '当前这个 Project 的主题是 agent',
-    '当前这个 Project 的主题是 agent',
-    '当前这个 Project 的主题是 agent',
-    '当前这个 Project 的主题是 agent',
-    '当前这个 Project 的主题是 agent',
-    '当前这个 Project 的主题是 agent',
-    '当前这个 Project 的主题是 agent',
-    '当前这个 Project 的主题是 agent',
-    '当前这个 Project 的主题是 agent',
-    '当前这个 Project 的主题是 agent'
-  ]
-
-  const turnRoot = {
-    querySelector(selector) {
-      if (selector.includes('copy-turn-action-button')) {
-        return poll >= 20 ? { disabled: false } : null
-      }
-      return null
-    }
-  }
-
-  const assistantNode = {
-    get innerText() {
-      return stream[Math.min(poll, stream.length - 1)]
-    },
-    get textContent() {
-      return this.innerText
-    },
-    closest(selector) {
-      return selector === '[data-testid^="conversation-turn-"]' ? turnRoot : null
-    }
-  }
-
+  const emitted = []
   const document = {
-    querySelector(selector) {
-      if (selector === '[data-testid="stop-button"]') return null
+    querySelector() {
       return null
     },
     querySelectorAll(selector) {
-      if (selector === '[data-message-author-role="assistant"]') {
-        return poll === 0 ? [] : [assistantNode]
+      if (selector === 'button') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      if (selector === '[contenteditable="true"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-resume-race' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'pending_turn_lookup') {
+            pendingLookups += 1
+            if (pendingLookups < 3) throw new Error('service worker not ready')
+            return {
+              conversationId: 'conv_resume',
+              turnId: 'turn_resume',
+              baselineAssistantCount: 0,
+              startedAt: -1_200_000
+            }
+          }
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test-resume-expired' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
       }
+    },
+    Date: class extends Date {
+      static now() {
+        return now
+      }
+    },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+  for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(pendingLookups, 3)
+})
+
+test('recovery anchors the current assistant to the last matching user prompt instead of baseline assistant count', async () => {
+  const emitted = []
+  let now = 0
+  let poll = 0
+
+  const turnRoot = {
+    querySelector(selector) {
+      return selector.includes('copy-turn-action-button') ? { disabled: false } : null
+    }
+  }
+  const assistantNode = {
+    innerText: '恢复后的最终回答',
+    textContent: '恢复后的最终回答',
+    closest() {
+      return turnRoot
+    }
+  }
+  const userNode = {
+    innerText: '重复使用当前 prompt',
+    textContent: '重复使用当前 prompt',
+    compareDocumentPosition(other) {
+      return other === assistantNode ? 4 : 0
+    }
+  }
+  const document = {
+    querySelector() {
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
+      if (selector === '[data-message-author-role="user"]') return [userNode]
+      if (selector === 'button') return []
+      if (selector === '[contenteditable="true"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-baseline-reload' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'pending_turn_lookup') return null
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date {
+      static now() {
+        return now
+      }
+    },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      poll += 1
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.monitorTurn({
+    conversationId: 'conv_project',
+    turnId: 'turn_reloaded',
+    baselineAssistantCount: 3,
+    promptText: '重复使用当前 prompt',
+    recovery: true
+  })
+
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].type, 'response_completed')
+  assert.equal(emitted[0].text, '恢复后的最终回答')
+})
+
+test('recovered monitor uses the original startedAt deadline instead of granting a fresh 20 minutes without liveness', async () => {
+  const emitted = []
+  let now = 600_000
+  const document = {
+    querySelector() {
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === 'button') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      if (selector === '[data-message-author-role="user"]') return []
+      if (selector === '[contenteditable="true"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-deadline' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'pending_turn_lookup') return null
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date {
+      static now() {
+        return now
+      }
+    },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.monitorTurn({
+    conversationId: 'conv_project',
+    turnId: 'turn_deadline',
+    baselineAssistantCount: 0,
+    startedAt: 100_000,
+    recovery: true
+  })
+
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].type, 'error')
+  assert.ok(now <= 1_300_500, `recovery extended the original monitor deadline to ${now}ms`)
+})
+
+test('normal completion requires observing generation before idle convergence', async () => {
+  const emitted = []
+  let now = 0
+  let poll = 0
+
+  const assistantNode = {
+    innerText: '完整回答',
+    textContent: '完整回答'
+  }
+
+  const document = {
+    querySelector() {
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return poll === 0 ? [] : [assistantNode]
       if (selector === 'button') return []
       if (selector === '[contenteditable="true"]') return []
       return []
@@ -398,7 +572,10 @@ test('completion waits for assistant text to settle when generation controls are
     chrome: {
       runtime: {
         async sendMessage(message) {
-          if (message?.kind === 'conversation_event') emitted.push(message.event)
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test' }
+          }
           return null
         },
         onMessage: { addListener() {} }
@@ -431,12 +608,11 @@ test('completion waits for assistant text to settle when generation controls are
   })
 
   assert.equal(emitted.length, 1)
-  assert.equal(emitted[0].type, 'response_completed')
-  assert.equal(emitted[0].text, '当前这个 Project 的主题是 agent')
-  assert.ok(now >= 10000, `completion happened before the assistant turn exposed completion actions at ${now}ms`)
+  assert.equal(emitted[0].type, 'error')
+  assert.match(emitted[0].message, /Timed out/)
 })
 
-test('completion does not fire while ChatGPT exposes a Stop responding control', async () => {
+test('recovery may complete without seeing generation when terminal UI evidence converges for 10 seconds', async () => {
   const emitted = []
   let now = 0
   let poll = 0
@@ -447,15 +623,157 @@ test('completion does not fire while ChatGPT exposes a Stop responding control',
     }
   }
   const assistantNode = {
-    innerText: '完整回答',
-    textContent: '完整回答',
+    innerText: '恢复后的完整回答',
+    textContent: '恢复后的完整回答',
     closest() {
       return turnRoot
     }
   }
+
+  const document = {
+    querySelector() {
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
+      if (selector === 'button') return []
+      if (selector === '[contenteditable="true"]') return []
+      return []
+    }
+  }
+
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-recovery' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date {
+      static now() {
+        return now
+      }
+    },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      poll += 1
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.monitorTurn({
+    conversationId: 'conv_project',
+    turnId: 'turn_recovery',
+    baselineAssistantCount: 0,
+    recovery: true
+  })
+
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].type, 'response_completed')
+  assert.equal(emitted[0].text, '恢复后的完整回答')
+  assert.ok(now >= 10500, `recovery completed before the 10-second convergence window at ${now}ms`)
+})
+
+test('completion retries until the service worker acknowledges durable terminal storage', async () => {
+  let now = 0
+  let poll = 0
+  let terminalAttempts = 0
+
+  const assistantNode = {
+    innerText: '完整回答',
+    textContent: '完整回答'
+  }
   const stopButton = {
     getAttribute(name) {
       return name === 'aria-label' ? 'Stop responding' : null
+    },
+    textContent: ''
+  }
+  const document = {
+    querySelector() {
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
+      if (selector === 'button') return poll <= 2 ? [stopButton] : []
+      if (selector === '[contenteditable="true"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-durable-ack' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'pending_turn_lookup') return null
+          if (message?.kind === 'conversation_event' && message.event?.type === 'response_completed') {
+            terminalAttempts += 1
+            if (terminalAttempts === 1) return null
+            return { durable: true, eventId: 'terminal:conv_project:turn_ack:response_completed' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date {
+      static now() {
+        return now
+      }
+    },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      poll += 1
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.monitorTurn({
+    conversationId: 'conv_project',
+    turnId: 'turn_ack',
+    baselineAssistantCount: 0
+  })
+
+  assert.equal(terminalAttempts, 2)
+})
+
+test('completion starts a fresh 10-second snapshot window after Chinese Stop answering disappears', async () => {
+  const emitted = []
+  let now = 0
+  let poll = 0
+
+  const assistantNode = {
+    innerText: '完整回答',
+    textContent: '完整回答'
+  }
+  const stopButton = {
+    getAttribute(name) {
+      return name === 'aria-label' ? '停止回答' : null
     },
     textContent: ''
   }
@@ -467,7 +785,7 @@ test('completion does not fire while ChatGPT exposes a Stop responding control',
     },
     querySelectorAll(selector) {
       if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
-      if (selector === 'button') return poll < 20 ? [stopButton] : []
+      if (selector === 'button') return poll < 30 ? [stopButton] : []
       if (selector === '[contenteditable="true"]') return []
       return []
     }
@@ -479,7 +797,10 @@ test('completion does not fire while ChatGPT exposes a Stop responding control',
     chrome: {
       runtime: {
         async sendMessage(message) {
-          if (message?.kind === 'conversation_event') emitted.push(message.event)
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test' }
+          }
           return null
         },
         onMessage: { addListener() {} }
@@ -514,5 +835,160 @@ test('completion does not fire while ChatGPT exposes a Stop responding control',
   assert.equal(emitted.length, 1)
   assert.equal(emitted[0].type, 'response_completed')
   assert.equal(emitted[0].text, '完整回答')
-  assert.ok(now >= 10000, `completion fired while Stop responding was still present at ${now}ms`)
+  assert.ok(now >= 25000, `completion ignored the live Chinese generation control at ${now}ms`)
+})
+
+test('completion resets convergence when an expected assistant snapshot is temporarily missing', async () => {
+  const emitted = []
+  let now = 0
+  let poll = 0
+
+  const assistantNode = {
+    innerText: '完整回答',
+    textContent: '完整回答'
+  }
+  const stopButton = {
+    getAttribute(name) {
+      return name === 'aria-label' ? 'Stop responding' : null
+    },
+    textContent: ''
+  }
+
+  const document = {
+    querySelector(selector) {
+      if (selector === '[data-testid="stop-button"]') return null
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') {
+        if (poll === 23) return []
+        return [assistantNode]
+      }
+      if (selector === 'button') return poll <= 2 ? [stopButton] : []
+      if (selector === '[contenteditable="true"]') return []
+      return []
+    }
+  }
+
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-missing' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date {
+      static now() {
+        return now
+      }
+    },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      poll += 1
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.monitorTurn({
+    conversationId: 'conv_project',
+    turnId: 'turn_missing',
+    baselineAssistantCount: 0
+  })
+
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].type, 'response_completed')
+  assert.equal(emitted[0].text, '完整回答')
+  assert.ok(now >= 26000, `missing assistant observation was incorrectly counted as stable time at ${now}ms`)
+})
+
+test('active generation refreshes the inactivity watchdog beyond the nominal 20-minute runtime', async () => {
+  const emitted = []
+  let now = 0
+  const stopUntil = 1_210_000
+
+  const assistantNode = {
+    innerText: '长任务最终回答',
+    textContent: '长任务最终回答'
+  }
+  const stopButton = {
+    getAttribute(name) {
+      return name === 'aria-label' ? 'Stop responding' : null
+    },
+    textContent: ''
+  }
+  const document = {
+    querySelector(selector) {
+      if (selector === '[data-testid="stop-button"]') return now < stopUntil ? stopButton : null
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
+      if (selector === 'button') return []
+      if (selector === '[data-message-author-role="user"]') return []
+      if (selector === '[contenteditable="true"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-long-running' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'pending_turn_lookup') return null
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test-long-running' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date {
+      static now() {
+        return now
+      }
+    },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.monitorTurn({
+    conversationId: 'conv_long',
+    turnId: 'turn_long',
+    baselineAssistantCount: 0,
+    startedAt: 0
+  })
+
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].type, 'response_completed')
+  assert.equal(emitted[0].text, '长任务最终回答')
+  assert.ok(now >= 1_220_000, `active generation was terminated by total runtime at ${now}ms`)
 })

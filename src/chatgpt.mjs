@@ -23,6 +23,7 @@ export class ChatGptConversationHost {
   constructor({ bridge, store }) {
     this.bridge = bridge
     this.store = store
+    this.sendQueues = new Map()
     bridge.on('event', (event) => {
       void this.#handleExtensionEvent(event)
     })
@@ -91,9 +92,19 @@ export class ChatGptConversationHost {
 
   async send(conversationId, text) {
     if (typeof text !== 'string' || !text.trim()) throw new Error('text is required')
+    const previous = this.sendQueues.get(conversationId) ?? Promise.resolve()
+    const run = previous.then(() => this.#send(conversationId, text))
+    this.sendQueues.set(conversationId, run.catch(() => {}))
+    return run
+  }
+
+  async #send(conversationId, text) {
     const conversation = await this.#loadConversation(conversationId)
     if (!conversation) {
       throw new Error(`Conversation ${conversationId} does not exist in the local ledger`)
+    }
+    if (conversation.status === 'submitted' || conversation.status === 'generating') {
+      throw new Error(`Conversation ${conversationId} already has a turn in flight`)
     }
 
     const id = turnId()

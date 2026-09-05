@@ -145,6 +145,12 @@ async function clearOutboxEvent(eventId) {
   await chrome.storage.local.remove(outboxKey(eventId))
 }
 
+async function loadOutboxEvent(eventId) {
+  const key = outboxKey(eventId)
+  const stored = await chrome.storage.local.get(key)
+  return stored[key] ?? null
+}
+
 async function loadOutboxEvents() {
   const stored = await chrome.storage.local.get(null)
   return Object.entries(stored)
@@ -267,14 +273,53 @@ async function resolveConversationAttachment(conversationId, requestedUrl) {
   }
 }
 
-async function pendingTurnForTab(tabId) {
-  if (typeof tabId !== 'number') return null
+async function claimPendingTurnForTab(tab) {
+  if (typeof tab?.id !== 'number') return null
   const stored = await chrome.storage.local.get(null)
   for (const [key, value] of Object.entries(stored)) {
     if (!key.startsWith(PENDING_PREFIX)) continue
-    if (value?.tabId === tabId) return value
+    if (value?.tabId !== tab.id) continue
+
+    const claimed = {
+      ...value,
+      monitorVersion: Number.isInteger(value.monitorVersion) ? value.monitorVersion + 1 : 1
+    }
+    await savePendingTurn(claimed)
+
+    const current = await loadConversation(claimed.conversationId)
+    if (current) {
+      await saveConversation(claimed.conversationId, {
+        windowId: tab.windowId ?? current.windowId,
+        tabId: tab.id,
+        url: chooseConversationUrl(tabPageUrl(tab), current.url)
+      })
+    }
+    return claimed
   }
   return null
+}
+
+async function claimAndKickRecoveryMonitor(tabId, changeInfo, tab) {
+  const threadUrl = stableConversationUrl(changeInfo?.url)
+  if (!threadUrl) return
+
+  const claimed = await claimPendingTurnForTab({
+    ...tab,
+    id: tabId,
+    url: threadUrl
+  })
+  if (!claimed) return
+
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      type: 'conversation_monitor_start',
+      ...claimed,
+      recovery: true
+    })
+  } catch {
+    // A replacing document can still be loading. Its content script will
+    // recover the same durable pending turn and claim a newer owner.
+  }
 }
 
 async function waitForContentScript(tabId, maxAttempts = 80) {
@@ -402,47 +447,69 @@ async function sendConversation(params) {
   )
 
   await ensureContentScriptForAttachment(state, reloadOnReadinessFailure)
-  const response = await chrome.tabs.sendMessage(state.tabId, {
-    type: 'conversation_send',
+  const prepared = await chrome.tabs.sendMessage(state.tabId, {
+    type: 'conversation_prepare',
     conversationId: params.conversationId,
     turnId: params.turnId,
     text: params.text
   })
-  if (response?.accepted !== true) {
-    throw new Error(response?.error || 'ChatGPT content script rejected the prompt')
+  if (prepared?.prepared !== true) {
+    throw new Error(prepared?.error || 'ChatGPT content script could not prepare the prompt')
   }
 
   const currentState = {
     ...state,
-    url: chooseConversationUrl(response.url, state.url)
+    url: chooseConversationUrl(prepared.url, state.url)
   }
   await saveConversation(params.conversationId, currentState)
 
-  const pending = {
+  let pending = {
     conversationId: params.conversationId,
     turnId: params.turnId,
     tabId: currentState.tabId,
-    baselineAssistantCount: Number(response.baselineAssistantCount ?? 0),
-    startedAt: Date.now()
+    baselineAssistantCount: Number(prepared.baselineAssistantCount ?? 0),
+    promptText: params.text,
+    startedAt: Date.now(),
+    phase: 'prepared',
+    monitorVersion: 1
   }
   await savePendingTurn(pending)
 
+  pending = { ...pending, phase: 'submitting' }
+  await savePendingTurn(pending)
+  const submitted = await chrome.tabs.sendMessage(currentState.tabId, {
+    type: 'conversation_submit',
+    conversationId: params.conversationId,
+    turnId: params.turnId
+  })
+  if (submitted?.accepted !== true) {
+    throw new Error(submitted?.error || 'ChatGPT content script rejected the prompt submission')
+  }
+
+  const submittedState = {
+    ...currentState,
+    url: chooseConversationUrl(submitted.url, currentState.url)
+  }
+  await saveConversation(params.conversationId, submittedState)
+  pending = { ...pending, phase: 'submitted' }
+  await savePendingTurn(pending)
+
   try {
-    await chrome.tabs.sendMessage(currentState.tabId, {
+    await chrome.tabs.sendMessage(submittedState.tabId, {
       type: 'conversation_monitor_start',
       ...pending
     })
   } catch {
     // Navigation may replace the document immediately after submit. The new
-    // content script resumes from chrome.storage.local when it loads.
+    // content script performs bounded pending lookup retries when it loads.
   }
 
   return {
-    ...response,
+    accepted: true,
     baselineAssistantCount: pending.baselineAssistantCount,
-    windowId: currentState.windowId,
-    tabId: currentState.tabId,
-    url: currentState.url,
+    windowId: submittedState.windowId,
+    tabId: submittedState.tabId,
+    url: submittedState.url,
     reattached
   }
 }
@@ -479,7 +546,7 @@ async function handleNativeRequest(message) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.kind === 'pending_turn_lookup') {
-    void pendingTurnForTab(sender.tab?.id)
+    void claimPendingTurnForTab(sender.tab)
       .then((pending) => sendResponse(pending))
       .catch(() => sendResponse(null))
     return true
@@ -487,8 +554,64 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.kind !== 'conversation_event' || !message.event) return
 
+  const event = message.event
+  const isTerminal = event.type === 'response_completed' || event.type === 'error'
+  if (isTerminal) {
+    void (async () => {
+      const eventId = terminalEventId(event)
+      const existing = await loadOutboxEvent(eventId)
+      if (existing) {
+        sendResponse({ durable: true, eventId })
+        void flushOutbox()
+        return
+      }
+
+      const pending = await loadPendingTurn(event.conversationId)
+      if (!pending || pending.turnId !== event.turnId) {
+        sendResponse({ durable: false, reason: 'stale_turn' })
+        return
+      }
+
+      const current = await loadConversation(event.conversationId)
+      const senderTabId = sender.tab?.id
+      const eventUrl = stableConversationUrl(event.externalUrl)
+      const senderUrl = stableConversationUrl(sender.tab?.url)
+      const currentUrl = stableConversationUrl(current?.url)
+      const staleMonitor = Number.isInteger(pending.monitorVersion) && event.monitorVersion !== pending.monitorVersion
+      if (staleMonitor) {
+        sendResponse({ durable: false, reason: 'stale_monitor' })
+        return
+      }
+
+      const wrongTab = typeof pending.tabId === 'number' && senderTabId !== pending.tabId
+      const wrongSenderUrl = Boolean(eventUrl && senderUrl && eventUrl !== senderUrl)
+      const wrongCurrentUrl = Boolean(currentUrl && eventUrl && currentUrl !== eventUrl)
+      if (wrongTab || wrongSenderUrl || wrongCurrentUrl) {
+        sendResponse({ durable: false, reason: 'stale_source' })
+        return
+      }
+
+      const forwardedEvent = {
+        ...event,
+        tabId: senderTabId,
+        windowId: sender.tab?.windowId
+      }
+      if (current || typeof senderTabId === 'number') {
+        await saveConversation(event.conversationId, {
+          windowId: sender.tab?.windowId ?? current?.windowId,
+          tabId: senderTabId ?? current?.tabId,
+          url: chooseConversationUrl(event.externalUrl, sender.tab?.url || current?.url)
+        })
+      }
+      await saveOutboxEvent({ eventId, event: forwardedEvent })
+      await clearPendingTurn(event.conversationId)
+      sendResponse({ durable: true, eventId })
+      void flushOutbox()
+    })().catch(() => sendResponse({ durable: false, reason: 'storage_error' }))
+    return true
+  }
+
   void (async () => {
-    const event = message.event
     const conversationId = event.conversationId
     if (typeof conversationId === 'string') {
       const current = await loadConversation(conversationId)
@@ -506,23 +629,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       tabId: sender.tab?.id,
       windowId: sender.tab?.windowId
     }
-
-    if (event.type === 'response_completed' || event.type === 'error') {
-      const pending = await loadPendingTurn(event.conversationId)
-      if (!pending || pending.turnId !== event.turnId) return
-      const eventId = terminalEventId(event)
-      await saveOutboxEvent({ eventId, event: forwardedEvent })
-      await clearPendingTurn(event.conversationId)
-      await flushOutbox()
-      return
-    }
-
     try {
       postNative({ kind: 'event', event: forwardedEvent })
     } catch {
       scheduleReconnect()
     }
   })()
+})
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!stableConversationUrl(changeInfo?.url)) return
+  void claimAndKickRecoveryMonitor(tabId, changeInfo, tab)
 })
 
 chrome.runtime.onInstalled.addListener(connectNative)

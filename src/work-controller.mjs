@@ -384,6 +384,7 @@ export class WorkController {
       if (frontier.status !== 'dispatched' || !frontier.conversationId) continue
       const conversation = await this.conversationHost.read(frontier.conversationId)
       if (conversation.status !== 'completed' && conversation.status !== 'error') continue
+      if (frontier.turnId && conversation.latestTurnId !== frontier.turnId) continue
       await this.ledger.append(workId, 'worker_result', {
         frontierId: frontier.id,
         conversationId: frontier.conversationId,

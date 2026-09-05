@@ -363,7 +363,7 @@ test('WorkController collects completed workers into the ledger and unlocks depe
     }
   ])
   const host = new FakeHost()
-  host.states.set('conv_1', { id: 'conv_1', status: 'completed', latestResponse: 'recovery result' })
+  host.states.set('conv_1', { id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'recovery result' })
   const controller = new WorkController({ ledger, conversationHost: host, now: () => FakeLedger.now })
 
   const collected = await controller.collect('work_test')
@@ -373,6 +373,43 @@ test('WorkController collects completed workers into the ledger and unlocks depe
 
   const dispatched = await controller.dispatch('work_test', 'f2')
   assert.equal(dispatched.dispatched, true)
+})
+
+test('WorkController does not collect a terminal result from the wrong dispatched turn', async () => {
+  const { WorkController } = await loadModule()
+  assert.equal(typeof WorkController, 'function')
+  if (typeof WorkController !== 'function') return
+
+  FakeLedger.now = Date.parse('2026-09-03T09:00:00.000Z')
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    {
+      at: '2026-09-03T08:01:00.000Z',
+      type: 'decision',
+      payload: {
+        action: 'SPLIT',
+        reason: 'work found',
+        frontiers: [{ id: 'f1', task: 'first task', depends_on: [] }]
+      }
+    },
+    {
+      at: '2026-09-03T08:02:00.000Z',
+      type: 'worker_dispatched',
+      payload: { frontierId: 'f1', conversationId: 'conv_1', turnId: 'turn_expected' }
+    }
+  ])
+  const host = new FakeHost()
+  host.states.set('conv_1', {
+    id: 'conv_1',
+    status: 'completed',
+    latestTurnId: 'turn_old',
+    latestResponse: 'stale result'
+  })
+  const controller = new WorkController({ ledger, conversationHost: host, now: () => FakeLedger.now })
+
+  const collected = await controller.collect('work_test')
+  assert.equal(collected.collected, 0)
+  assert.equal(collected.state.frontiers.find((f) => f.id === 'f1').status, 'dispatched')
 })
 
 test('WorkController treats STOP as terminal for later dispatch', async () => {

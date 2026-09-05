@@ -15,17 +15,48 @@ function statusFromEvents(events) {
 
   for (const event of events) {
     if (event.externalUrl) externalUrl = event.externalUrl
-    if (event.turnId) latestTurnId = event.turnId
-    if (event.type === 'prompt_sent') status = 'submitted'
-    if (event.type === 'generation_started') status = 'generating'
-    if (event.type === 'response_completed') {
-      status = 'completed'
-      latestResponse = event.text ?? ''
+
+    if (event.type === 'prompt_sent') {
+      latestTurnId = event.turnId ?? latestTurnId
+      status = 'submitted'
+      latestResponse = null
       error = null
+      continue
     }
+
+    if (event.type === 'generation_started') {
+      if (latestTurnId === null) latestTurnId = event.turnId ?? null
+      if (event.turnId === latestTurnId) {
+        status = 'generating'
+        latestResponse = null
+        error = null
+      }
+      continue
+    }
+
+    if (event.type === 'response_completed') {
+      if (latestTurnId === null) latestTurnId = event.turnId ?? null
+      if (event.turnId === latestTurnId) {
+        status = 'completed'
+        latestResponse = event.text ?? ''
+        error = null
+      }
+      continue
+    }
+
     if (event.type === 'error') {
-      status = 'error'
-      error = event.message ?? 'unknown error'
+      if (!event.turnId) {
+        status = 'error'
+        latestResponse = null
+        error = event.message ?? 'unknown error'
+        continue
+      }
+      if (latestTurnId === null) latestTurnId = event.turnId
+      if (event.turnId === latestTurnId) {
+        status = 'error'
+        latestResponse = null
+        error = event.message ?? 'unknown error'
+      }
     }
   }
 
@@ -35,6 +66,7 @@ function statusFromEvents(events) {
 export class ConversationStore {
   constructor(rootDir) {
     this.rootDir = rootDir
+    this.appendQueues = new Map()
   }
 
   conversationDir(id) {
@@ -76,8 +108,13 @@ export class ConversationStore {
 
   async append(id, event) {
     const record = { at: now(), ...event }
-    await appendFile(join(this.conversationDir(id), 'events.jsonl'), `${JSON.stringify(record)}\n`, 'utf8')
-    return record
+    const previous = this.appendQueues.get(id) ?? Promise.resolve()
+    const write = previous.then(async () => {
+      await appendFile(join(this.conversationDir(id), 'events.jsonl'), `${JSON.stringify(record)}\n`, 'utf8')
+      return record
+    })
+    this.appendQueues.set(id, write.catch(() => {}))
+    return write
   }
 
   async read(id) {

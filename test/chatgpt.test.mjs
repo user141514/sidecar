@@ -245,6 +245,42 @@ test('a fresh sidecar process sends to a ledger-backed conversation and records 
   assert.equal(state.latestResponse, 'AFTER_RESTART')
 })
 
+test('only one concurrent send may enter the browser for the same conversation', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const releases = []
+  bridge.request = async (method, params) => {
+    bridge.requests.push({ method, params })
+    if (method === 'conversation_create') {
+      return { windowId: 101, tabId: 202, url: 'https://chatgpt.com/' }
+    }
+    if (method === 'conversation_send') {
+      return new Promise((resolve) => {
+        releases.push(() => resolve({ accepted: true, url: params.externalUrl || 'https://chatgpt.com/' }))
+      })
+    }
+    throw new Error(`unexpected method ${method}`)
+  }
+
+  const store = new MemoryStore()
+  const host = new ChatGptConversationHost({ bridge, store })
+  const created = await host.create()
+
+  const first = host.send(created.id, 'first')
+  const second = host.send(created.id, 'second')
+  for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve))
+  for (const release of [...releases]) release()
+
+  const results = await Promise.allSettled([first, second])
+  assert.equal(results.filter((item) => item.status === 'fulfilled').length, 1)
+  assert.equal(results.filter((item) => item.status === 'rejected').length, 1)
+  assert.match(results.find((item) => item.status === 'rejected').reason.message, /in flight|generating|submitted/i)
+  assert.equal(bridge.requests.filter(({ method }) => method === 'conversation_send').length, 1)
+})
+
 test('terminal extension events are durably recorded once before acknowledgement', async () => {
   const { ChatGptConversationHost } = await loadChatGptModule()
   assert.equal(typeof ChatGptConversationHost, 'function')
