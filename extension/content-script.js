@@ -1,3 +1,18 @@
+;(function () { // A fresh closure allows safe content-script reinjection.
+try { globalThis.__sidecarContentRuntime?.dispose() } catch {
+  // The prior listener belongs to an extension context Chrome has invalidated.
+}
+let contentDisposed = false
+const contentBuildId = globalThis.__sidecarBuildId ?? 'unversioned'
+globalThis.__sidecarContentRuntime = {
+  buildId: contentBuildId,
+  monitorTurn,
+  dispose() {
+    contentDisposed = true
+    chrome.runtime.onMessage.removeListener?.(onSidecarMessage)
+  }
+}
+
 const POLL_INTERVAL_MS = 500
 const SNAPSHOT_INTERVAL_MS = 5_000
 const SNAPSHOT_QUIESCENCE_MS = 10_000
@@ -252,8 +267,9 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
   let stableSnapshotSince = null
   let lastSnapshotAt = null
   try {
-    while (Date.now() < inactivityDeadline) {
+    while (!contentDisposed && Date.now() < inactivityDeadline) {
       await sleep(POLL_INTERVAL_MS)
+      if (contentDisposed) return
 
       if (isGenerating()) {
         observedGenerating = true
@@ -302,6 +318,7 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
       })
       if (durable) return
     }
+    if (contentDisposed) return
     await emitTerminalEvent({
       type: 'error',
       conversationId,
@@ -346,7 +363,7 @@ async function resumePendingTurn() {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
       const pending = await chrome.runtime.sendMessage({ kind: 'pending_turn_lookup' })
-      if (pending?.conversationId && pending?.turnId) {
+      if (!contentDisposed && pending?.conversationId && pending?.turnId) {
         void monitorTurn({
           conversationId: pending.conversationId,
           turnId: pending.turnId,
@@ -365,9 +382,10 @@ async function resumePendingTurn() {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+function onSidecarMessage(message, _sender, sendResponse) {
+  if (contentDisposed) return
   if (message?.type === 'sidecar_ping') {
-    sendResponse({ ready: true, url: location.href })
+    sendResponse({ ready: true, url: location.href, buildId: contentBuildId, generating: isGenerating() })
     return
   }
 
@@ -426,6 +444,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   return
-})
+}
 
+chrome.runtime.onMessage.addListener(onSidecarMessage)
 void resumePendingTurn()
+})()

@@ -21,12 +21,12 @@ test('extension manifest declares the unattended bridge capabilities with a dete
   assert.ok(manifest.key.length > 100)
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ['nativeMessaging', 'storage', 'tabs', 'windows'].sort()
+    ['nativeMessaging', 'scripting', 'storage', 'tabs', 'windows'].sort()
   )
   assert.deepEqual(manifest.host_permissions, ['https://chatgpt.com/*'])
   assert.equal(manifest.background.service_worker, 'service-worker.js')
   assert.equal(manifest.content_scripts[0].matches[0], 'https://chatgpt.com/*')
-  assert.equal(manifest.content_scripts[0].js[0], 'content-script.js')
+  assert.deepEqual(manifest.content_scripts[0].js, ['build-info.js', 'content-script.js'])
 })
 
 test('extension service worker owns one managed window0 and creates later conversations as tabs inside it', async () => {

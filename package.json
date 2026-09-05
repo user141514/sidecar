@@ -1,13 +1,19 @@
 {
   "name": "conversation-sidecar",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "type": "module",
+  "bin": { "chatgpt-conversation": "src/cli.mjs" },
+  "files": ["src/", "extension/", "install/", "scripts/", "skills/", "test/", "standalone/", "docs/extension-update.md", ".github/workflows/", "README.md", "PROVENANCE.json"],
   "scripts": {
-    "test": "node --test",
+    "test": "node scripts/test.mjs",
+    "extension:build": "node scripts/extension-build.mjs --write",
+    "extension:check": "node scripts/extension-build.mjs --check",
+    "build:provider": "node scripts/export-provider.mjs",
     "start": "node src/server.mjs",
     "mcp:stdio": "node src/mcp-stdio.mjs",
-    "install:host": "node install/install-host.mjs"
+    "install:host": "node install/install-host.mjs",
+    "install:native-host": "node scripts/install-native-host.mjs"
   },
   "engines": {
     "node": ">=24"

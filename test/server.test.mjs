@@ -163,7 +163,7 @@ test('server exposes health, project pinning, and the three conversation tools',
     const listed = await rpc(baseUrl, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
     assert.deepEqual(
       listed.body.result.tools.map((tool) => tool.name),
-      ['project_create', 'project_find', 'project_pin', 'conversation_create', 'conversation_send', 'conversation_read', 'work_create', 'work_append', 'work_read', 'work_state', 'work_decide', 'work_checkpoint', 'work_dispatch', 'work_collect', 'work_memory_publish', 'work_memory_query', 'work_memory_read']
+      ['extension_status', 'extension_reload', 'project_create', 'project_find', 'project_pin', 'conversation_create', 'conversation_send', 'conversation_read', 'work_create', 'work_append', 'work_read', 'work_state', 'work_decide', 'work_checkpoint', 'work_dispatch', 'work_collect', 'work_memory_publish', 'work_memory_query', 'work_memory_read']
     )
     const workDecide = listed.body.result.tools.find((tool) => tool.name === 'work_decide')
     const decisionSchema = workDecide.inputSchema.properties.decision

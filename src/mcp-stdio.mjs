@@ -33,7 +33,7 @@ async function forward(message, endpoint, fetchImpl) {
 export async function runStdioAdapter({
   input = process.stdin,
   output = process.stdout,
-  endpoint = process.env.CONVERSATION_SIDECAR_MCP_URL ?? DEFAULT_ENDPOINT,
+  endpoint = process.env.CHATGPT_CONVERSATION_MCP_URL ?? process.env.CONVERSATION_SIDECAR_MCP_URL ?? DEFAULT_ENDPOINT,
   fetchImpl = fetch
 } = {}) {
   const lines = createInterface({ input, crlfDelay: Infinity })

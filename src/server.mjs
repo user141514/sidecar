@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import http from 'node:http'
+import { EXTENSION_TOOLS, dispatchExtensionTool } from './extension-control.mjs'
+import { CONVERSATION_TOOLS, dispatchConversationTool } from './conversation-tools.mjs'
 import { fileURLToPath } from 'node:url'
 import { ChatGptConversationHost } from './chatgpt.mjs'
 import { ExtensionBridge, NativeMessageChannel } from './native-messaging.mjs'
@@ -9,68 +11,8 @@ import { WorkController } from './work-controller.mjs'
 import { MemoryPool } from './memory-pool.mjs'
 
 const TOOLS = [
-  {
-    name: 'project_create',
-    description: 'Create one ChatGPT Project through the signed-in ChatGPT web UI and return its canonical Project URL.',
-    inputSchema: {
-      type: 'object',
-      properties: { name: { type: 'string' } },
-      required: ['name'],
-      additionalProperties: false
-    }
-  },
-  {
-    name: 'project_find',
-    description: 'Find an already-visible ChatGPT Project by exact name in currently open ChatGPT tabs without creating or navigating browser state.',
-    inputSchema: {
-      type: 'object',
-      properties: { name: { type: 'string' } },
-      required: ['name'],
-      additionalProperties: false
-    }
-  },
-  {
-    name: 'project_pin',
-    description: 'Persist one ChatGPT Project home as the default destination for future conversation_create calls.',
-    inputSchema: {
-      type: 'object',
-      properties: { project_url: { type: 'string' } },
-      required: ['project_url'],
-      additionalProperties: false
-    }
-  },
-  {
-    name: 'conversation_create',
-    description: 'Create a new ChatGPT conversation in the already-running signed-in Chrome profile, optionally inside a specific ChatGPT Project.',
-    inputSchema: {
-      type: 'object',
-      properties: { project_url: { type: 'string' } },
-      additionalProperties: false
-    }
-  },
-  {
-    name: 'conversation_send',
-    description: 'Submit one prompt to a conversation. Returns after submission while monitoring continues in the sidecar.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        conversation_id: { type: 'string' },
-        text: { type: 'string' }
-      },
-      required: ['conversation_id', 'text'],
-      additionalProperties: false
-    }
-  },
-  {
-    name: 'conversation_read',
-    description: 'Read the latest durable state and raw response for a conversation from the local ledger.',
-    inputSchema: {
-      type: 'object',
-      properties: { conversation_id: { type: 'string' } },
-      required: ['conversation_id'],
-      additionalProperties: false
-    }
-  },
+  ...EXTENSION_TOOLS,
+  ...CONVERSATION_TOOLS,
   {
     name: 'work_create',
     description: 'Create one local append-only work ledger for a coordinator goal.',
@@ -352,38 +294,11 @@ function writeJson(res, statusCode, body) {
 }
 
 async function dispatchTool(conversationHost, workLedger, workController, memoryPool, name, args = {}) {
-  if (name === 'project_create') {
-    if (typeof args.name !== 'string') {
-      throw new TypeError('project_create requires name')
-    }
-    return conversationHost.createProject(args.name)
+  if (name === 'extension_status' || name === 'extension_reload') {
+    return dispatchExtensionTool(conversationHost.bridge, name, args)
   }
-  if (name === 'project_find') {
-    if (typeof args.name !== 'string') {
-      throw new TypeError('project_find requires name')
-    }
-    return conversationHost.findProject(args.name)
-  }
-  if (name === 'project_pin') {
-    if (typeof args.project_url !== 'string') {
-      throw new TypeError('project_pin requires project_url')
-    }
-    return conversationHost.pinProject(args.project_url)
-  }
-  if (name === 'conversation_create') {
-    return conversationHost.create({ projectUrl: args.project_url })
-  }
-  if (name === 'conversation_send') {
-    if (typeof args.conversation_id !== 'string' || typeof args.text !== 'string') {
-      throw new TypeError('conversation_send requires conversation_id and text')
-    }
-    return conversationHost.send(args.conversation_id, args.text)
-  }
-  if (name === 'conversation_read') {
-    if (typeof args.conversation_id !== 'string') {
-      throw new TypeError('conversation_read requires conversation_id')
-    }
-    return conversationHost.read(args.conversation_id)
+  if (CONVERSATION_TOOLS.some((tool) => tool.name === name)) {
+    return dispatchConversationTool(conversationHost, name, args)
   }
   if (name === 'work_create') {
     if (!workLedger) throw new Error('work ledger unavailable')

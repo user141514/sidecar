@@ -1,3 +1,12 @@
+importScripts('build-info.js', 'lifecycle.js')
+const extensionLifecycle = createSidecarLifecycle({
+  chrome,
+  buildId: globalThis.__sidecarBuildId,
+  instanceId: crypto.randomUUID(),
+  matchesTab: tabMatchesExpectedUrl
+})
+const lifecycleReady = extensionLifecycle.restoreAfterReload()
+
 const NATIVE_HOST = 'com.conversation_sidecar.host'
 const CHATGPT_URL = 'https://chatgpt.com/'
 const STORAGE_PREFIX = 'conversation:'
@@ -515,10 +524,13 @@ async function sendConversation(params) {
 }
 
 async function executeRequest(message) {
+  await lifecycleReady
+  if (message.method === 'extension_status') return extensionLifecycle.status()
+  if (message.method === 'extension_reload') return extensionLifecycle.requestReload(message.params)
   if (message.method === 'project_find') return findProject(message.params ?? {})
-  if (message.method === 'project_create') return createProject(message.params ?? {})
-  if (message.method === 'conversation_create') return createConversation(message.params ?? {})
-  if (message.method === 'conversation_send') return sendConversation(message.params ?? {})
+  if (message.method === 'project_create') return extensionLifecycle.runMutation(() => createProject(message.params ?? {}))
+  if (message.method === 'conversation_create') return extensionLifecycle.runMutation(() => createConversation(message.params ?? {}))
+  if (message.method === 'conversation_send') return extensionLifecycle.runMutation(() => sendConversation(message.params ?? {}))
   throw new Error(`Unknown native request method: ${message.method}`)
 }
 
@@ -534,6 +546,7 @@ async function handleNativeRequest(message) {
   try {
     const result = await executeRequest(message)
     postNative({ kind: 'response', requestId: message.requestId, ok: true, result })
+    extensionLifecycle.afterResponse(message.method, result)
   } catch (error) {
     postNative({
       kind: 'response',

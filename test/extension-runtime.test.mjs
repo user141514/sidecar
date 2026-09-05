@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
+const lifecycleSource = await readFile(new URL('../extension/lifecycle.js', import.meta.url), 'utf8')
 
 function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false } = {}) {
   const storageState = { ...storage }
@@ -158,8 +159,16 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     return 1
   }
 
-  vm.runInNewContext(workerSource, {
+  const context = vm.createContext({
     chrome,
+    crypto: { randomUUID: () => 'test-instance' },
+    importScripts(...files) {
+      for (const file of files) {
+        if (file === 'build-info.js') vm.runInContext('globalThis.__sidecarBuildId = "test-build"', context)
+        else if (file === 'lifecycle.js') vm.runInContext(lifecycleSource, context)
+        else throw new Error(`Unexpected import: ${file}`)
+      }
+    },
     console,
     URL,
     Date,
@@ -167,7 +176,8 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     Object,
     setTimeout: fastSetTimeout,
     clearTimeout() {}
-  }, { filename: 'extension/service-worker.js' })
+  })
+  vm.runInContext(workerSource, context, { filename: 'extension/service-worker.js' })
 
   async function request(method, params) {
     if (!nativeRequestListener) throw new Error('Native request listener was not registered')

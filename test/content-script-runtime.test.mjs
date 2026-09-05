@@ -468,7 +468,7 @@ test('recovery anchors the current assistant to the last matching user prompt in
   vm.createContext(context)
   vm.runInContext(source, context, { filename: 'extension/content-script.js' })
 
-  await context.monitorTurn({
+  await context.__sidecarContentRuntime.monitorTurn({
     conversationId: 'conv_project',
     turnId: 'turn_reloaded',
     baselineAssistantCount: 3,
@@ -531,7 +531,7 @@ test('recovered monitor uses the original startedAt deadline instead of granting
   vm.createContext(context)
   vm.runInContext(source, context, { filename: 'extension/content-script.js' })
 
-  await context.monitorTurn({
+  await context.__sidecarContentRuntime.monitorTurn({
     conversationId: 'conv_project',
     turnId: 'turn_deadline',
     baselineAssistantCount: 0,
@@ -601,7 +601,7 @@ test('normal completion requires observing generation before idle convergence', 
   vm.createContext(context)
   vm.runInContext(source, context, { filename: 'extension/content-script.js' })
 
-  await context.monitorTurn({
+  await context.__sidecarContentRuntime.monitorTurn({
     conversationId: 'conv_project',
     turnId: 'turn_project',
     baselineAssistantCount: 0
@@ -677,7 +677,7 @@ test('recovery may complete without seeing generation when terminal UI evidence 
   vm.createContext(context)
   vm.runInContext(source, context, { filename: 'extension/content-script.js' })
 
-  await context.monitorTurn({
+  await context.__sidecarContentRuntime.monitorTurn({
     conversationId: 'conv_project',
     turnId: 'turn_recovery',
     baselineAssistantCount: 0,
@@ -753,7 +753,7 @@ test('completion retries until the service worker acknowledges durable terminal 
   vm.createContext(context)
   vm.runInContext(source, context, { filename: 'extension/content-script.js' })
 
-  await context.monitorTurn({
+  await context.__sidecarContentRuntime.monitorTurn({
     conversationId: 'conv_project',
     turnId: 'turn_ack',
     baselineAssistantCount: 0
@@ -826,7 +826,7 @@ test('completion starts a fresh 10-second snapshot window after Chinese Stop ans
   vm.createContext(context)
   vm.runInContext(source, context, { filename: 'extension/content-script.js' })
 
-  await context.monitorTurn({
+  await context.__sidecarContentRuntime.monitorTurn({
     conversationId: 'conv_project',
     turnId: 'turn_stop',
     baselineAssistantCount: 0
@@ -905,7 +905,7 @@ test('completion resets convergence when an expected assistant snapshot is tempo
   vm.createContext(context)
   vm.runInContext(source, context, { filename: 'extension/content-script.js' })
 
-  await context.monitorTurn({
+  await context.__sidecarContentRuntime.monitorTurn({
     conversationId: 'conv_project',
     turnId: 'turn_missing',
     baselineAssistantCount: 0
@@ -980,7 +980,7 @@ test('active generation refreshes the inactivity watchdog beyond the nominal 20-
   vm.createContext(context)
   vm.runInContext(source, context, { filename: 'extension/content-script.js' })
 
-  await context.monitorTurn({
+  await context.__sidecarContentRuntime.monitorTurn({
     conversationId: 'conv_long',
     turnId: 'turn_long',
     baselineAssistantCount: 0,

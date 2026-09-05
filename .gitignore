@@ -2,3 +2,6 @@ data/
 install/com.conversation_sidecar.host.json
 *.log
 .DS_Store
+node_modules/
+dist/
+*.tgz

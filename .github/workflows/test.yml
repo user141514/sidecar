@@ -1,0 +1,26 @@
+name: shared-linux-windows
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node scripts/extension-build.mjs --check
+      - run: npm test
+      - run: npm pack --dry-run
+      - name: Build standalone provider
+        if: ${{ hashFiles('scripts/export-provider.mjs') != '' }}
+        run: npm run build:provider
+      - name: Test standalone without Sidecar imports
+        if: ${{ hashFiles('scripts/export-provider.mjs') != '' }}
+        working-directory: dist/chatgpt-conversation
+        run: npm test

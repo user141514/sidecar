@@ -88,6 +88,22 @@ com.conversation_sidecar.host
 
 After this one installation, Chrome persists the extension. When it starts, it connects to the Native Messaging host, which launches the same `src/server.mjs` on both operating systems. No recurring browser approval is introduced.
 
+## Verified extension self-update
+
+Both Linux and Windows use the same CLI and MCP update protocol:
+
+```text
+npm link
+npm run extension:build
+npm test
+chatgpt-conversation extension-status
+chatgpt-conversation extension-update
+```
+
+An old installation without the update handler needs one manual bootstrap reload. Later updates use the extension's own reload API, never browser UI automation. Pending turns, undelivered terminal events and concurrent browser mutations block reload. The independent CLI survives native-host replacement and verifies a correlated receipt, new instance, exact build and managed content-script restoration. `extension-reload` is an alias. Source download/review remains an explicit Git SSH operation, not an implicit network updater.
+
+See [update and installation contract](docs/extension-update.md). The tracked Skill is `skills/chatgpt-subagents/SKILL.md`. `npm run build:provider` exports a self-contained provider with the same extension, CLI, schemas, Skill and link adapter, excluding work/controller/memory. Export refuses an existing destination.
+
 ## Browser placement
 
 The first `conversation_create` establishes one sidecar-owned normal Chrome window, `window0`, using the existing signed-in profile. That first conversation uses window0's initial tab. Every later `conversation_create` uses `chrome.tabs.create({ windowId: window0 })`; it must not create another Chrome window. If the user closes window0, the next create establishes a replacement window0.
@@ -100,6 +116,7 @@ Provider tools include:
 
 - `project_create`, `project_find`, `project_pin`
 - `conversation_create`, `conversation_send`, `conversation_read`
+- `extension_status`, `extension_reload` (acceptance only; use CLI for verified updates)
 
 Control tools include:
 
