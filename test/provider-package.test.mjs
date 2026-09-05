@@ -36,6 +36,8 @@ test('standalone artifact contains the identical extension, CLI, MCP schemas, Sk
   const workflow = await readFile(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8')
   assert.match(workflow, /runner\.os\s*==\s*'Windows'/)
   assert.match(workflow, /test\/native-host-installer\.test\.mjs\s+test\/windows-runtime\.test\.mjs/)
+  assert.match(workflow, /hashFiles\('PROVENANCE\.json'\)\s*!=\s*''/)
+  assert.match(workflow, /run:\s*npm run verify:provider/)
 
   await assert.rejects(module.exportProvider(output), /exist|empty/i)
 })

@@ -23,9 +23,12 @@ jobs:
       - name: Build standalone provider
         if: ${{ hashFiles('scripts/export-provider.mjs') != '' }}
         run: npm run build:provider
-      - name: Verify standalone provenance
+      - name: Verify generated provider provenance
         if: ${{ hashFiles('scripts/export-provider.mjs') != '' }}
         working-directory: dist/chatgpt-conversation
+        run: npm run verify:provider
+      - name: Verify repository provenance
+        if: ${{ hashFiles('PROVENANCE.json') != '' }}
         run: npm run verify:provider
       - name: Test standalone without Sidecar imports
         if: ${{ hashFiles('scripts/export-provider.mjs') != '' }}
