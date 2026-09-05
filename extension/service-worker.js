@@ -545,8 +545,8 @@ async function handleNativeRequest(message) {
   if (message?.kind !== 'request' || typeof message.requestId !== 'string') return
   try {
     const result = await executeRequest(message)
-    postNative({ kind: 'response', requestId: message.requestId, ok: true, result })
     extensionLifecycle.afterResponse(message.method, result)
+    postNative({ kind: 'response', requestId: message.requestId, ok: true, result })
   } catch (error) {
     postNative({
       kind: 'response',
@@ -559,7 +559,7 @@ async function handleNativeRequest(message) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.kind === 'pending_turn_lookup') {
-    void claimPendingTurnForTab(sender.tab)
+    void extensionLifecycle.runMutation(() => claimPendingTurnForTab(sender.tab))
       .then((pending) => sendResponse(pending))
       .catch(() => sendResponse(null))
     return true
@@ -570,7 +570,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const event = message.event
   const isTerminal = event.type === 'response_completed' || event.type === 'error'
   if (isTerminal) {
-    void (async () => {
+    void extensionLifecycle.runMutation(async () => {
       const eventId = terminalEventId(event)
       const existing = await loadOutboxEvent(eventId)
       if (existing) {
@@ -620,11 +620,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await clearPendingTurn(event.conversationId)
       sendResponse({ durable: true, eventId })
       void flushOutbox()
-    })().catch(() => sendResponse({ durable: false, reason: 'storage_error' }))
+    }).catch((error) => sendResponse({
+      durable: false,
+      reason: /reload in progress/i.test(error instanceof Error ? error.message : String(error))
+        ? 'reload_in_progress'
+        : 'storage_error'
+    }))
     return true
   }
 
-  void (async () => {
+  void extensionLifecycle.runMutation(async () => {
     const conversationId = event.conversationId
     if (typeof conversationId === 'string') {
       const current = await loadConversation(conversationId)
@@ -647,12 +652,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } catch {
       scheduleReconnect()
     }
-  })()
+  }).catch(() => {})
 })
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!stableConversationUrl(changeInfo?.url)) return
-  void claimAndKickRecoveryMonitor(tabId, changeInfo, tab)
+  void extensionLifecycle.runMutation(() => claimAndKickRecoveryMonitor(tabId, changeInfo, tab)).catch(() => {})
 })
 
 chrome.runtime.onInstalled.addListener(connectNative)

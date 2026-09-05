@@ -10,6 +10,7 @@
     "extension:build": "node scripts/extension-build.mjs --write",
     "extension:check": "node scripts/extension-build.mjs --check",
     "build:provider": "node scripts/export-provider.mjs",
+    "verify:provider": "node scripts/verify-provider.mjs dist/chatgpt-conversation",
     "start": "node src/server.mjs",
     "mcp:stdio": "node src/mcp-stdio.mjs",
     "install:host": "node install/install-host.mjs",

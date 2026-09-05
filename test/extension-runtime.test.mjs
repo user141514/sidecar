@@ -6,7 +6,7 @@ import vm from 'node:vm'
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
 const lifecycleSource = await readFile(new URL('../extension/lifecycle.js', import.meta.url), 'utf8')
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, deferReloadTimer = false, failAcceptedResponsePostOnce = false } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -23,6 +23,8 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
   let failNativeEventPosts = false
   let nextTabId = 1000
   let nextWindowId = 2000
+  const deferredReloadTimers = []
+  let runtimeReloadCount = 0
 
   const nativePort = {
     onMessage: {
@@ -36,6 +38,10 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
       }
     },
     postMessage(message) {
+      if (failAcceptedResponsePostOnce && message?.kind === 'response' && message.ok === true) {
+        failAcceptedResponsePostOnce = false
+        throw new Error('Native response transport lost')
+      }
       if (failNativeEventPosts && message?.kind === 'event') {
         throw new Error('Native host disconnected during event delivery')
       }
@@ -45,6 +51,10 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
 
   const chrome = {
     runtime: {
+      id: 'cfifihieaffhniimpimnfmignbbdaalb',
+      reload() {
+        runtimeReloadCount += 1
+      },
       connectNative() {
         return nativePort
       },
@@ -164,7 +174,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     crypto: { randomUUID: () => 'test-instance' },
     importScripts(...files) {
       for (const file of files) {
-        if (file === 'build-info.js') vm.runInContext('globalThis.__sidecarBuildId = "test-build"', context)
+        if (file === 'build-info.js') vm.runInContext(`globalThis.__sidecarBuildId = ${JSON.stringify('a'.repeat(64))}`, context)
         else if (file === 'lifecycle.js') vm.runInContext(lifecycleSource, context)
         else throw new Error(`Unexpected import: ${file}`)
       }
@@ -174,7 +184,13 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     Date,
     Promise,
     Object,
-    setTimeout: fastSetTimeout,
+    setTimeout(callback, ms) {
+      if (deferReloadTimer && ms === 250) {
+        deferredReloadTimers.push(callback)
+        return deferredReloadTimers.length
+      }
+      return fastSetTimeout(callback)
+    },
     clearTimeout() {}
   })
   vm.runInContext(workerSource, context, { filename: 'extension/service-worker.js' })
@@ -243,6 +259,14 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     sendNativeMessage,
     updateTab,
     reconnectNative,
+    runDeferredReload() {
+      const callback = deferredReloadTimers.shift()
+      if (!callback) throw new Error('No deferred reload timer')
+      callback()
+    },
+    get runtimeReloadCount() {
+      return runtimeReloadCount
+    },
     setFailNativeEventPosts(value) {
       failNativeEventPosts = value
     }
@@ -519,6 +543,78 @@ test('terminal events stay in a durable outbox until the native host acknowledge
 
   await harness.sendNativeMessage({ kind: 'event_ack', eventId })
   assert.equal(harness.storageState[outboxKey], undefined)
+})
+
+test('reload remains scheduled when the accepted native response transport is lost', async () => {
+  const harness = makeHarness({
+    deferReloadTimer: true,
+    failAcceptedResponsePostOnce: true
+  })
+
+  const response = await harness.request('extension_reload', {
+    requestId: 'reload-lost-ack',
+    expectedInstanceId: 'test-instance',
+    expectedBuildId: 'a'.repeat(64)
+  })
+
+  assert.equal(response.ok, false, 'the simulated native transport must lose the accepted response')
+  assert.equal(harness.runtimeReloadCount, 0)
+  harness.runDeferredReload()
+  assert.equal(harness.runtimeReloadCount, 1, 'reload scheduling must not depend on successful ACK delivery')
+})
+
+test('reload admission blocks a terminal event that arrives before the deferred runtime reload', async () => {
+  const externalUrl = 'https://chatgpt.com/c/reload-race'
+  const harness = makeHarness({
+    deferReloadTimer: true,
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 30, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 30, windowId: 10, url: externalUrl }]
+  })
+
+  const reload = await harness.request('extension_reload', {
+    requestId: 'reload-race',
+    expectedInstanceId: 'test-instance',
+    expectedBuildId: 'a'.repeat(64)
+  })
+  assert.equal(reload.ok, true)
+  assert.equal(reload.result.accepted, true)
+  assert.equal(harness.runtimeReloadCount, 0)
+
+  // Once admission wins, a real pending writer cannot create new work.
+  const send = await harness.request('conversation_send', {
+    conversationId: 'conv_existing',
+    turnId: 'turn_race',
+    text: 'must not start',
+    externalUrl
+  })
+  assert.equal(send.ok, false)
+  assert.match(send.error, /reload in progress/i)
+  assert.equal(harness.storageState['pending:conv_existing'], undefined)
+
+  // A stale content-script event arriving in the same window also has no
+  // authority to mutate durable state.
+  const terminal = await harness.emitRuntimeMessage({
+    kind: 'conversation_event',
+    event: {
+      type: 'response_completed',
+      conversationId: 'conv_existing',
+      turnId: 'turn_race',
+      text: 'late terminal',
+      externalUrl
+    }
+  }, { tab: { id: 30, windowId: 10, url: externalUrl } })
+
+  assert.equal(terminal?.durable, false)
+  assert.equal(terminal?.reason, 'reload_in_progress')
+  assert.equal(harness.storageState['pending:conv_existing'], undefined)
+  assert.equal(harness.storageState['outbox:terminal:conv_existing:turn_race:response_completed'], undefined)
+
+  harness.runDeferredReload()
+  assert.equal(harness.runtimeReloadCount, 1)
 })
 
 test('terminal runtime events acknowledge only after the durable outbox write', async () => {
