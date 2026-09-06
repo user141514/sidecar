@@ -161,6 +161,116 @@ async function defaultProjectFind(name) {
   }
 }
 
+async function defaultCallTool(name, args, timeoutMs = 30_000) {
+  const response = await fetch('http://127.0.0.1:7337/mcp', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    signal: AbortSignal.timeout(timeoutMs),
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name, arguments: args }
+    })
+  })
+  if (!response.ok) throw new Error(`MCP HTTP ${response.status}`)
+  const body = await response.json()
+  if (body.error || body.result?.isError) {
+    throw new Error(body.error?.message ?? body.result?.content?.[0]?.text ?? `tool failed: ${name}`)
+  }
+  const text = body.result?.content?.[0]?.text
+  if (typeof text !== 'string') return body.result
+  try { return JSON.parse(text) } catch { return text }
+}
+
+export async function runRuntimeLiveCheck({
+  managedProjectUrl,
+  callTool = defaultCallTool,
+  randomId = randomUUID,
+  sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+  timeoutMs = 180_000
+} = {}) {
+  const projectUrl = canonicalProjectUrl(managedProjectUrl)
+  if (!projectUrl) throw new Error('live-check requires canonical managed Project URL')
+  const token = `RUNTIME_LIVE_CHECK_${randomId()}`
+  const frontierId = 'runtime_live_check_frontier'
+  const expectedReply = 'RUNTIME_LIVE_CHECK_OK'
+
+  const sourceWork = await callTool('work_create', { goal: `${token}: scheduler and memory canary` })
+  await callTool('work_decide', {
+    work_id: sourceWork.id,
+    decision: {
+      action: 'SPLIT',
+      reason: 'one bounded runtime live-check frontier',
+      frontiers: [{
+        id: frontierId,
+        task: `Reply exactly ${expectedReply} and nothing else`,
+        depends_on: []
+      }]
+    }
+  })
+
+  const dispatch = await callTool('work_dispatch', { work_id: sourceWork.id, frontier_id: frontierId })
+  if (dispatch?.dispatched !== true || !dispatch.conversationId || !dispatch.turnId) {
+    throw new Error('runtime live-check worker was not dispatched')
+  }
+
+  const deadline = Date.now() + timeoutMs
+  let collected = null
+  while (Date.now() < deadline) {
+    collected = await callTool('work_collect', { work_id: sourceWork.id })
+    const frontier = collected?.state?.frontiers?.find((item) => item.id === frontierId)
+    if (frontier?.status === 'completed' || frontier?.status === 'error') break
+    await sleep(2_000)
+  }
+  const frontier = collected?.state?.frontiers?.find((item) => item.id === frontierId)
+  if (frontier?.status !== 'completed') throw new Error(`runtime live-check worker did not complete: ${frontier?.status ?? 'timeout'}`)
+
+  const conversation = await callTool('conversation_read', { conversation_id: dispatch.conversationId })
+  if (conversation?.latestTurnId !== dispatch.turnId) throw new Error('runtime live-check collected the wrong turn')
+  const creation = conversation?.events?.find((event) => event.type === 'conversation_created')
+  if (creation?.externalUrl !== projectUrl) throw new Error('runtime live-check worker was not created in configured subagents Project')
+  const workerResult = frontier.result ?? conversation.latestResponse ?? null
+  if (workerResult !== expectedReply) throw new Error(`runtime live-check worker returned unexpected result: ${workerResult}`)
+
+  await callTool('work_decide', {
+    work_id: sourceWork.id,
+    decision: { action: 'STOP', reason: 'runtime live-check worker completed successfully' }
+  })
+  await callTool('work_append', {
+    work_id: sourceWork.id,
+    type: 'completed',
+    payload: { outcome: workerResult, canary: token }
+  })
+  const memory = await callTool('work_memory_publish', { source_work_id: sourceWork.id })
+  if (!memory?.memory_id) throw new Error('runtime live-check memory publish failed')
+
+  const consumerWork = await callTool('work_create', { goal: `${token}: memory consumption canary` })
+  const retrieval = await callTool('work_memory_query', { work_id: consumerWork.id, contains: workerResult })
+  const matched = retrieval?.matched?.find((item) => item.memory_id === memory.memory_id)
+  if (!retrieval?.retrievalId || !matched) throw new Error('runtime live-check memory query did not match published memory')
+  await callTool('work_memory_read', {
+    work_id: consumerWork.id,
+    retrieval_id: retrieval.retrievalId,
+    memory_id: memory.memory_id
+  })
+  const consumerLedger = await callTool('work_read', { work_id: consumerWork.id })
+  const consumed = consumerLedger?.events?.some((event) => event.type === 'memory_consumed' && event.payload?.memory_id === memory.memory_id)
+  if (!consumed) throw new Error('runtime live-check memory consumption was not recorded')
+
+  return {
+    ok: true,
+    token,
+    sourceWorkId: sourceWork.id,
+    consumerWorkId: consumerWork.id,
+    conversationId: dispatch.conversationId,
+    turnId: dispatch.turnId,
+    workerResult,
+    memoryId: memory.memory_id,
+    retrievalId: retrieval.retrievalId
+  }
+}
+
 async function currentSourceRevision(sourceRoot) {
   return (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: sourceRoot, encoding: 'utf8' })).stdout.trim()
 }
@@ -303,6 +413,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
     readActiveRegistration: defaultReadActiveRegistration,
     installNativeHost: defaultInstallNativeHost,
     projectFind: defaultProjectFind,
+    liveCheck: runRuntimeLiveCheck,
     now: () => new Date().toISOString(),
     randomId: randomUUID,
     ...overrides
@@ -414,6 +525,45 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
     return { ok: false, state: existingConfig?.state ?? 'prepared', runtimeHome, sourceRevision: revision, error: resultError('self_check_failed', error.message) }
   }
 
+  const checks = { release: true, launchers: true, dataRoot: true, managedProject: true }
+  let liveCheck = null
+  if (options.liveCheck) {
+    if (activation.status === 'prepared_not_activated') {
+      return {
+        ok: false,
+        state: 'ready',
+        runtimeHome,
+        sourceRevision: revision,
+        currentRelease: revision,
+        managedProject: validatedReady.managed_project,
+        activation,
+        migration,
+        checks,
+        error: resultError('activation_required', 'runtime live-check requires the Runtime Home Native Messaging registration to be active')
+      }
+    }
+    try {
+      liveCheck = await deps.liveCheck({
+        managedProjectUrl: validatedReady.managed_project.url,
+        callTool: overrides.callTool,
+        randomId: deps.randomId
+      })
+    } catch (error) {
+      return {
+        ok: false,
+        state: 'ready',
+        runtimeHome,
+        sourceRevision: revision,
+        currentRelease: revision,
+        managedProject: validatedReady.managed_project,
+        activation,
+        migration,
+        checks,
+        error: resultError('live_check_failed', error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
   return {
     ok: true,
     state: 'ready',
@@ -423,7 +573,8 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
     managedProject: validatedReady.managed_project,
     activation,
     migration,
-    checks: { release: true, launchers: true, dataRoot: true, managedProject: true }
+    checks,
+    ...(liveCheck ? { liveCheck } : {})
   }
 }
 
