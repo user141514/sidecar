@@ -15,13 +15,13 @@ C:/Users/14579/.devspace/worktrees/multi-conversation-eefbbb6b
 branch: stabilize/unified-mainline-20260906
 ```
 
-All Windows-side integration work for Runtime Home, managed `subagents` workers, WorkController, MemoryPool, bootstrap, and shared conversation protocol must originate from this workspace/branch. Mint/Linux worktrees are parity and live-gate environments only; legacy Windows branches, rollback worktrees, archived checkouts, and machine-local running packages are evidence or deployment targets, not source authority.
+All Windows-side integration work for Runtime Home, managed `subagents` workers, WorkController, MemoryPool, bootstrap, and shared conversation protocol must originate from this workspace/branch. Linux worktrees are parity and live-gate environments only; legacy Windows branches, rollback worktrees, archived checkouts, and machine-local running packages are evidence or deployment targets, not source authority.
 
 A dedicated Git baseline ref records the immutable starting point for this integration line; the branch itself remains the evolving Windows integration authority.
 
 ## Goal
 
-A Windows or Mint/Linux machine with the repository and Node.js 24+ should be able to prepare or update the local Agent Runtime with one command from the desired source checkout:
+A Windows or Linux machine with the repository and Node.js 24+ should be able to prepare or update the local Agent Runtime with one command from the desired source checkout:
 
 ```text
 npm run bootstrap
@@ -501,7 +501,7 @@ No `win32`/`linux` branch is permitted in WorkController, MemoryPool, Conversati
 - bootstrap rerun is idempotent;
 - existing full repository suite remains green.
 
-### Real Windows and Mint gates
+### Real Windows and Linux gates
 
 Use the same candidate SHA on both hosts.
 
@@ -527,5 +527,5 @@ V1 is complete when:
 4. managed dispatch cannot create outside the configured `subagents` Project;
 5. re-running bootstrap is idempotent;
 6. an existing external working registration is not replaced without `--activate`;
-7. Windows and Mint pass the same source/runtime-home test suite;
+7. Windows and Linux pass the same source/runtime-home test suite;
 8. one real live-check proves `subagents` worker dispatch -> exact-turn collect -> memory publish/query/read/consume.

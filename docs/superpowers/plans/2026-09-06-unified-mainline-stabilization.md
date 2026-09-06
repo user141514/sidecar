@@ -22,7 +22,7 @@
 - `archive/win-pre-normalize-20260906@e53895d` is recovery evidence, not an integration base.
 - Never merge or cherry-pick `f521bcc`, `fe481b1`, or `e53895d` wholesale into the stabilization branch.
 - Every retained behavior must enter the unified branch through a failing test, minimal implementation, focused tests, then the full repository suite.
-- No remote branch deletion, force-push, or `main` promotion until the stabilization branch passes source tests plus bounded Windows and Mint live gates.
+- No remote branch deletion, force-push, or `main` promotion until the stabilization branch passes source tests plus bounded Windows and Linux live gates.
 
 ---
 
@@ -231,7 +231,7 @@ No persistent disposable registration/profile was created; the failed one-line i
 
 ---
 
-### Task 5: Mint/Linux parity gate and mainline promotion preparation
+### Task 5: Linux parity gate and mainline promotion preparation
 
 **Files:**
 - No platform-specific application fork.
@@ -240,13 +240,13 @@ No persistent disposable registration/profile was created; the failed one-line i
 - Consumes: same commit proven on Windows.
 - Produces: one commit SHA eligible for PR/main promotion.
 
-- [x] **Step 1: Run the exact same commit on Mint/Linux**
+- [x] **Step 1: Run the exact same commit on Linux**
 
-Mint isolated DevSpace worktree checked out `c5da4c14af22efc1bb5041af3542f4eea1086ae8`, the same stabilization commit pushed from Windows. The original Mint checkout remained dirty and untouched.
+The isolated Linux DevSpace worktree checked out `c5da4c14af22efc1bb5041af3542f4eea1086ae8`, the same stabilization commit pushed from Windows. The original Linux checkout remained dirty and untouched.
 
 - [x] **Step 2: Run `npm test` and Native Messaging installer checks**
 
-Mint result: 136 tests, 134 pass, 0 fail, 2 platform-expected skips. POSIX launcher, Linux native-host installation contract, POSIX CLI symlink, WorkController, WorkLedger, MemoryPool and extension lifecycle tests all passed. Provider export/verification also passed with the same build id and source content hash as Windows:
+Linux result: 136 tests, 134 pass, 0 fail, 2 platform-expected skips. POSIX launcher, Linux native-host installation contract, POSIX CLI symlink, WorkController, WorkLedger, MemoryPool and extension lifecycle tests all passed. Provider export/verification also passed with the same build id and source content hash as Windows:
 
 ```text
 buildId = a77203f046978f9de9e043fa896ce5708dff50eebd3b7bc389c3ab4a2a861499
@@ -255,11 +255,11 @@ sourceContentHash = f8d2e6834e5d2f5320a805ae6be7d1bdc6b234cd876323a89406ab978f1a
 
 - [ ] **Step 3: Run one bounded create/send/read gate**
 
-Blocked by the same frozen-running-package invariant as Windows. The active Mint manifest points to `/home/ad/gitproject/conversation-sidecar/install/conversation-sidecar-host`; switching the fixed-ID extension to the stabilization worktree would require changing the live Native Messaging link and/or reloading the active extension. Do not do this while the known-good installation is frozen.
+Blocked by the same frozen-running-package invariant as Windows. The active Linux manifest points to `/home/ad/gitproject/conversation-sidecar/install/conversation-sidecar-host`; switching the fixed-ID extension to the stabilization worktree would require changing the live Native Messaging link and/or reloading the active extension. Do not do this while the known-good installation is frozen.
 
 - [x] **Step 4: Record the single candidate SHA that passed both hosts**
 
-Source/provenance candidate before this documentation-only update: `c5da4c14af22efc1bb5041af3542f4eea1086ae8`. After committing these verification notes, rerun the same source suite on Mint against the new documentation-only HEAD before PR preparation.
+Source/provenance candidate before this documentation-only update: `c5da4c14af22efc1bb5041af3542f4eea1086ae8`. After committing these verification notes, rerun the same source suite on Linux against the new documentation-only HEAD before PR preparation.
 
 - [ ] **Step 5: Prepare PR/promotion; do not force-push or delete remote branches as part of stabilization**
 
