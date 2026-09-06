@@ -161,6 +161,19 @@ async function defaultProjectFind(name) {
   }
 }
 
+async function defaultRuntimeHealth(timeoutMs = 5_000) {
+  try {
+    const response = await fetch('http://127.0.0.1:7337/healthz', {
+      signal: AbortSignal.timeout(timeoutMs)
+    })
+    if (!response.ok) return null
+    const body = await response.json()
+    return body?.ok === true ? body : null
+  } catch {
+    return null
+  }
+}
+
 async function defaultCallTool(name, args, timeoutMs = 30_000) {
   const response = await fetch('http://127.0.0.1:7337/mcp', {
     method: 'POST',
@@ -413,6 +426,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
     readActiveRegistration: defaultReadActiveRegistration,
     installNativeHost: defaultInstallNativeHost,
     projectFind: defaultProjectFind,
+    runtimeHealth: defaultRuntimeHealth,
     liveCheck: runRuntimeLiveCheck,
     now: () => new Date().toISOString(),
     randomId: randomUUID,
@@ -542,6 +556,25 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
         error: resultError('activation_required', 'runtime live-check requires the Runtime Home Native Messaging registration to be active')
       }
     }
+    const runtimeHealth = await deps.runtimeHealth()
+    if (runtimeHealth?.runtimeRelease !== revision) {
+      return {
+        ok: false,
+        state: 'ready',
+        runtimeHome,
+        sourceRevision: revision,
+        currentRelease: revision,
+        managedProject: validatedReady.managed_project,
+        activation,
+        migration,
+        checks: { ...checks, runtimeActive: false },
+        error: resultError(
+          'activation_required',
+          `runtime live-check requires active release ${revision}; observed ${runtimeHealth?.runtimeRelease ?? 'unverified runtime'}`
+        )
+      }
+    }
+    checks.runtimeActive = true
     try {
       liveCheck = await deps.liveCheck({
         managedProjectUrl: validatedReady.managed_project.url,

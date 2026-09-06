@@ -22,7 +22,10 @@ export function runtimeLauncherEnvironment(config) {
   if (!config || typeof config !== 'object' || typeof config.data_root !== 'string' || !config.data_root) {
     throw new TypeError('runtime config data root is required')
   }
-  const env = { SIDECAR_DATA_ROOT: config.data_root }
+  const env = {
+    SIDECAR_DATA_ROOT: config.data_root,
+    SIDECAR_RUNTIME_RELEASE: config.current_release
+  }
   if (config.state === 'ready' && typeof config.managed_project?.url === 'string' && config.managed_project.url) {
     env.SIDECAR_MANAGED_PROJECT_URL = config.managed_project.url
   }

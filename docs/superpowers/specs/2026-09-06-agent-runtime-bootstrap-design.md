@@ -144,9 +144,10 @@ The Native Messaging manifest must point to the Runtime Home stable launcher, no
 1. reads and validates `runtime.json`;
 2. resolves `<current_release_dir>/src/server.mjs` under `releases/`;
 3. sets `SIDECAR_DATA_ROOT=<runtime-home>/data`;
-4. when `managed_project.url` is resolved, sets `SIDECAR_MANAGED_PROJECT_URL=<canonical subagents URL>`; otherwise leaves it unset;
-5. spawns the current release server with inherited stdin/stdout/stderr;
-6. mirrors the child exit code.
+4. sets `SIDECAR_RUNTIME_RELEASE=<current_release_sha>` so the running server can prove which immutable release is actually active;
+5. when `managed_project.url` is resolved, sets `SIDECAR_MANAGED_PROJECT_URL=<canonical subagents URL>`; otherwise leaves it unset;
+6. spawns the current release server with inherited stdin/stdout/stderr;
+7. mirrors the child exit code.
 
 A `prepared` runtime may therefore expose conversation transport and project-discovery tools, but WorkController dispatch must fail closed until the configuration reaches `ready`.
 
@@ -352,6 +353,8 @@ If an existing registration points outside Runtime Home:
 
 Do not kill arbitrary processes during bootstrap V1.
 
+Registration authority and running-process authority are distinct. Updating the manifest does not prove that Chrome has disconnected the old Native Host and launched the newly selected release. A Runtime-Home-launched server therefore exposes its active release SHA through `/healthz` as `runtimeRelease`; development/legacy processes may omit this field.
+
 ### Phase 7 — Resolve managed Project and promote readiness
 
 Resolve `subagents` Project identity using the order above. If the extension has not yet been manually trusted/loaded on a fresh machine, return a prepared result that identifies the exact release `extension/` directory and asks the user to perform the one unavoidable Chrome trust action, then re-run the same bootstrap command.
@@ -373,11 +376,11 @@ WorkController construction OK
 MemoryPool construction     OK
 ```
 
-If the extension supports `extension_status`, include build/instance health. Missing status on an older active installation is reported as `legacy_runtime`, not as source failure.
+If the extension supports `extension_status`, include build/instance health. Missing status on an older active installation is reported as `legacy_runtime`, not as source failure. Running-process verification is independent: before any live-check, `/healthz.runtimeRelease` must equal `runtime.json.current_release`. A manifest that points at Runtime Home while an older process is still listening is `activation_required`, not an active candidate.
 
 ### Phase 9 — Optional live check
 
-`--live-check` is explicitly opt-in because it creates a real ChatGPT turn.
+`--live-check` is explicitly opt-in because it creates a real ChatGPT turn. It may run only after the actual listening Native Host proves `runtimeRelease == current_release`; changing a manifest or registry entry alone is insufficient. If the expected release is not yet active, bootstrap returns `activation_required` and performs no canary work.
 
 It must:
 
@@ -498,6 +501,8 @@ No `win32`/`linux` branch is permitted in WorkController, MemoryPool, Conversati
 - WorkController passes exact project URL to `conversationHost.create`;
 - stable launcher resolves current release and data root;
 - existing external Native Messaging registration is preserved without `--activate`;
+- stable launcher injects current release identity and `/healthz` exposes it only for Runtime Home launches;
+- live-check refuses a stale/legacy listening process even when registration already points at Runtime Home;
 - bootstrap rerun is idempotent;
 - existing full repository suite remains green.
 

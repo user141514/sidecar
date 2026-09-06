@@ -449,12 +449,12 @@ async function handleRpc(conversationHost, workLedger, workController, memoryPoo
   return { status: 200, body: jsonRpcError(id, -32601, `Method not found: ${message.method}`) }
 }
 
-export function createSidecarServer({ conversationHost, workLedger = null, workController = null, memoryPool = null }) {
+export function createSidecarServer({ conversationHost, workLedger = null, workController = null, memoryPool = null, runtimeRelease = null }) {
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (req.method === 'GET' && url.pathname === '/healthz') {
-        writeJson(res, 200, { ok: true })
+        writeJson(res, 200, { ok: true, ...(runtimeRelease ? { runtimeRelease } : {}) })
         return
       }
       if (req.method !== 'POST' || url.pathname !== '/mcp') {
@@ -517,7 +517,10 @@ async function startDefault() {
   bridge.on('error', (error) => console.error(error instanceof Error ? error.stack : String(error)))
 
   const components = createRuntimeComponents({ bridge, dataRoot: process.env.SIDECAR_DATA_ROOT ?? null })
-  const app = createSidecarServer(components)
+  const app = createSidecarServer({
+    ...components,
+    runtimeRelease: process.env.SIDECAR_RUNTIME_RELEASE ?? null
+  })
   const host = process.env.SIDECAR_HOST ?? '127.0.0.1'
   const port = Number(process.env.SIDECAR_PORT ?? 7337)
   const address = await app.listen({ host, port })

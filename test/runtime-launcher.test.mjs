@@ -43,7 +43,8 @@ test('launcher environment always sets stable data root and only exposes managed
     extension: { id: 'cfifihieaffhniimpimnfmignbbdaalb' }
   }
   assert.deepEqual(runtimeLauncherEnvironment(prepared), {
-    SIDECAR_DATA_ROOT: `${runtimeHome}\\data`
+    SIDECAR_DATA_ROOT: `${runtimeHome}\\data`,
+    SIDECAR_RUNTIME_RELEASE: release
   })
 
   assert.deepEqual(runtimeLauncherEnvironment({
@@ -52,6 +53,7 @@ test('launcher environment always sets stable data root and only exposes managed
     managed_project: { name: 'subagents', url: projectUrl }
   }), {
     SIDECAR_DATA_ROOT: `${runtimeHome}\\data`,
+    SIDECAR_RUNTIME_RELEASE: release,
     SIDECAR_MANAGED_PROJECT_URL: projectUrl
   })
 })

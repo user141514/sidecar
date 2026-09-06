@@ -142,6 +142,23 @@ async function rpc(baseUrl, body) {
   return { status: response.status, body: response.status === 204 ? null : await response.json() }
 }
 
+test('health reports the active Runtime Home release identity when provided', async () => {
+  const { createSidecarServer } = await loadServerModule()
+  assert.equal(typeof createSidecarServer, 'function')
+  if (typeof createSidecarServer !== 'function') return
+
+  const runtimeRelease = 'd'.repeat(40)
+  const app = createSidecarServer({ conversationHost: new FakeHost(), runtimeRelease })
+  const address = await app.listen({ host: '127.0.0.1', port: 0 })
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/healthz`)
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { ok: true, runtimeRelease })
+  } finally {
+    await app.close()
+  }
+})
+
 test('server exposes health, project pinning, and the three conversation tools', async () => {
   const { createSidecarServer } = await loadServerModule()
   assert.equal(typeof createSidecarServer, 'function')

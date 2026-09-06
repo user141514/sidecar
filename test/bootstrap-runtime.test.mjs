@@ -315,6 +315,7 @@ test('bootstrap runs live-check after an installed Runtime Home becomes ready', 
   if (typeof bootstrapRuntime !== 'function') return
 
   const f = await fixture(t)
+  f.deps.runtimeHealth = async () => ({ ok: true, runtimeRelease: revision })
   let liveCheckArgs = null
   f.deps.liveCheck = async (args) => {
     liveCheckArgs = args
@@ -334,12 +335,38 @@ test('bootstrap runs live-check after an installed Runtime Home becomes ready', 
   assert.equal(liveCheckArgs.managedProjectUrl, projectUrl)
 })
 
+test('bootstrap refuses live-check when registration changed but an old runtime is still listening', async (t) => {
+  const { bootstrapRuntime } = await loadModule()
+  assert.equal(typeof bootstrapRuntime, 'function')
+  if (typeof bootstrapRuntime !== 'function') return
+
+  const f = await fixture(t)
+  f.deps.runtimeHealth = async () => ({ ok: true, runtimeRelease: 'e'.repeat(40) })
+  let liveCheckCalls = 0
+  f.deps.liveCheck = async () => {
+    liveCheckCalls += 1
+    return { ok: true }
+  }
+
+  const result = await bootstrapRuntime({
+    runtimeHome: f.runtimeHome,
+    managedProjectUrl: projectUrl,
+    liveCheck: true
+  }, f.deps)
+
+  assert.equal(result.ok, false)
+  assert.equal(result.state, 'ready')
+  assert.equal(result.error.code, 'activation_required')
+  assert.equal(liveCheckCalls, 0)
+})
+
 test('bootstrap classifies an active live-check failure without rolling back ready config', async (t) => {
   const { bootstrapRuntime } = await loadModule()
   assert.equal(typeof bootstrapRuntime, 'function')
   if (typeof bootstrapRuntime !== 'function') return
 
   const f = await fixture(t)
+  f.deps.runtimeHealth = async () => ({ ok: true, runtimeRelease: revision })
   f.deps.liveCheck = async () => {
     throw new Error('canary failed')
   }

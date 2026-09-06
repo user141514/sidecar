@@ -36,7 +36,8 @@ export async function launchRuntime(kind, argv = process.argv.slice(2)) {
   const entrypoint = join(config.current_release_dir, ...relative)
   const env = {
     ...process.env,
-    SIDECAR_DATA_ROOT: config.data_root
+    SIDECAR_DATA_ROOT: config.data_root,
+    SIDECAR_RUNTIME_RELEASE: config.current_release
   }
   if (config.state === 'ready' && config.managed_project?.url) env.SIDECAR_MANAGED_PROJECT_URL = config.managed_project.url
 
