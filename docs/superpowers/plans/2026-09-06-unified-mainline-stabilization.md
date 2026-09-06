@@ -63,7 +63,7 @@ npm test
 
 Expected: zero failures. Observed on 2026-09-06: 132 tests, 130 pass, 0 fail, 2 skip.
 
-- [ ] **Step 4: Commit this stabilization plan**
+- [x] **Step 4: Commit this stabilization plan**
 
 ```text
 git add docs/superpowers/plans/2026-09-06-unified-mainline-stabilization.md
@@ -90,7 +90,7 @@ git commit -m docs:record-unified-mainline-stabilization
 - Consumes: existing `conversation_send { conversation_id, text }` and `ChatGptConversationHost.send(conversationId, text)`.
 - Produces: optional `app: string` propagated end-to-end without changing default send behavior.
 
-- [ ] **Step 1: Add failing MCP/CLI/host tests**
+- [x] **Step 1: Add failing MCP/CLI/host tests**
 
 Required assertions:
 
@@ -100,7 +100,7 @@ CLI: send <id> --app DevSpace <prompt> -> { conversation_id, text, app: 'DevSpac
 ChatGptConversationHost.send(id, text, { app: 'DevSpace' }) persists app on prompt_sent and forwards app to conversation_send bridge request.
 ```
 
-- [ ] **Step 2: Run focused tests and confirm RED**
+- [x] **Step 2: Run focused tests and confirm RED**
 
 Run:
 
@@ -110,7 +110,7 @@ node --test test/chatgpt.test.mjs test/cli.test.mjs test/server.test.mjs
 
 Expected: failures only for missing `app` support.
 
-- [ ] **Step 3: Implement shared host/MCP/CLI propagation**
+- [x] **Step 3: Implement shared host/MCP/CLI propagation**
 
 Rules:
 
@@ -121,7 +121,7 @@ existing callers without app are unchanged
 WorkController continues to call send(conversationId, prompt) with no app by default
 ```
 
-- [ ] **Step 4: Add failing browser transport tests**
+- [x] **Step 4: Add failing browser transport tests**
 
 Required assertions:
 
@@ -132,7 +132,7 @@ missing app keeps the existing send path unchanged
 missing requested app fails closed before prompt submission
 ```
 
-- [ ] **Step 5: Run browser-focused tests and confirm RED**
+- [x] **Step 5: Run browser-focused tests and confirm RED**
 
 Run:
 
@@ -140,15 +140,15 @@ Run:
 node --test test/content-script-runtime.test.mjs test/extension-runtime.test.mjs
 ```
 
-- [ ] **Step 6: Implement minimal browser app selection**
+- [x] **Step 6: Implement minimal browser app selection**
 
 Use the current ChatGPT composer tools menu only. No platform branches, no CDP, no new dependency, no Project/sidebar redesign.
 
-- [ ] **Step 7: Run focused GREEN tests**
+- [x] **Step 7: Run focused GREEN tests**
 
 Run the five touched test files and require zero failures.
 
-- [ ] **Step 8: Commit the verified app-selection feature**
+- [x] **Step 8: Commit the verified app-selection feature**
 
 ```text
 git add src/conversation-tools.mjs src/chatgpt.mjs src/cli.mjs extension/service-worker.js extension/content-script.js test/chatgpt.test.mjs test/cli.test.mjs test/content-script-runtime.test.mjs test/extension-runtime.test.mjs test/server.test.mjs
@@ -166,7 +166,7 @@ git commit -m feat:add-per-message-chatgpt-app-selection
 - Consumes: Tasks 1-2.
 - Produces: one clean candidate branch with explicit supersession evidence.
 
-- [ ] **Step 1: Run full suite**
+- [x] **Step 1: Run full suite**
 
 ```text
 npm test
@@ -174,7 +174,7 @@ npm test
 
 Expected: zero failures.
 
-- [ ] **Step 2: Run whitespace/integrity gate**
+- [x] **Step 2: Run whitespace/integrity gate**
 
 ```text
 git diff --check
@@ -182,7 +182,7 @@ git diff --check
 
 Expected: no output.
 
-- [ ] **Step 3: Audit branch delta**
+- [x] **Step 3: Audit branch delta**
 
 Confirm:
 
