@@ -26,7 +26,7 @@ async function fixture(t, { activeRegistration = null, projectFindResult = null 
   const sourceRoot = join(root, 'source')
   const runtimeHome = join(root, 'runtime')
   await mkdir(sourceRoot, { recursive: true })
-  const calls = { exports: 0, verifies: 0, launchers: 0, installs: [], projectFind: 0 }
+  const calls = { exports: 0, verifies: 0, launchers: 0, installs: [], userInstalls: [], projectFind: 0 }
 
   const deps = {
     platform: process.platform,
@@ -46,6 +46,15 @@ async function fixture(t, { activeRegistration = null, projectFindResult = null 
       calls.launchers += 1
       await mkdir(join(home, 'bin'), { recursive: true })
       return { runtimeHome: home, binDir: join(home, 'bin'), files: [] }
+    },
+    async installRuntimeUserEntrypoints(options) {
+      calls.userInstalls.push(options)
+      return {
+        status: options.dryRun ? 'ready' : 'installed',
+        commandDir: join(root, 'user-bin'),
+        skillDir: join(root, 'user-skill'),
+        pathReady: true
+      }
     },
     async readActiveRegistration() {
       return activeRegistration
@@ -127,6 +136,56 @@ test('bootstrap preserves an external active registration without --activate', a
   assert.equal(result.ok, true)
   assert.equal(result.state, 'ready')
   assert.equal(result.activation.status, 'prepared_not_activated')
+  assert.equal(f.calls.installs.length, 0)
+  assert.equal(f.calls.userInstalls.length, 1)
+  assert.equal(f.calls.userInstalls[0].dryRun, true)
+  assert.equal(result.userInstall.status, 'deferred_activation')
+})
+
+ test('bootstrap installs user command shims and Skill only after Runtime Home owns registration', async (t) => {
+  const { bootstrapRuntime } = await loadModule()
+  assert.equal(typeof bootstrapRuntime, 'function')
+  if (typeof bootstrapRuntime !== 'function') return
+
+  const f = await fixture(t)
+  const result = await bootstrapRuntime({ runtimeHome: f.runtimeHome, managedProjectUrl: projectUrl }, f.deps)
+
+  assert.equal(result.ok, true)
+  assert.equal(result.activation.status, 'installed')
+  assert.equal(f.calls.userInstalls.length, 2)
+  assert.equal(f.calls.userInstalls[0].dryRun, true)
+  assert.equal(f.calls.userInstalls[1].dryRun, false)
+  assert.equal(result.userInstall.status, 'installed')
+  assert.equal(result.checks.userEntrypoints, true)
+  assert.equal(result.checks.commandPathReady, true)
+})
+
+ test('bootstrap rejects a foreign user entrypoint before changing Native Host authority', async (t) => {
+  const { bootstrapRuntime } = await loadModule()
+  assert.equal(typeof bootstrapRuntime, 'function')
+  if (typeof bootstrapRuntime !== 'function') return
+
+  const f = await fixture(t, {
+    activeRegistration: {
+      manifestPath: join('C:\\Legacy', 'manifest.json'),
+      hostPath: 'C:\\Legacy\\install\\conversation-sidecar-host.bat',
+      dataRoot: null
+    }
+  })
+  f.deps.installRuntimeUserEntrypoints = async () => {
+    const error = new Error('foreign command')
+    error.code = 'USER_ENTRYPOINT_CONFLICT'
+    throw error
+  }
+
+  const result = await bootstrapRuntime({
+    runtimeHome: f.runtimeHome,
+    managedProjectUrl: projectUrl,
+    activate: true
+  }, f.deps)
+
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'user_entrypoint_conflict')
   assert.equal(f.calls.installs.length, 0)
 })
 

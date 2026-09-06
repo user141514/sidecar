@@ -9,6 +9,7 @@ import { promisify } from 'node:util'
 import { exportRuntime as defaultExportRuntime } from './export-runtime.mjs'
 import { verifyRuntime as defaultVerifyRuntime } from './verify-runtime.mjs'
 import { installRuntimeLaunchers as defaultInstallRuntimeLaunchers } from '../install/runtime-launcher.mjs'
+import { installRuntimeUserEntrypoints as defaultInstallRuntimeUserEntrypoints } from '../install/runtime-user-install.mjs'
 import { installNativeHost as defaultInstallNativeHost, resolveNativeHostManifestPath } from '../install/install-host.mjs'
 import { resolveDefaultRuntimeHome, resolveRuntimePaths, validateRuntimeConfig } from '../src/runtime-home.mjs'
 
@@ -423,6 +424,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
     exportRuntime: defaultExportRuntime,
     verifyRuntime: defaultVerifyRuntime,
     installRuntimeLaunchers: defaultInstallRuntimeLaunchers,
+    installRuntimeUserEntrypoints: defaultInstallRuntimeUserEntrypoints,
     readActiveRegistration: defaultReadActiveRegistration,
     installNativeHost: defaultInstallNativeHost,
     projectFind: defaultProjectFind,
@@ -454,14 +456,25 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
   let release
   let migration
   let activeRegistration
+  let userInstallPreflight
   try {
     existingConfig = await readRuntimeConfigIfPresent(runtimeHome, deps.platform)
     release = await installOrReuseRelease({ runtimeHome, revision, deps, paths })
     await deps.installRuntimeLaunchers({ runtimeHome, platform: deps.platform })
+    userInstallPreflight = await deps.installRuntimeUserEntrypoints({
+      runtimeHome,
+      releaseDir: release.releaseDir,
+      platform: deps.platform,
+      dryRun: true
+    })
     activeRegistration = await deps.readActiveRegistration({ platform: deps.platform, runtimeHome })
     migration = await migrateLegacyData({ options, deps, paths, activeRegistration })
   } catch (error) {
-    const code = error.code === 'data_root_conflict' ? 'data_root_conflict' : 'release_integrity_failed'
+    const code = error.code === 'data_root_conflict'
+      ? 'data_root_conflict'
+      : error.code === 'USER_ENTRYPOINT_CONFLICT'
+        ? 'user_entrypoint_conflict'
+        : 'release_integrity_failed'
     return { ok: false, state: existingConfig?.state ?? null, runtimeHome, sourceRevision: revision, error: resultError(code, error.message) }
   }
 
@@ -494,6 +507,29 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
     return { ok: false, state: existingConfig?.state ?? 'prepared', runtimeHome, sourceRevision: revision, error: resultError('native_host_registration_failed', error.message) }
   }
 
+  let userInstall
+  if (activation.status === 'prepared_not_activated') {
+    userInstall = { ...userInstallPreflight, status: 'deferred_activation' }
+  } else {
+    try {
+      userInstall = await deps.installRuntimeUserEntrypoints({
+        runtimeHome,
+        releaseDir: release.releaseDir,
+        platform: deps.platform,
+        dryRun: false
+      })
+    } catch (error) {
+      const code = error.code === 'USER_ENTRYPOINT_CONFLICT' ? 'user_entrypoint_conflict' : 'self_check_failed'
+      return { ok: false, state: existingConfig?.state ?? 'prepared', runtimeHome, sourceRevision: revision, activation, error: resultError(code, error.message) }
+    }
+  }
+
+  const userInstallChecks = {
+    userEntrypoints: userInstall.status === 'installed',
+    skill: userInstall.status === 'installed',
+    commandPathReady: userInstall.pathReady === true
+  }
+
   if (!managedProjectUrl) {
     const found = await deps.projectFind('subagents')
     managedProjectUrl = canonicalProjectUrl(found?.projectUrl)
@@ -510,7 +546,8 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
         managedProject: existingConfig.managed_project,
         activation,
         migration,
-        checks: { release: true, launchers: true, dataRoot: true, managedProject: true }
+        userInstall,
+        checks: { release: true, launchers: true, dataRoot: true, managedProject: true, ...userInstallChecks }
       }
     }
     return {
@@ -522,7 +559,8 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
       managedProject: null,
       activation,
       migration,
-      checks: { release: true, launchers: true, dataRoot: true, managedProject: false },
+      userInstall,
+      checks: { release: true, launchers: true, dataRoot: true, managedProject: false, ...userInstallChecks },
       error: resultError(activeRegistration ? 'managed_project_unresolved' : 'extension_trust_required', 'subagents Project identity is not yet available')
     }
   }
@@ -539,7 +577,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
     return { ok: false, state: existingConfig?.state ?? 'prepared', runtimeHome, sourceRevision: revision, error: resultError('self_check_failed', error.message) }
   }
 
-  const checks = { release: true, launchers: true, dataRoot: true, managedProject: true }
+  const checks = { release: true, launchers: true, dataRoot: true, managedProject: true, ...userInstallChecks }
   let liveCheck = null
   if (options.liveCheck) {
     if (activation.status === 'prepared_not_activated') {
@@ -552,6 +590,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
         managedProject: validatedReady.managed_project,
         activation,
         migration,
+        userInstall,
         checks,
         error: resultError('activation_required', 'runtime live-check requires the Runtime Home Native Messaging registration to be active')
       }
@@ -567,6 +606,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
         managedProject: validatedReady.managed_project,
         activation,
         migration,
+        userInstall,
         checks: { ...checks, runtimeActive: false },
         error: resultError(
           'activation_required',
@@ -591,6 +631,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
         managedProject: validatedReady.managed_project,
         activation,
         migration,
+        userInstall,
         checks,
         error: resultError('live_check_failed', error instanceof Error ? error.message : String(error))
       }
@@ -606,6 +647,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
     managedProject: validatedReady.managed_project,
     activation,
     migration,
+    userInstall,
     checks,
     ...(liveCheck ? { liveCheck } : {})
   }
@@ -619,6 +661,11 @@ function printHuman(result) {
     `release: ${result.currentRelease ?? result.sourceRevision ?? 'unknown'}`,
     `managed-project: ${result.managedProject?.url ?? 'unresolved'}`
   ]
+  if (result.userInstall) {
+    lines.push(`command-dir: ${result.userInstall.commandDir}`)
+    lines.push(`skill-dir: ${result.userInstall.skillDir}`)
+    if (result.userInstall.pathReady === false) lines.push(`PATH hint: add ${result.userInstall.commandDir}`)
+  }
   if (result.error) lines.push(`error: ${result.error.code}: ${result.error.message}`)
   return lines.join('\n')
 }

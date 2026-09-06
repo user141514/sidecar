@@ -434,6 +434,7 @@ Bootstrap failures are classified and leave the prior runtime authority intact w
 preflight_failed
 release_integrity_failed
 data_root_conflict
+user_entrypoint_conflict
 managed_project_unresolved
 extension_trust_required
 activation_required
@@ -448,11 +449,31 @@ No failure path deletes a release, legacy data, or existing Native Messaging man
 
 ## CLI / Skill installation
 
-The Runtime Home stable shims replace `npm link` as installation authority.
+The Runtime Home stable shims replace `npm link` as installation authority. Bootstrap exposes only two user commands in V1:
 
-Bootstrap may add `<runtime-home>/bin` to a user-scoped PATH only when the platform has a deterministic, reversible user-level mechanism. Otherwise it prints the one path to add and continues; Native Messaging does not depend on PATH.
+```text
+chatgpt-conversation
+conversation-work
+```
 
-The `chatgpt-subagents` skill shipped inside a release is copied/linked into the normal agent skill discovery location by bootstrap through an idempotent install step. Skill content describes Runtime Home commands rather than Git checkout paths.
+User command locations are deterministic and user-scoped:
+
+```text
+Linux:   ~/.local/bin
+Windows: %APPDATA%\\npm
+```
+
+Bootstrap performs a dry-run conflict check before changing Native Messaging authority. If an existing command is foreign, it fails with `user_entrypoint_conflict` before activation. Existing conversation-sidecar managed shims and the known legacy `npm link` / checkout wrappers are eligible for idempotent replacement. When an external Native Host remains authoritative because `--activate` was not supplied, global command replacement is deferred as well.
+
+Bootstrap does not edit `.bashrc`, `.profile`, PowerShell profiles, or machine PATH. If the deterministic command directory is not already on PATH, the result prints one explicit PATH hint; Native Messaging does not depend on PATH.
+
+The `chatgpt-subagents` Skill is copied from the verified release to:
+
+```text
+~/.agents/skills/chatgpt-subagents/SKILL.md
+```
+
+on both supported platforms (using native path semantics). A pre-existing file with the same Skill identity is treated as managed and may be updated; a foreign file at that path fails closed. Skill content describes Runtime Home commands rather than Git checkout paths.
 
 A future separate skill may expose the higher-level Agent Runtime protocol after Orca extraction; that is not part of V1.
 
@@ -503,6 +524,10 @@ No `win32`/`linux` branch is permitted in WorkController, MemoryPool, Conversati
 - existing external Native Messaging registration is preserved without `--activate`;
 - stable launcher injects current release identity and `/healthz` exposes it only for Runtime Home launches;
 - live-check refuses a stale/legacy listening process even when registration already points at Runtime Home;
+- Linux and Windows user command/Skill paths use native path semantics;
+- known legacy npm-link/checkout command wrappers upgrade to Runtime Home shims;
+- foreign user commands fail before Native Messaging activation;
+- user command replacement is deferred when an external registration remains authoritative;
 - bootstrap rerun is idempotent;
 - existing full repository suite remains green.
 
@@ -533,4 +558,5 @@ V1 is complete when:
 5. re-running bootstrap is idempotent;
 6. an existing external working registration is not replaced without `--activate`;
 7. Windows and Linux pass the same source/runtime-home test suite;
-8. one real live-check proves `subagents` worker dispatch -> exact-turn collect -> memory publish/query/read/consume.
+8. one real live-check proves `subagents` worker dispatch -> exact-turn collect -> memory publish/query/read/consume;
+9. bootstrap installs discoverable `chatgpt-conversation`, `conversation-work`, and `chatgpt-subagents` Skill entrypoints without requiring `npm link` or checkout-relative invocation.

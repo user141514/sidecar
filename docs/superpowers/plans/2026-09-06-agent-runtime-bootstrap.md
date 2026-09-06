@@ -497,3 +497,49 @@ Require proof that the managed conversation canonical URL belongs to the configu
 - [ ] **Step 7: Final verification and commit any factual doc corrections**
 
 Do not create a verification-only code commit. If no source changes remain, leave the branch clean and report the exact release-candidate SHA.
+
+---
+
+### Task 7: Install user command shims and the managed `chatgpt-subagents` Skill
+
+**Files:**
+- Create: `install/runtime-user-install.mjs`
+- Create: `test/runtime-user-install.test.mjs`
+- Modify: `scripts/bootstrap-runtime.mjs`
+- Modify: `test/bootstrap-runtime.test.mjs`
+- Modify: `docs/superpowers/specs/2026-09-06-agent-runtime-bootstrap-design.md` only if execution evidence requires a factual correction.
+
+**Interfaces:**
+- `resolveUserInstallPaths({ platform, homeDirectory, roamingAppData })` returns a user command directory and `~/.agents/skills/chatgpt-subagents` discovery path.
+- `installRuntimeUserEntrypoints({ runtimeHome, releaseDir, platform, homeDirectory, roamingAppData })` installs managed command shims and the verified release Skill idempotently.
+- Linux commands are installed under `~/.local/bin`; Windows commands are installed under `%APPDATA%\\npm` so existing npm-style PATH discovery can resolve them.
+- Foreign command files are never overwritten. Only shims marked as conversation-sidecar managed files may be updated.
+
+- [ ] **Step 1: Add RED path/idempotence/conflict tests**
+
+Require Linux and Windows path semantics, command shims that reference Runtime Home but no release SHA, exact Skill copy from the verified release, idempotent rerun, and fail-closed behavior on a foreign existing command.
+
+- [ ] **Step 2: Implement minimal user install surface**
+
+Install only `chatgpt-conversation`, `conversation-work`, and `chatgpt-subagents/SKILL.md`. Do not add global package managers, sudo requirements, symlink privileges, PowerShell profile edits, or shell-rc mutation.
+
+- [ ] **Step 3: Wire user install into bootstrap**
+
+Bootstrap executes the user install after stable Runtime Home launchers exist. Result checks report command/Skill installation and whether the chosen command directory is already present on PATH; PATH absence is a deterministic hint, not a silent mutation.
+
+- [ ] **Step 4: Run focused GREEN**
+
+```text
+node --test test/runtime-user-install.test.mjs test/bootstrap-runtime.test.mjs test/runtime-launcher.test.mjs
+```
+
+- [ ] **Step 5: Re-run Windows and Linux full suites plus one Runtime Home live-check on the final SHA**
+
+The final live-check must still prove the child conversation was created in the canonical `subagents` Project and memory was consumed by the second Work.
+
+- [ ] **Step 6: Commit**
+
+```text
+git add install/runtime-user-install.mjs test/runtime-user-install.test.mjs scripts/bootstrap-runtime.mjs test/bootstrap-runtime.test.mjs docs/superpowers/specs/2026-09-06-agent-runtime-bootstrap-design.md docs/superpowers/plans/2026-09-06-agent-runtime-bootstrap.md
+git commit -m feat:install-agent-runtime-user-entrypoints
+```

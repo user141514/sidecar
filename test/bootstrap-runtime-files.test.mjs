@@ -12,6 +12,7 @@ test('real Windows bootstrap prepares a disposable Runtime Home without changing
   const runtimeHome = await mkdtemp(join(tmpdir(), 'conversation-sidecar-runtime-home-'))
   t.after(() => rm(runtimeHome, { recursive: true, force: true }))
   let registrationWrites = 0
+  let userInstallWrites = 0
 
   const result = await bootstrapRuntime({
     runtimeHome,
@@ -26,6 +27,15 @@ test('real Windows bootstrap prepares a disposable Runtime Home without changing
     installNativeHost: async () => {
       registrationWrites += 1
       throw new Error('external registration must not be changed')
+    },
+    installRuntimeUserEntrypoints: async ({ dryRun }) => {
+      if (!dryRun) userInstallWrites += 1
+      return {
+        status: dryRun ? 'ready' : 'installed',
+        commandDir: 'C:\\Users\\14579\\AppData\\Roaming\\npm',
+        skillDir: 'C:\\Users\\14579\\.agents\\skills\\chatgpt-subagents',
+        pathReady: true
+      }
     }
   })
 
@@ -33,6 +43,8 @@ test('real Windows bootstrap prepares a disposable Runtime Home without changing
   assert.equal(result.state, 'ready')
   assert.equal(result.activation.status, 'prepared_not_activated')
   assert.equal(registrationWrites, 0)
+  assert.equal(userInstallWrites, 0)
+  assert.equal(result.userInstall.status, 'deferred_activation')
   assert.equal(result.managedProject.url, projectUrl)
 
   const config = JSON.parse(await readFile(join(runtimeHome, 'runtime.json'), 'utf8'))
