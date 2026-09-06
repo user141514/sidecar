@@ -44,8 +44,12 @@ export class McpHttpClient {
     return this.call('conversation_create', projectUrl === undefined ? {} : { project_url: projectUrl })
   }
 
-  conversationSend(conversationId, text) {
-    return this.call('conversation_send', { conversation_id: conversationId, text })
+  conversationSend(conversationId, text, { app } = {}) {
+    return this.call('conversation_send', {
+      conversation_id: conversationId,
+      text,
+      ...(app ? { app } : {})
+    })
   }
 
   conversationRead(conversationId) {

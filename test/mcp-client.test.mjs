@@ -22,8 +22,8 @@ class FakeHost {
     return { id: 'conv_1', projectUrl: projectUrl ?? null }
   }
 
-  async send(conversationId, text) {
-    return { conversationId, text, accepted: true }
+  async send(conversationId, text, { app } = {}) {
+    return { conversationId, text, app: app ?? null, accepted: true }
   }
 
   async read(conversationId) {
@@ -43,13 +43,18 @@ test('MCP HTTP client makes live JSON calls for discovery and every conversation
   const projectUrl = 'https://chatgpt.com/g/g-p-project123-agent/project'
 
   try {
+    const tools = await client.toolsList()
     assert.deepEqual(
-      (await client.toolsList()).map((tool) => tool.name),
+      tools.map((tool) => tool.name),
       ['project_pin', 'conversation_create', 'conversation_send', 'conversation_read']
     )
+    assert.equal(tools.find((tool) => tool.name === 'conversation_send').inputSchema.properties.app.type, 'string')
     assert.deepEqual(await client.projectPin(projectUrl), { projectUrl })
     assert.deepEqual(await client.conversationCreate(projectUrl), { id: 'conv_1', projectUrl })
-    assert.deepEqual(await client.conversationSend('conv_1', 'hello'), { conversationId: 'conv_1', text: 'hello', accepted: true })
+    assert.deepEqual(
+      await client.conversationSend('conv_1', 'hello', { app: 'DevSpace' }),
+      { conversationId: 'conv_1', text: 'hello', app: 'DevSpace', accepted: true }
+    )
     assert.deepEqual(await client.conversationRead('conv_1'), { id: 'conv_1', latestResponse: 'done' })
   } finally {
     await app.close()

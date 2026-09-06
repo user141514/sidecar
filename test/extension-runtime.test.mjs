@@ -227,6 +227,30 @@ test('send reloads a matching tab whose content script was invalidated by extens
   )
 })
 
+test('send forwards a per-message app selection to the ChatGPT content script', async () => {
+  const externalUrl = 'https://chatgpt.com/c/app-selection-123'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_app': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+
+  const response = await harness.request('conversation_send', {
+    conversationId: 'conv_app',
+    turnId: 'turn_app',
+    text: 'use devspace',
+    app: 'DevSpace',
+    externalUrl
+  })
+
+  assert.equal(response.ok, true)
+  const sent = harness.sentToTabs.find(({ tabId, message }) => tabId === 20 && message.type === 'conversation_send')
+  assert.equal(sent?.message.app, 'DevSpace')
+})
+
 test('send reattaches a project conversation to an already-open matching project thread', async () => {
   const externalUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-456'
   const harness = makeHarness({

@@ -65,6 +65,76 @@ async function waitAndSubmit() {
   throw new Error('ChatGPT send button did not become available')
 }
 
+function elementLabel(node) {
+  return (
+    node?.getAttribute?.('aria-label') ||
+    node?.getAttribute?.('data-testid') ||
+    node?.getAttribute?.('title') ||
+    node?.textContent ||
+    ''
+  ).trim()
+}
+
+function findToolsButton() {
+  const explicit = document.querySelector('[data-testid="composer-plus-btn"]') ||
+    document.querySelector('[data-testid="composer-tools-button"]')
+  if (explicit) return explicit
+
+  return [...document.querySelectorAll('button')].find((button) => {
+    const label = elementLabel(button).toLowerCase()
+    return label === '+' ||
+      label.includes('add files') ||
+      label.includes('add photos') ||
+      label.includes('tools') ||
+      label.includes('more') ||
+      label.includes('添加') ||
+      label.includes('工具')
+  })
+}
+
+function appMenuCandidates() {
+  return [...document.querySelectorAll(
+    '[role="menuitem"], [role="option"], [role="menuitemradio"], [data-radix-collection-item], button'
+  )]
+}
+
+function findAppMenuItem(appName) {
+  const target = appName.trim().toLowerCase()
+  return appMenuCandidates().find((node) => {
+    const label = elementLabel(node).toLowerCase()
+    return label === target || label === `@${target}` || label.startsWith(`${target} `)
+  })
+}
+
+async function selectAppForMessage(appName) {
+  if (typeof appName !== 'string' || !appName.trim()) throw new Error('App name is required')
+  const toolsButton = findToolsButton()
+  if (!toolsButton) throw new Error('ChatGPT tools menu button was not found')
+  toolsButton.click()
+
+  let expandedMore = false
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const appItem = findAppMenuItem(appName)
+    if (appItem) {
+      appItem.click()
+      return
+    }
+
+    if (!expandedMore) {
+      const more = appMenuCandidates().find((node) => {
+        const label = elementLabel(node).toLowerCase()
+        return label === 'more' || label === 'apps' || label === 'plugins' || label === '更多' || label === '应用'
+      })
+      if (more) {
+        more.click()
+        expandedMore = true
+      }
+    }
+    await sleep(100)
+  }
+  throw new Error(`ChatGPT app was not found in the tools menu: ${appName}`)
+}
+
 function assistantMessages() {
   return [...document.querySelectorAll('[data-message-author-role="assistant"]')]
 }
@@ -148,7 +218,11 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount }) {
 async function handleSend(message) {
   if (typeof message.text !== 'string' || !message.text.trim()) throw new Error('Prompt text is required')
   const baselineAssistantCount = assistantMessages().length
-  const editor = await waitForPromptEditor()
+  let editor = await waitForPromptEditor()
+  if (message.app !== undefined) {
+    await selectAppForMessage(message.app)
+    editor = await waitForPromptEditor()
+  }
   setPromptText(editor, message.text)
   await waitAndSubmit()
   return {

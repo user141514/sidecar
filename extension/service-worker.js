@@ -316,7 +316,8 @@ async function sendConversation(params) {
     type: 'conversation_send',
     conversationId: params.conversationId,
     turnId: params.turnId,
-    text: params.text
+    text: params.text,
+    ...(params.app ? { app: params.app } : {})
   })
   if (response?.accepted !== true) {
     throw new Error(response?.error || 'ChatGPT content script rejected the prompt')

@@ -32,7 +32,8 @@ const TOOLS = [
       type: 'object',
       properties: {
         conversation_id: { type: 'string' },
-        text: { type: 'string' }
+        text: { type: 'string' },
+        app: { type: 'string' }
       },
       required: ['conversation_id', 'text'],
       additionalProperties: false
@@ -95,7 +96,10 @@ async function dispatchTool(conversationHost, name, args = {}) {
     if (typeof args.conversation_id !== 'string' || typeof args.text !== 'string') {
       throw new TypeError('conversation_send requires conversation_id and text')
     }
-    return conversationHost.send(args.conversation_id, args.text)
+    if (args.app !== undefined && typeof args.app !== 'string') {
+      throw new TypeError('conversation_send app must be a string')
+    }
+    return conversationHost.send(args.conversation_id, args.text, { app: args.app })
   }
   if (name === 'conversation_read') {
     if (typeof args.conversation_id !== 'string') {

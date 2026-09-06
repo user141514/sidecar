@@ -15,8 +15,8 @@ class FakeHost {
     return { id: 'conv_1', projectUrl: projectUrl ?? null }
   }
 
-  async send(conversationId, text) {
-    return { conversationId, text, accepted: true }
+  async send(conversationId, text, { app } = {}) {
+    return { conversationId, text, app: app ?? null, accepted: true }
   }
 
   async read(conversationId) {
@@ -45,7 +45,10 @@ test('argv MCP CLI calls every subcommand against a live local sidecar', async (
     )
     assert.deepEqual(await cli(endpoint, 'project-pin', projectUrl), { projectUrl })
     assert.deepEqual(await cli(endpoint, 'create', projectUrl), { id: 'conv_1', projectUrl })
-    assert.deepEqual(await cli(endpoint, 'send', 'conv_1', 'hello world'), { conversationId: 'conv_1', text: 'hello world', accepted: true })
+    assert.deepEqual(
+      await cli(endpoint, 'send', 'conv_1', '--app', 'DevSpace', 'hello world'),
+      { conversationId: 'conv_1', text: 'hello world', app: 'DevSpace', accepted: true }
+    )
     assert.deepEqual(await cli(endpoint, 'read', 'conv_1'), { id: 'conv_1', latestResponse: 'done' })
   } finally {
     await app.close()
