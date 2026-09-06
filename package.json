@@ -11,6 +11,8 @@
     "extension:check": "node scripts/extension-build.mjs --check",
     "build:provider": "node scripts/export-provider.mjs",
     "verify:provider": "node scripts/verify-provider.mjs dist/chatgpt-conversation",
+    "build:runtime": "node scripts/export-runtime.mjs",
+    "verify:runtime": "node scripts/verify-runtime.mjs dist/agent-runtime",
     "start": "node src/server.mjs",
     "mcp:stdio": "node src/mcp-stdio.mjs",
     "install:host": "node install/install-host.mjs",
