@@ -6,6 +6,19 @@ Approved architecture: **B — stable Runtime Home + immutable releases + one bo
 
 This design turns the existing conversation-sidecar scheduler/memory stack into a portable local Agent Runtime. It does **not** extract the Orca/orca-sub orchestration protocol in this phase. Orca remains an optional future backend/adapter.
 
+## Development authority
+
+The authoritative Windows integration workspace is:
+
+```text
+C:/Users/14579/.devspace/worktrees/multi-conversation-eefbbb6b
+branch: stabilize/unified-mainline-20260906
+```
+
+All Windows-side integration work for Runtime Home, managed `subagents` workers, WorkController, MemoryPool, bootstrap, and shared conversation protocol must originate from this workspace/branch. Mint/Linux worktrees are parity and live-gate environments only; legacy Windows branches, rollback worktrees, archived checkouts, and machine-local running packages are evidence or deployment targets, not source authority.
+
+A dedicated Git baseline ref records the immutable starting point for this integration line; the branch itself remains the evolving Windows integration authority.
+
 ## Goal
 
 A Windows or Mint/Linux machine with the repository and Node.js 24+ should be able to prepare or update the local Agent Runtime with one command from the desired source checkout:
@@ -90,23 +103,35 @@ Do not rely on a `current` symlink. Windows symlink/junction behavior and permis
 
 ## Runtime configuration
 
-`runtime.json` schema version 1:
+`runtime.json` schema version 1 supports a deliberate two-stage lifecycle:
 
 ```json
 {
   "schema_version": 1,
+  "state": "prepared",
   "current_release": "<40-char-git-sha>",
   "current_release_dir": "<absolute-runtime-home>/releases/<sha>",
   "data_root": "<absolute-runtime-home>/data",
-  "managed_project": {
-    "name": "subagents",
-    "url": "https://chatgpt.com/g/g-p-.../project"
-  },
+  "managed_project": null,
   "extension": {
     "id": "cfifihieaffhniimpimnfmignbbdaalb"
   }
 }
 ```
+
+After `subagents` identity is resolved, bootstrap atomically promotes only the readiness fields:
+
+```json
+{
+  "state": "ready",
+  "managed_project": {
+    "name": "subagents",
+    "url": "https://chatgpt.com/g/g-p-.../project"
+  }
+}
+```
+
+`prepared` is a valid installation state: the release, stable data root, launchers, and Native Messaging link may exist, but managed worker dispatch is disabled. This closes the fresh-machine bootstrap cycle where the live extension must connect to the installed Native Host before `project_find subagents` can succeed.
 
 The bootstrap implementation derives `current_release_dir` itself; user input never supplies arbitrary release paths.
 
@@ -119,9 +144,11 @@ The Native Messaging manifest must point to the Runtime Home stable launcher, no
 1. reads and validates `runtime.json`;
 2. resolves `<current_release_dir>/src/server.mjs` under `releases/`;
 3. sets `SIDECAR_DATA_ROOT=<runtime-home>/data`;
-4. sets `SIDECAR_MANAGED_PROJECT_URL=<canonical subagents URL>`;
+4. when `managed_project.url` is resolved, sets `SIDECAR_MANAGED_PROJECT_URL=<canonical subagents URL>`; otherwise leaves it unset;
 5. spawns the current release server with inherited stdin/stdout/stderr;
 6. mirrors the child exit code.
+
+A `prepared` runtime may therefore expose conversation transport and project-discovery tools, but WorkController dispatch must fail closed until the configuration reaches `ready`.
 
 The platform shell wrappers only locate Node and invoke `native-host.mjs`. They contain no product logic.
 
@@ -210,6 +237,7 @@ Supported options in V1:
 ```text
 --runtime-home <absolute-path>      # testing/advanced override
 --managed-project-url <url>        # explicit canonical identity
+--migrate-data-from <absolute-path># explicit legacy data authority when discovery is ambiguous
 --activate                         # switch an existing external registration
 --json                             # machine-readable result
 --live-check                       # bounded real worker/memory canary after activation
@@ -288,7 +316,11 @@ No release-specific path is embedded in Native Messaging manifests or user PATH 
 
 ### Phase 4 — Data migration
 
-If Runtime Home data is empty, inspect the currently registered Native Messaging manifest and the source checkout for legacy data.
+If Runtime Home data is empty, discover legacy data roots with an explicit authority order:
+
+1. `--migrate-data-from`, when supplied;
+2. the data root derivable from the currently active Native Messaging registration / launcher;
+3. the current source checkout's legacy `data/`, only when no higher-authority non-empty root exists.
 
 A legacy root is eligible only when it contains recognized `conversations/`, `works/`, or `memory/` structures.
 
@@ -296,32 +328,35 @@ Rules:
 
 - copy, never move;
 - preserve JSON/JSONL bytes;
-- record source path, timestamp, counts, and copied directory names under `migrations/`;
+- record source path, authority source, timestamp, counts, and copied directory names under `migrations/`;
 - never delete the legacy source;
-- if Runtime Home is non-empty, do not automatically merge a second root.
+- if Runtime Home is non-empty, do not automatically merge a second root;
+- if two distinct non-empty candidate roots are discovered and neither is explicitly selected, fail with `data_root_conflict` rather than guessing or merging.
 
-The current machine's historical `defaultProjectUrl` may be imported during this phase.
+This prevents a development/canary worktree's checkout-local `data/` from silently overriding the machine's actual historical runtime data. The selected legacy root's historical `defaultProjectUrl` may be imported during this phase.
 
-### Phase 5 — Resolve managed Project
+### Phase 5 — Write prepared runtime config
 
-Resolve `subagents` Project identity using the order above. No worker dispatch is enabled until resolution succeeds.
+Write `runtime.json` with `state: prepared`, the verified release, and stable data root. Preserve an already-validated managed Project URL during upgrades; otherwise `managed_project` is null.
 
-### Phase 6 — Write candidate runtime config
+Validate the prepared config through the stable launcher library, then atomically replace `runtime.json`. On an upgrade of an existing ready Runtime Home, do not change `current_release` until the new release passes the pre-activation checks required by this spec.
 
-Write a complete temporary `runtime.json`, validate it by loading through the stable launcher library, then atomically replace `runtime.json`.
+### Phase 6 — Native Messaging registration / activation
 
-The configuration write is the release-current commit point.
-
-### Phase 7 — Native Messaging registration
-
-If no existing registration is present, install the manifest pointing at Runtime Home stable launcher.
+If no existing registration is present, install the manifest pointing at the Runtime Home stable launcher. This allows the signed-in extension to connect to the prepared runtime so Project discovery can occur.
 
 If an existing registration points outside Runtime Home:
 
-- without `--activate`: return `prepared_not_activated`, preserving the working installation;
+- without `--activate`: preserve it and return `prepared_not_activated` unless managed Project identity can be recovered from legacy config or the existing live runtime;
 - with `--activate`: update the manifest to Runtime Home stable launcher and report that one extension/native-host reconnect may be required.
 
 Do not kill arbitrary processes during bootstrap V1.
+
+### Phase 7 — Resolve managed Project and promote readiness
+
+Resolve `subagents` Project identity using the order above. If the extension has not yet been manually trusted/loaded on a fresh machine, return a prepared result that identifies the exact release `extension/` directory and asks the user to perform the one unavoidable Chrome trust action, then re-run the same bootstrap command.
+
+When resolution succeeds, atomically update `runtime.json` to `state: ready` with the canonical Project URL. No managed worker dispatch is enabled before this transition.
 
 ### Phase 8 — Deterministic self-check
 
@@ -397,6 +432,7 @@ preflight_failed
 release_integrity_failed
 data_root_conflict
 managed_project_unresolved
+extension_trust_required
 activation_required
 native_host_registration_failed
 self_check_failed
@@ -454,6 +490,9 @@ No `win32`/`linux` branch is permitted in WorkController, MemoryPool, Conversati
 - immutable runtime release reuse vs hash mismatch;
 - legacy data copy without source mutation;
 - non-empty destination conflict fails closed;
+- active-registration-derived data outranks checkout-local canary data;
+- multiple non-empty legacy roots require explicit authority;
+- prepared runtime can start transport while managed dispatch remains disabled;
 - managed project resolution order;
 - WorkController refuses dispatch without project identity;
 - WorkController passes exact project URL to `conversationHost.create`;
