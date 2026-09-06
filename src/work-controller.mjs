@@ -246,10 +246,27 @@ function workerPrompt(frontier, state) {
   ].join('\n')
 }
 
+function normalizeManagedProjectUrl(value) {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value !== 'string') throw new TypeError('managed project url must be a string')
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new TypeError('managed project url must be a canonical ChatGPT Project home URL')
+  }
+  const pathname = parsed.pathname.replace(/\/+$/, '')
+  if (parsed.origin !== 'https://chatgpt.com' || !/^\/g\/g-p-[^/]+\/project$/.test(pathname)) {
+    throw new TypeError('managed project url must be a canonical ChatGPT Project home URL')
+  }
+  return `${parsed.origin}${pathname}`
+}
+
 export class WorkController {
-  constructor({ ledger, conversationHost, now = () => Date.now(), minDispatchIntervalMs = MIN_DISPATCH_INTERVAL_MS }) {
+  constructor({ ledger, conversationHost, managedProjectUrl = null, now = () => Date.now(), minDispatchIntervalMs = MIN_DISPATCH_INTERVAL_MS }) {
     this.ledger = ledger
     this.conversationHost = conversationHost
+    this.managedProjectUrl = normalizeManagedProjectUrl(managedProjectUrl)
     this.now = now
     this.minDispatchIntervalMs = minDispatchIntervalMs
     this.lastDispatchAt = null
@@ -339,7 +356,13 @@ export class WorkController {
       }
     }
 
-    const conversation = await this.conversationHost.create({})
+    if (!this.managedProjectUrl) {
+      const error = new Error('managed_project_unresolved')
+      error.code = 'MANAGED_PROJECT_UNRESOLVED'
+      throw error
+    }
+
+    const conversation = await this.conversationHost.create({ projectUrl: this.managedProjectUrl })
     await this.ledger.append(workId, 'worker_dispatched', {
       frontierId,
       conversationId: conversation.id,

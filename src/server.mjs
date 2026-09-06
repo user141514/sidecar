@@ -497,11 +497,16 @@ const defaultConversationRoot = fileURLToPath(new URL('../data/conversations/', 
 const defaultWorkRoot = fileURLToPath(new URL('../data/works/', import.meta.url))
 const defaultMemoryRoot = fileURLToPath(new URL('../data/memory/', import.meta.url))
 
-export function createRuntimeComponents({ bridge, dataRoot = null, legacyConversationRoot = process.env.SIDECAR_DATA_DIR ?? defaultConversationRoot } = {}) {
+export function createRuntimeComponents({
+  bridge,
+  dataRoot = null,
+  legacyConversationRoot = process.env.SIDECAR_DATA_DIR ?? defaultConversationRoot,
+  managedProjectUrl = process.env.SIDECAR_MANAGED_PROJECT_URL ?? null
+} = {}) {
   const store = new ConversationStore(dataRoot ? join(dataRoot, 'conversations') : legacyConversationRoot)
   const conversationHost = new ChatGptConversationHost({ bridge, store })
   const workLedger = new WorkLedger(dataRoot ? join(dataRoot, 'works') : defaultWorkRoot)
-  const workController = new WorkController({ ledger: workLedger, conversationHost })
+  const workController = new WorkController({ ledger: workLedger, conversationHost, managedProjectUrl })
   const memoryPool = new MemoryPool({ rootDir: dataRoot ? join(dataRoot, 'memory') : defaultMemoryRoot, workLedger })
   return { store, conversationHost, workLedger, workController, memoryPool }
 }

@@ -33,6 +33,7 @@ class FakeLedger {
 }
 
 FakeLedger.now = Date.parse('2026-09-03T09:00:00.000Z')
+const managedProjectUrl = 'https://chatgpt.com/g/g-p-subagents-test/project'
 
 class FakeHost {
   constructor() {
@@ -243,6 +244,63 @@ test('WorkController replay ignores decisions recorded after STOP', async () => 
   assert.equal(state.planHistory.length, 0)
 })
 
+test('WorkController dispatch creates managed workers inside the configured subagents Project', async () => {
+  const { WorkController } = await loadModule()
+  assert.equal(typeof WorkController, 'function')
+  if (typeof WorkController !== 'function') return
+
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    {
+      at: '2026-09-03T08:01:00.000Z',
+      type: 'decision',
+      payload: {
+        action: 'SPLIT',
+        reason: 'one managed frontier',
+        frontiers: [{ id: 'f1', task: 'inspect recovery', depends_on: [] }]
+      }
+    }
+  ])
+  const host = new FakeHost()
+  const controller = new WorkController({
+    ledger,
+    conversationHost: host,
+    managedProjectUrl,
+    now: () => FakeLedger.now
+  })
+
+  const dispatched = await controller.dispatch('work_test', 'f1')
+  assert.equal(dispatched.dispatched, true)
+  assert.deepEqual(host.created, [{ projectUrl: managedProjectUrl }])
+})
+
+test('WorkController refuses managed dispatch before Project identity is resolved', async () => {
+  const { WorkController } = await loadModule()
+  assert.equal(typeof WorkController, 'function')
+  if (typeof WorkController !== 'function') return
+
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    {
+      at: '2026-09-03T08:01:00.000Z',
+      type: 'decision',
+      payload: {
+        action: 'SPLIT',
+        reason: 'one managed frontier',
+        frontiers: [{ id: 'f1', task: 'inspect recovery', depends_on: [] }]
+      }
+    }
+  ])
+  const host = new FakeHost()
+  const controller = new WorkController({ ledger, conversationHost: host, now: () => FakeLedger.now })
+
+  await assert.rejects(
+    controller.dispatch('work_test', 'f1'),
+    (error) => error?.code === 'MANAGED_PROJECT_UNRESOLVED'
+  )
+  assert.equal(host.created.length, 0)
+})
+
 test('WorkController blocks dependent frontiers and enforces 120 second dispatch pacing', async () => {
   const { WorkController } = await loadModule()
   assert.equal(typeof WorkController, 'function')
@@ -265,7 +323,7 @@ test('WorkController blocks dependent frontiers and enforces 120 second dispatch
     }
   ])
   const host = new FakeHost()
-  const controller = new WorkController({ ledger, conversationHost: host, now: () => FakeLedger.now })
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
 
   await assert.rejects(controller.dispatch('work_test', 'f2'), /dependencies are not complete/)
 
@@ -324,7 +382,7 @@ test('WorkController includes the latest revised plan in depth-1 worker prompts'
     }
   ])
   const host = new FakeHost()
-  const controller = new WorkController({ ledger, conversationHost: host, now: () => FakeLedger.now })
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
 
   const dispatched = await controller.dispatch('work_test', 'f1')
   assert.equal(dispatched.dispatched, true)
@@ -364,7 +422,7 @@ test('WorkController collects completed workers into the ledger and unlocks depe
   ])
   const host = new FakeHost()
   host.states.set('conv_1', { id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'recovery result' })
-  const controller = new WorkController({ ledger, conversationHost: host, now: () => FakeLedger.now })
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
 
   const collected = await controller.collect('work_test')
   assert.equal(collected.collected, 1)
@@ -456,7 +514,7 @@ test('WorkController serializes concurrent dispatch admission and applies pacing
     }
   ])
   const host = new FakeHost()
-  const controller = new WorkController({ ledger, conversationHost: host, now: () => FakeLedger.now })
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
 
   const [a, b] = await Promise.all([
     controller.dispatch('work_test', 'f1'),
