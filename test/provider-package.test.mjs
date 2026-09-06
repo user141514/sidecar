@@ -19,6 +19,7 @@ test('standalone artifact contains the identical extension, CLI, MCP schemas, Sk
   assert.equal(pkg.bin['chatgpt-conversation'], 'src/cli.mjs')
   assert.equal(pkg.scripts['install:host'], 'node install/install-host.mjs')
   assert.equal(pkg.scripts['verify:provider'], 'node scripts/verify-provider.mjs')
+  assert.equal(pkg.scripts.bootstrap, undefined)
 
   const provenance = JSON.parse(await readFile(join(output, 'PROVENANCE.json'), 'utf8'))
   assert.match(provenance.sourceRevision, /^[0-9a-f]{40}$/)

@@ -16,7 +16,8 @@
     "start": "node src/server.mjs",
     "mcp:stdio": "node src/mcp-stdio.mjs",
     "install:host": "node install/install-host.mjs",
-    "install:native-host": "node scripts/install-native-host.mjs"
+    "install:native-host": "node scripts/install-native-host.mjs",
+    "bootstrap": "node scripts/bootstrap-runtime.mjs"
   },
   "engines": {
     "node": ">=24"

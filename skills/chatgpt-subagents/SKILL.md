@@ -3,25 +3,33 @@ name: chatgpt-subagents
 description: Use for managed ChatGPT web conversations and verified self-updates of the conversation extension from a local shell on Linux or Windows.
 ---
 
-# ChatGPT conversation provider
+# ChatGPT Agent Runtime
 
-The provider owns conversation transport and identity, not planning, memory, task routing or recursive delegation. Run the same `chatgpt-conversation` CLI on Linux and Windows. The distribution must contain `extension/`, `install/`, `src/` and this Skill; never load them from a different Sidecar checkout.
+The installed Runtime Home owns conversation transport, WorkController, WorkLedger and MemoryPool. Git checkouts are source inputs only; after bootstrap, Native Messaging, stable CLI entrypoints and persistent data must not point directly at an arbitrary development checkout. Orca/orca-sub is not required for this runtime.
 
 ## Setup
 
-Use Node 24 or newer. In the intended checkout run `npm link` to install the cross-platform CLI shim and `npm run install:host` to register that checkout's native host. Load its `extension/` once in the signed-in Chrome profile. Preserve the manifest key/extension ID.
+Use Node 24 or newer. From the authoritative clean source checkout run `npm run bootstrap`. Bootstrap exports a verified immutable full Agent Runtime release, installs stable Runtime Home launchers, preserves/copies legacy data into one stable data root, and resolves the managed `subagents` Project.
 
-Existing releases without `extension_status` / `extension_reload` need one manual bootstrap reload after installation. Do not substitute GUI automation, CDP attachment, browser restart or profile edits for that bootstrap. Do not automatically switch a working native-host registration to another checkout.
+Do **not** use `npm link` or `npm run install:host` as installation authority for a bootstrapped machine. Those commands remain development/legacy surfaces only.
 
-## Conversations
+A fresh machine may return `extension_trust_required` with `state: prepared`. Load the exact `extension/` directory reported for that Runtime Home release once in the signed-in Chrome profile, preserving the fixed extension identity, then run the same `npm run bootstrap` command again. Managed worker dispatch stays disabled until the runtime reaches `state: ready` with a canonical `subagents` Project URL.
 
-`chatgpt-conversation create --project <project_url>` allocates one durable conversation ID. For this user's live tests, use only the confirmed `subagents` Project. Send a self-contained bounded task with `chatgpt-conversation send <conversation_id> <prompt>`. Workers must not edit source or fan out when assigned read-only audits.
+If bootstrap detects an existing working Native Messaging registration outside Runtime Home, it must not switch it unless the user has authorized `--activate`. Do not bypass that gate by manually rewriting manifests, registry entries, browser profiles or checkout-local launchers.
 
-`send` acknowledges submission, not completion. Use `chatgpt-conversation read <conversation_id>` later. Keep the conversation and turn IDs; do not substitute tab/window IDs. A repeated `generating` ledger snapshot does not establish either live progress or a fault. Never infer failure from model latency or unchanged visible text alone.
+## Managed workers and conversations
+
+Managed coordinator workers use `conversation-work` / the `work_*` MCP tools. `WorkController.dispatch()` is required to create every managed child inside the canonical `subagents` Project stored in Runtime Home config; missing Project identity is a hard error and must never fall back to root `https://chatgpt.com/`.
+
+Manual transport remains available through `chatgpt-conversation create [--project <project_url>]`, `send`, and `read`. Do not use manual root conversations as a substitute for managed worker dispatch.
+
+`send` acknowledges submission, not completion. Use `chatgpt-conversation read <conversation_id>` later or `conversation-work collect <work_id>` for managed work. Keep conversation and turn IDs; do not substitute tab/window IDs. A repeated `generating` ledger snapshot does not establish either live progress or a fault. Never infer failure from model latency or unchanged visible text alone.
+
+For multi-worker use, preserve the controller's pacing contract. Do not bypass WorkController to burst-create child conversations.
 
 ## Verified extension updates
 
-After updating local source through the approved Git workflow (SSH remotes), run `npm run extension:build`, then tests and audit. This prepares a local build fingerprint, not a remote download.
+After updating local source through the approved Git workflow, build/test the source and run bootstrap to create or select a new verified Runtime Home release. Extension identity and build metadata travel with that release.
 
 - `chatgpt-conversation extension-status` reports the running extension ID, version, build ID, instance ID, pending/outbox counts and last reload receipt.
 - `chatgpt-conversation extension-update` (alias `extension-reload`) applies the staged unpacked extension and independently verifies the reconnect. Optional `--timeout-ms N`, 100–300000, default 30000.

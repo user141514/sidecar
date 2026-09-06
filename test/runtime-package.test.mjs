@@ -36,6 +36,7 @@ test('full runtime artifact contains scheduler and memory while remaining indepe
 
   const pkg = JSON.parse(await readFile(join(output, 'package.json'), 'utf8'))
   assert.equal(pkg.scripts['verify:runtime'], 'node scripts/verify-runtime.mjs')
+  assert.equal(pkg.scripts.bootstrap, undefined)
 
   const provenance = JSON.parse(await readFile(join(output, 'PROVENANCE.json'), 'utf8'))
   assert.equal(provenance.source, 'conversation-sidecar full agent runtime export')

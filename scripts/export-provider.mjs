@@ -54,6 +54,7 @@ export async function exportProvider(destination) {
   pkg.name = 'chatgpt-conversation'
   pkg.version = '0.1.1'
   delete pkg.scripts['build:provider']
+  delete pkg.scripts.bootstrap
   pkg.scripts['verify:provider'] = 'node scripts/verify-provider.mjs'
   await writeFile(join(output, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
   await writeFile(join(output, '.gitignore'), 'node_modules/\ndata/\n*.log\n')
