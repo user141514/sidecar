@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
+import { join } from 'node:path'
 
 async function loadServerModule() {
   try {
@@ -360,6 +362,22 @@ test('memory tools dispatch explicit publish, query, and read through MemoryPool
   } finally {
     await app.close()
   }
+})
+
+test('runtime components place conversations, works, and memory under one stable data root', async () => {
+  const { createRuntimeComponents } = await loadServerModule()
+  assert.equal(typeof createRuntimeComponents, 'function')
+  if (typeof createRuntimeComponents !== 'function') return
+
+  const dataRoot = join('C:\\runtime-home', 'data')
+  const bridge = new EventEmitter()
+  const components = createRuntimeComponents({ bridge, dataRoot })
+
+  assert.equal(components.store.rootDir, join(dataRoot, 'conversations'))
+  assert.equal(components.workLedger.rootDir, join(dataRoot, 'works'))
+  assert.equal(components.memoryPool.rootDir, join(dataRoot, 'memory'))
+  assert.equal(components.workController.ledger, components.workLedger)
+  assert.equal(components.workController.conversationHost, components.conversationHost)
 })
 
 test('tools/call dispatches create, send, and read to the conversation host', async () => {

@@ -3,6 +3,7 @@ import http from 'node:http'
 import { EXTENSION_TOOLS, dispatchExtensionTool } from './extension-control.mjs'
 import { CONVERSATION_TOOLS, dispatchConversationTool } from './conversation-tools.mjs'
 import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import { ChatGptConversationHost } from './chatgpt.mjs'
 import { ExtensionBridge, NativeMessageChannel } from './native-messaging.mjs'
 import { ConversationStore } from './store.mjs'
@@ -492,18 +493,26 @@ export function createSidecarServer({ conversationHost, workLedger = null, workC
   }
 }
 
+const defaultConversationRoot = fileURLToPath(new URL('../data/conversations/', import.meta.url))
+const defaultWorkRoot = fileURLToPath(new URL('../data/works/', import.meta.url))
+const defaultMemoryRoot = fileURLToPath(new URL('../data/memory/', import.meta.url))
+
+export function createRuntimeComponents({ bridge, dataRoot = null, legacyConversationRoot = process.env.SIDECAR_DATA_DIR ?? defaultConversationRoot } = {}) {
+  const store = new ConversationStore(dataRoot ? join(dataRoot, 'conversations') : legacyConversationRoot)
+  const conversationHost = new ChatGptConversationHost({ bridge, store })
+  const workLedger = new WorkLedger(dataRoot ? join(dataRoot, 'works') : defaultWorkRoot)
+  const workController = new WorkController({ ledger: workLedger, conversationHost })
+  const memoryPool = new MemoryPool({ rootDir: dataRoot ? join(dataRoot, 'memory') : defaultMemoryRoot, workLedger })
+  return { store, conversationHost, workLedger, workController, memoryPool }
+}
+
 async function startDefault() {
   const channel = new NativeMessageChannel({ input: process.stdin, output: process.stdout })
   const bridge = new ExtensionBridge({ channel })
   bridge.on('error', (error) => console.error(error instanceof Error ? error.stack : String(error)))
 
-  const defaultDataRoot = fileURLToPath(new URL('../data/conversations/', import.meta.url))
-  const store = new ConversationStore(process.env.SIDECAR_DATA_DIR ?? defaultDataRoot)
-  const conversationHost = new ChatGptConversationHost({ bridge, store })
-  const workLedger = new WorkLedger(fileURLToPath(new URL('../data/works/', import.meta.url)))
-  const workController = new WorkController({ ledger: workLedger, conversationHost })
-  const memoryPool = new MemoryPool({ rootDir: fileURLToPath(new URL('../data/memory/', import.meta.url)), workLedger })
-  const app = createSidecarServer({ conversationHost, workLedger, workController, memoryPool })
+  const components = createRuntimeComponents({ bridge, dataRoot: process.env.SIDECAR_DATA_ROOT ?? null })
+  const app = createSidecarServer(components)
   const host = process.env.SIDECAR_HOST ?? '127.0.0.1'
   const port = Number(process.env.SIDECAR_PORT ?? 7337)
   const address = await app.listen({ host, port })
