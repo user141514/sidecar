@@ -314,6 +314,32 @@ test('project_create opens one root tab in window0 and returns its canonical Pro
   )
 })
 
+test('send forwards a per-message app selection to the content-script prepare step', async () => {
+  const externalUrl = 'https://chatgpt.com/c/app-selection-123'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_app': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+
+  const response = await harness.request('conversation_send', {
+    conversationId: 'conv_app',
+    turnId: 'turn_app',
+    text: 'use devspace',
+    app: 'DevSpace',
+    externalUrl
+  })
+
+  assert.equal(response.ok, true)
+  const prepared = harness.sentToTabs.find(({ tabId, message }) =>
+    tabId === 20 && message.type === 'conversation_prepare'
+  )
+  assert.equal(prepared?.message.app, 'DevSpace')
+})
+
 test('send persists pending state before the irreversible submit click', async () => {
   const externalUrl = 'https://chatgpt.com/c/prepared-before-submit'
   const harness = makeHarness({

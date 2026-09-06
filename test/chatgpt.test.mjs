@@ -200,6 +200,23 @@ test('a pinned Project becomes the default target for later conversation_create 
   assert.equal(bridge.requests[0].params.url, projectUrl)
 })
 
+test('send forwards a per-message ChatGPT app selection to the browser bridge and ledger', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  const host = new ChatGptConversationHost({ bridge, store })
+  const created = await host.create()
+
+  await host.send(created.id, 'use the connected workspace', { app: 'DevSpace' })
+
+  const sendRequest = bridge.requests.find((request) => request.method === 'conversation_send')
+  assert.equal(sendRequest?.params.app, 'DevSpace')
+  assert.equal(store.events.find((event) => event.type === 'prompt_sent')?.app, 'DevSpace')
+})
+
 test('a fresh sidecar process sends to a ledger-backed conversation and records its later completion', async (t) => {
   const { ChatGptConversationHost } = await loadChatGptModule()
   assert.equal(typeof ChatGptConversationHost, 'function')

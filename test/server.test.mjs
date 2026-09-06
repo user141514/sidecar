@@ -85,6 +85,7 @@ class FakeMemoryPool {
 class FakeHost {
   constructor() {
     this.createCalls = []
+    this.sendCalls = []
   }
 
   async createProject(name) {
@@ -120,8 +121,9 @@ class FakeHost {
     return { projectUrl }
   }
 
-  async send(id, text) {
-    return { conversationId: id, turnId: 'turn_1', accepted: true, text }
+  async send(id, text, { app } = {}) {
+    this.sendCalls.push({ id, text, app: app ?? null })
+    return { conversationId: id, turnId: 'turn_1', accepted: true, text, app: app ?? null }
   }
 
   async read(id) {
@@ -165,6 +167,8 @@ test('server exposes health, project pinning, and the three conversation tools',
       listed.body.result.tools.map((tool) => tool.name),
       ['extension_status', 'extension_reload', 'project_create', 'project_find', 'project_pin', 'conversation_create', 'conversation_send', 'conversation_read', 'work_create', 'work_append', 'work_read', 'work_state', 'work_decide', 'work_checkpoint', 'work_dispatch', 'work_collect', 'work_memory_publish', 'work_memory_query', 'work_memory_read']
     )
+    const conversationSend = listed.body.result.tools.find((tool) => tool.name === 'conversation_send')
+    assert.equal(conversationSend.inputSchema.properties.app.type, 'string')
     const workDecide = listed.body.result.tools.find((tool) => tool.name === 'work_decide')
     const decisionSchema = workDecide.inputSchema.properties.decision
     assert.equal(decisionSchema.properties.action.enum.includes('REVISE'), true)
@@ -412,9 +416,12 @@ test('tools/call dispatches create, send, and read to the conversation host', as
     assert.deepEqual(host.createCalls, [{ projectUrl }])
 
     const sent = await rpc(baseUrl, {
-      jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'conversation_send', arguments: { conversation_id: 'conv_1', text: 'hello' } }
+      jsonrpc: '2.0', id: 11, method: 'tools/call', params: {
+        name: 'conversation_send', arguments: { conversation_id: 'conv_1', text: 'hello', app: 'DevSpace' }
+      }
     })
     assert.equal(JSON.parse(sent.body.result.content[0].text).accepted, true)
+    assert.deepEqual(host.sendCalls, [{ id: 'conv_1', text: 'hello', app: 'DevSpace' }])
 
     const read = await rpc(baseUrl, {
       jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'conversation_read', arguments: { conversation_id: 'conv_1' } }

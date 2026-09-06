@@ -11,7 +11,7 @@ function usage() {
     'chatgpt-conversation project-find <name...>',
     'chatgpt-conversation project-pin <project_url>',
     'chatgpt-conversation create [--project <project_url>]',
-    'chatgpt-conversation send <conversation_id> <prompt...>',
+    'chatgpt-conversation send <conversation_id> [--app <app_name>] <prompt...>',
     'chatgpt-conversation read <conversation_id>',
     'chatgpt-conversation extension-status',
     'chatgpt-conversation extension-update [--timeout-ms <100..300000>]',
@@ -37,10 +37,18 @@ function commandToCall(argv) {
     throw new TypeError(args[0] === '--project' ? 'create --project requires project_url' : 'create accepts only --project <project_url>')
   }
   if (command === 'send') {
-    const [conversationId, ...textParts] = args
+    const [conversationId, ...rest] = args
+    if (!conversationId?.trim()) throw new TypeError('send requires conversation_id and text')
+    let app
+    let textParts = rest
+    if (rest[0] === '--app') {
+      if (rest.length < 3 || !rest[1]?.trim()) throw new TypeError('send --app requires app_name and text')
+      app = rest[1].trim()
+      textParts = rest.slice(2)
+    }
     const text = textParts.join(' ').trim()
-    if (!conversationId?.trim() || !text) throw new TypeError('send requires conversation_id and text')
-    return ['conversation_send', { conversation_id: conversationId, text }]
+    if (!text) throw new TypeError('send requires conversation_id and text')
+    return ['conversation_send', { conversation_id: conversationId, text, ...(app ? { app } : {}) }]
   }
   if (command === 'read') {
     if (args.length !== 1 || !args[0].trim()) throw new TypeError('read requires conversation_id')

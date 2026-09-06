@@ -460,7 +460,8 @@ async function sendConversation(params) {
     type: 'conversation_prepare',
     conversationId: params.conversationId,
     turnId: params.turnId,
-    text: params.text
+    text: params.text,
+    ...(params.app ? { app: params.app } : {})
   })
   if (prepared?.prepared !== true) {
     throw new Error(prepared?.error || 'ChatGPT content script could not prepare the prompt')

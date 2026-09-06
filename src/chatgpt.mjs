@@ -90,15 +90,18 @@ export class ChatGptConversationHost {
     }
   }
 
-  async send(conversationId, text) {
+  async send(conversationId, text, { app } = {}) {
     if (typeof text !== 'string' || !text.trim()) throw new Error('text is required')
+    if (app !== undefined && (typeof app !== 'string' || !app.trim())) {
+      throw new Error('app must be a non-empty string')
+    }
     const previous = this.sendQueues.get(conversationId) ?? Promise.resolve()
-    const run = previous.then(() => this.#send(conversationId, text))
+    const run = previous.then(() => this.#send(conversationId, text, { app }))
     this.sendQueues.set(conversationId, run.catch(() => {}))
     return run
   }
 
-  async #send(conversationId, text) {
+  async #send(conversationId, text, { app } = {}) {
     const conversation = await this.#loadConversation(conversationId)
     if (!conversation) {
       throw new Error(`Conversation ${conversationId} does not exist in the local ledger`)
@@ -108,12 +111,18 @@ export class ChatGptConversationHost {
     }
 
     const id = turnId()
-    await this.store.append(conversationId, { type: 'prompt_sent', turnId: id, text })
+    await this.store.append(conversationId, {
+      type: 'prompt_sent',
+      turnId: id,
+      text,
+      ...(app ? { app } : {})
+    })
     try {
       const result = await this.bridge.request('conversation_send', {
         conversationId,
         turnId: id,
         text,
+        ...(app ? { app } : {}),
         externalUrl: conversation.externalUrl || DEFAULT_CHATGPT_URL
       })
       if (result.accepted !== true) throw new Error('Chrome extension did not accept the prompt')

@@ -5,6 +5,108 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
 
+test('conversation_prepare selects a requested ChatGPT app before writing prompt text', async () => {
+  let runtimeListener = null
+  let menuOpen = false
+  const order = []
+
+  const editor = {
+    textContent: '',
+    focus() { order.push('focus-editor') },
+    dispatchEvent() {},
+    getAttribute() { return null }
+  }
+  const plusButton = {
+    disabled: false,
+    textContent: '',
+    getAttribute(name) {
+      if (name === 'aria-label') return 'Add files and more'
+      if (name === 'data-testid') return 'composer-plus-btn'
+      return null
+    },
+    click() {
+      menuOpen = true
+      order.push('open-tools')
+    }
+  }
+  const appItem = {
+    disabled: false,
+    textContent: 'DevSpace',
+    getAttribute(name) {
+      return name === 'aria-label' ? 'DevSpace' : null
+    },
+    click() {
+      order.push('select-app')
+      menuOpen = false
+    }
+  }
+
+  const document = {
+    querySelector(selector) {
+      if (selector === '#prompt-textarea') return editor
+      if (selector === '[data-testid="composer-plus-btn"]') return plusButton
+      if (selector === '[data-testid="stop-button"]') return null
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      if (selector === '[data-message-author-role="user"]') return []
+      if (selector === 'button') return menuOpen ? [plusButton, appItem] : [plusButton]
+      if (selector.includes('[role="menuitem"]') || selector.includes('[role="option"]')) {
+        return menuOpen ? [appItem] : []
+      }
+      return []
+    },
+    execCommand(command, _showUi, value) {
+      if (command === 'insertText') order.push(`write:${value}`)
+      return true
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/c/app-test' },
+    chrome: {
+      runtime: {
+        async sendMessage() { return null },
+        onMessage: {
+          addListener(listener) { runtimeListener = listener },
+          removeListener() {}
+        }
+      }
+    },
+    HTMLTextAreaElement: class {},
+    HTMLInputElement: class {},
+    InputEvent: class {},
+    Date,
+    Promise,
+    Object,
+    URL,
+    console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  const response = await new Promise((resolve) => {
+    const keepOpen = runtimeListener(
+      { type: 'conversation_prepare', text: 'hello', app: 'DevSpace' },
+      {},
+      resolve
+    )
+    assert.equal(keepOpen, true)
+  })
+
+  assert.equal(response.prepared, true)
+  assert.ok(order.includes('select-app'), `app was not selected: ${order.join(',')}`)
+  assert.ok(
+    order.indexOf('select-app') < order.findIndex((entry) => entry.startsWith('write:')),
+    `prompt text was written before app selection: ${order.join(',')}`
+  )
+})
+
 test('project_find returns the canonical Project URL from the current sidebar without clicking', async () => {
   let runtimeListener = null
   const links = [
