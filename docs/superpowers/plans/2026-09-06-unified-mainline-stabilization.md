@@ -209,11 +209,25 @@ Do not create a meaningless verification commit.
 - Consumes: verified stabilization source.
 - Produces: proof that source can operate on Windows without replacing the known-good installation.
 
-- [ ] **Step 1: Verify installer output in a temporary/disposable target**
-- [ ] **Step 2: Verify native host starts and preserves stdio**
+- [x] **Step 1: Verify installer output in a temporary/disposable target**
+
+Verified through the real installer contract with injected Windows registration; no HKCU mutation.
+
+- [x] **Step 2: Verify native host starts and preserves stdio**
+
+Fresh Windows contract gate: `10/10` tests passed, including direct `.bat` launcher startup and Native Messaging stdio preservation.
+
 - [ ] **Step 3: Perform one bounded create/send/read conversation gate**
+
+Blocked by the frozen-running-package invariant: the fixed-ID installed extension can reach a candidate provider only after changing the active Native Messaging registration and/or reloading the active extension. Do not perform either operation while the currently proven package is the behavioral baseline. Resume only with an independently installable candidate extension/profile or after explicit promotion authorization.
+
 - [ ] **Step 4: If app selection is part of the target release, perform one bounded `app=DevSpace` send**
-- [ ] **Step 5: Remove only disposable gate resources; do not touch the proven package**
+
+Same browser-isolation prerequisite as Step 3.
+
+- [x] **Step 5: Remove only disposable gate resources; do not touch the proven package**
+
+No persistent disposable registration/profile was created; the failed one-line installer probe did not execute the installer. No cleanup against the running package was required.
 
 ---
 
