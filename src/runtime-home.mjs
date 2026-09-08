@@ -48,12 +48,14 @@ export function resolveRuntimePaths(runtimeHome, { platform = currentPlatform() 
   const path = pathApi(platform)
   const root = normalizeAbsolute(runtimeHome, path, 'runtime home')
   const releases = path.join(root, 'releases')
+  const extensionCurrent = path.join(root, 'extension-current')
   const bin = path.join(root, 'bin')
   const data = path.join(root, 'data')
   return {
     runtimeHome: root,
     config: path.join(root, 'runtime.json'),
     releases,
+    extensionCurrent,
     bin,
     data,
     conversations: path.join(data, 'conversations'),

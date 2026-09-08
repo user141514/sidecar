@@ -26,7 +26,7 @@ async function fixture(t, { activeRegistration = null, projectFindResult = null 
   const sourceRoot = join(root, 'source')
   const runtimeHome = join(root, 'runtime')
   await mkdir(sourceRoot, { recursive: true })
-  const calls = { exports: 0, verifies: 0, launchers: 0, installs: [], userInstalls: [], projectFind: 0 }
+  const calls = { exports: 0, verifies: 0, launchers: 0, stableExtensions: [], installs: [], userInstalls: [], projectFind: 0 }
 
   const deps = {
     platform: process.platform,
@@ -46,6 +46,10 @@ async function fixture(t, { activeRegistration = null, projectFindResult = null 
       calls.launchers += 1
       await mkdir(join(home, 'bin'), { recursive: true })
       return { runtimeHome: home, binDir: join(home, 'bin'), files: [] }
+    },
+    async installStableExtension(options) {
+      calls.stableExtensions.push(options)
+      return { extensionPath: join(options.runtimeHome, 'extension-current') }
     },
     async installRuntimeUserEntrypoints(options) {
       calls.userInstalls.push(options)
@@ -119,6 +123,21 @@ test('bootstrap reuses an already verified immutable release on rerun', async (t
   assert.ok(f.calls.verifies >= 2)
 })
 
+test('bootstrap publishes the verified release extension at one stable Runtime Home path', async (t) => {
+  const { bootstrapRuntime } = await loadModule()
+  assert.equal(typeof bootstrapRuntime, 'function')
+  if (typeof bootstrapRuntime !== 'function') return
+
+  const f = await fixture(t)
+  const result = await bootstrapRuntime({ runtimeHome: f.runtimeHome, managedProjectUrl: projectUrl }, f.deps)
+
+  assert.equal(result.ok, true)
+  assert.equal(f.calls.stableExtensions.length, 1)
+  assert.equal(f.calls.stableExtensions[0].runtimeHome, f.runtimeHome)
+  assert.equal(f.calls.stableExtensions[0].releaseDir, join(f.runtimeHome, 'releases', revision))
+  assert.equal(result.extensionPath, join(f.runtimeHome, 'extension-current'))
+})
+
 test('bootstrap repairs owned Native Messaging registration on rerun', async (t) => {
   const { bootstrapRuntime } = await loadModule()
   assert.equal(typeof bootstrapRuntime, 'function')
@@ -159,6 +178,7 @@ test('bootstrap preserves an external active registration without --activate', a
   assert.equal(result.ok, true)
   assert.equal(result.state, 'ready')
   assert.equal(result.activation.status, 'prepared_not_activated')
+  assert.equal(f.calls.stableExtensions.length, 0)
   assert.equal(f.calls.installs.length, 0)
   assert.equal(f.calls.userInstalls.length, 1)
   assert.equal(f.calls.userInstalls[0].dryRun, true)
@@ -231,6 +251,7 @@ test('bootstrap fails closed when active and checkout legacy data roots are both
   const result = await bootstrapRuntime({ runtimeHome: f.runtimeHome, managedProjectUrl: projectUrl }, f.deps)
   assert.equal(result.ok, false)
   assert.equal(result.error.code, 'data_root_conflict')
+  assert.equal(f.calls.stableExtensions.length, 0)
 })
 
 test('explicit migration authority copies legacy bytes and outranks other discovered roots', async (t) => {
@@ -266,6 +287,7 @@ test('fresh bootstrap can stop in prepared state until extension trust or Projec
   assert.equal(result.ok, false)
   assert.equal(result.state, 'prepared')
   assert.equal(result.error.code, 'extension_trust_required')
+  assert.equal(result.extensionPath, join(f.runtimeHome, 'extension-current'))
   const config = JSON.parse(await readFile(join(f.runtimeHome, 'runtime.json'), 'utf8'))
   assert.equal(config.state, 'prepared')
   assert.equal(config.managed_project, null)
