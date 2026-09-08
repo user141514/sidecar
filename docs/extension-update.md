@@ -27,7 +27,7 @@ chatgpt-conversation extension-status
 chatgpt-conversation extension-update
 ```
 
-`extension-reload` is an alias for `extension-update`. Optional `--timeout-ms N` accepts 100–300000; default 30000. This timeout bounds the updater's reconnect verification; it is NOT a worker generation deadline. `npm run extension:check` detects stale generated build metadata without changing files.
+`extension-reload` is an alias for `extension-update`. Optional `--timeout-ms N` accepts 100–300000; default 60000. This timeout bounds the updater's reconnect verification; it is NOT a worker generation deadline. `npm run extension:check` detects stale generated build metadata without changing files.
 
 The CLI refuses reload when the extension has pending turns, unacknowledged terminal outbox records or in-flight browser operations. There is no `--force`. Do not delete pending records merely to permit an update. A failed update prints a nonzero exit status and must not be reported as success.
 

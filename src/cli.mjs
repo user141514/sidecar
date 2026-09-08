@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { updateExtension } from './extension-control.mjs'
+import { DEFAULT_EXTENSION_UPDATE_TIMEOUT_MS, updateExtension } from './extension-control.mjs'
 import { checkedExtensionBuild } from '../scripts/extension-build.mjs'
 
 const DEFAULT_MCP_URL = 'http://127.0.0.1:7337/mcp'
@@ -83,18 +83,20 @@ async function callTool(fetchImpl, url, name, args, timeoutMs = 30_000) {
 export async function runCli(argv, {
   fetchImpl = fetch,
   url = process.env.CHATGPT_CONVERSATION_MCP_URL ?? process.env.CONVERSATION_SIDECAR_MCP_URL ?? DEFAULT_MCP_URL,
-  write = () => {}
+  write = () => {},
+  checkedExtensionBuildImpl = checkedExtensionBuild,
+  updateExtensionImpl = updateExtension
 } = {}) {
   let result
   if (['extension-update', 'extension-reload'].includes(argv[0])) {
     const args = argv.slice(1)
     if (args.length && (args.length !== 2 || args[0] !== '--timeout-ms' || !/^\d+$/.test(args[1]))) throw new TypeError('extension-update accepts only --timeout-ms <100..300000>')
-    const timeoutMs = args.length ? Number(args[1]) : 30_000
+    const timeoutMs = args.length ? Number(args[1]) : DEFAULT_EXTENSION_UPDATE_TIMEOUT_MS
     if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 300_000) throw new TypeError('timeout-ms must be between 100 and 300000')
     const endpoint = new URL(url)
     if (endpoint.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(endpoint.hostname) || endpoint.username || endpoint.password) throw new Error('Extension update requires the local HTTP MCP endpoint')
-    const build = await checkedExtensionBuild()
-    result = await updateExtension((name, params, budget) => callTool(fetchImpl, url, name, params, budget), { expectedBuildId: build.buildId, expectedExtensionId: build.extensionId, timeoutMs })
+    const build = await checkedExtensionBuildImpl()
+    result = await updateExtensionImpl((name, params, budget) => callTool(fetchImpl, url, name, params, budget), { expectedBuildId: build.buildId, expectedExtensionId: build.extensionId, timeoutMs })
   } else {
     const call = commandToCall(argv)
     if (!call) { write(usage()); return { help: true } }

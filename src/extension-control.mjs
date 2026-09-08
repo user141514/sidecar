@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleepDefault } from 'node:timers/promises'
 
+export const DEFAULT_EXTENSION_UPDATE_TIMEOUT_MS = 60_000
+
 export const EXTENSION_TOOLS = [
   {
     name: 'extension_status',
@@ -32,7 +34,7 @@ export async function dispatchExtensionTool(bridge, name, args = {}) {
 export async function updateExtension(callTool, {
   expectedBuildId,
   expectedExtensionId,
-  timeoutMs = 30_000,
+  timeoutMs = DEFAULT_EXTENSION_UPDATE_TIMEOUT_MS,
   now = () => performance.now(),
   sleep = sleepDefault
 } = {}) {
