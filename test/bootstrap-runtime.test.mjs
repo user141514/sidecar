@@ -119,6 +119,29 @@ test('bootstrap reuses an already verified immutable release on rerun', async (t
   assert.ok(f.calls.verifies >= 2)
 })
 
+test('bootstrap repairs owned Native Messaging registration on rerun', async (t) => {
+  const { bootstrapRuntime } = await loadModule()
+  assert.equal(typeof bootstrapRuntime, 'function')
+  if (typeof bootstrapRuntime !== 'function') return
+
+  const f = await fixture(t)
+  f.deps.readActiveRegistration = async () => ({
+    manifestPath: join(f.runtimeHome, 'NativeMessagingHosts', 'com.conversation_sidecar.host.json'),
+    hostPath: join(f.runtimeHome, 'bin', 'conversation-sidecar-host.bat'),
+    dataRoot: null
+  })
+
+  const result = await bootstrapRuntime({
+    runtimeHome: f.runtimeHome,
+    managedProjectUrl: projectUrl
+  }, f.deps)
+
+  assert.equal(result.ok, true)
+  assert.equal(result.activation.status, 'already_active')
+  assert.equal(f.calls.installs.length, 1)
+  assert.equal(f.calls.installs[0].hostPath, join(f.runtimeHome, 'bin', 'conversation-sidecar-host.bat'))
+})
+
 test('bootstrap preserves an external active registration without --activate', async (t) => {
   const { bootstrapRuntime } = await loadModule()
   assert.equal(typeof bootstrapRuntime, 'function')

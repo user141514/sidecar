@@ -407,6 +407,7 @@ async function applyRegistration({ options, deps, paths, activeRegistration }) {
     return { status: 'prepared_not_activated', changed: false, hostPath: activeRegistration.hostPath }
   }
   if (activeRegistration && samePath(activeRegistration.hostPath, hostPath, deps.platform)) {
+    await deps.installNativeHost({ platform: deps.platform, hostPath })
     return { status: 'already_active', changed: false, hostPath }
   }
   await deps.installNativeHost({ platform: deps.platform, hostPath })

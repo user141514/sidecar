@@ -51,7 +51,7 @@ test('installer writes one Linux Chrome manifest with the shared host identity',
   }
 })
 
-test('installer writes and registers one Windows current-user manifest', async () => {
+test('installer writes one Windows manifest and registers it for Chrome and Edge', async () => {
   const { installNativeHost } = await loadInstaller()
   assert.equal(typeof installNativeHost, 'function')
   if (typeof installNativeHost !== 'function') return
@@ -67,10 +67,16 @@ test('installer writes and registers one Windows current-user manifest', async (
     })
     const manifest = JSON.parse(await readFile(options.manifestPath, 'utf8'))
     assert.equal(manifest.path, options.windowsHostPath)
-    assert.deepEqual(registrations, [[
-      `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${hostName}`,
-      options.manifestPath
-    ]])
+    assert.deepEqual(registrations, [
+      [
+        `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${hostName}`,
+        options.manifestPath
+      ],
+      [
+        `HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\${hostName}`,
+        options.manifestPath
+      ]
+    ])
   } finally {
     await rm(options.root, { recursive: true, force: true })
   }

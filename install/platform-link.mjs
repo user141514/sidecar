@@ -27,7 +27,9 @@ export function resolvePlatformLink({ platform = currentPlatform(), installDirec
       if (platform === 'linux') await chmodHost(hostPath, 0o755)
     },
     async register(manifestPath, { registerWindows = (key, path) => execFileAsync('reg', ['add', key, '/ve', '/t', 'REG_SZ', '/d', path, '/f']) } = {}) {
-      if (platform === 'win32') await registerWindows(`HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${hostName}`, manifestPath)
+      if (platform !== 'win32') return
+      await registerWindows(`HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${hostName}`, manifestPath)
+      await registerWindows(`HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\${hostName}`, manifestPath)
     }
   }
 }
