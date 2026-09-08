@@ -281,6 +281,7 @@ function assistantObservation({ baselineAssistantCount, recovery, promptText }) 
   if (!recovery || typeof promptText !== 'string' || !promptText.trim()) {
     return { present: messages.length > baselineAssistantCount, last }
   }
+  if (!last) return { present: false, last }
 
   const users = userMessages()
   const lastUser = users.at(-1)
