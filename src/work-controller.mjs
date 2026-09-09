@@ -131,7 +131,7 @@ function normalizeDecisionPayload(decision, current, evidenceOverride) {
   return { action, reason }
 }
 
-function deriveState(work) {
+export function deriveState(work) {
   let goal = null
   let latestDecision = null
   let completed = false
