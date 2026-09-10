@@ -232,6 +232,18 @@ function canonicalProjectHomeFromHref(href) {
   }
 }
 
+function projectIdentityFromUrl(url) {
+  if (typeof url !== 'string' || !url) return null
+  try {
+    const parsed = new URL(url, location.href)
+    if (parsed.origin !== 'https://chatgpt.com') return null
+    const match = parsed.pathname.match(/^\/g\/(g-p-[a-f0-9]{32})(?:-[^/]+)?(?=\/)/i)
+    return match ? `${parsed.origin}/g/${match[1].toLowerCase()}` : null
+  } catch {
+    return null
+  }
+}
+
 async function handleProjectFind(message) {
   const name = typeof message.name === 'string' ? message.name.trim() : ''
   if (!name) throw new Error('Project name is required')
@@ -243,6 +255,34 @@ async function handleProjectFind(message) {
     if (projectUrl) return { found: true, name, projectUrl }
   }
   return { found: false, name }
+}
+
+async function handleProjectOpen(message) {
+  const projectUrl = canonicalProjectHomeFromHref(message.projectUrl)
+  if (!projectUrl) throw new Error('Valid Project URL is required')
+  const projectIdentity = projectIdentityFromUrl(projectUrl)
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    for (const link of document.querySelectorAll('a[href]')) {
+      const navigationProjectUrl = canonicalProjectHomeFromHref(link.getAttribute?.('href'))
+      if (!navigationProjectUrl) continue
+      if (navigationProjectUrl !== projectUrl &&
+          (!projectIdentity || projectIdentityFromUrl(navigationProjectUrl) !== projectIdentity)) continue
+      link.click()
+      return {
+        accepted: true,
+        projectUrl: navigationProjectUrl,
+        control: {
+          kind: 'project-link',
+          tag: link.tagName?.toLowerCase?.() || 'a',
+          role: link.getAttribute?.('role') || null,
+          className: link.getAttribute?.('class') || '',
+          text: (link.textContent || '').trim()
+        }
+      }
+    }
+    await sleep(125)
+  }
+  throw new Error('ChatGPT Project anchor was not found')
 }
 
 async function handleProjectCreate(message) {
@@ -477,6 +517,16 @@ function onSidecarMessage(message, _sender, sendResponse) {
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({
         found: false,
+        error: error instanceof Error ? error.message : String(error)
+      }))
+    return true
+  }
+
+  if (message?.type === 'project_open') {
+    void handleProjectOpen(message)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({
+        accepted: false,
         error: error instanceof Error ? error.message : String(error)
       }))
     return true

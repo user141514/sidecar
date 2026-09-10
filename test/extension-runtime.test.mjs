@@ -164,7 +164,16 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         sentToTabs.push({ tabId, message, storageSnapshot: structuredClone(storageState) })
         if (message.type === 'sidecar_ping') {
           if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
-          return { ready: true, url: tab.url }
+          return { ready: true, url: tab.url, composerPresent: tab.composerPresent === true }
+        }
+        if (message.type === 'project_open') {
+          tab.url = message.projectUrl
+          tab.composerPresent = true
+          return {
+            accepted: true,
+            projectUrl: message.projectUrl,
+            control: { kind: 'project-link', tag: 'a', role: null, className: 'project-anchor', text: 'Open project' }
+          }
         }
         if (message.type === 'project_create') {
           tab.url = 'https://chatgpt.com/g/g-p-created-test/project'
@@ -435,6 +444,31 @@ test('project_create opens one root tab in window0 and returns its canonical Pro
     harness.sentToTabs.some(({ message }) => message.type === 'project_create' && message.name === 'subagents'),
     true
   )
+})
+
+test('conversation_create prefers an existing same-Project conversation as the healthy bootstrap seed', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/c/thread-existing'
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: seedThreadUrl }]
+  })
+
+  const response = await harness.request('conversation_create', {
+    conversationId: 'conv_project_from_seed',
+    url: projectUrl
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.createdTabs[0].url, seedThreadUrl)
+  assert.equal(harness.createdTabs[0].active, true)
+  assert.equal(
+    harness.sentToTabs.some(({ tabId, message }) => tabId === harness.createdTabs[0].id && message.type === 'project_open'),
+    true
+  )
+  assert.equal(response.result.url, projectUrl)
 })
 
 test('send forwards a per-message app selection to the content-script prepare step', async () => {

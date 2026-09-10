@@ -121,6 +121,29 @@ function tabMatchesExpectedUrl(tab, expectedUrl) {
   return pageIdentity(tabPageUrl(tab)) === pageIdentity(expectedUrl)
 }
 
+function projectIdentity(url) {
+  if (typeof url !== 'string' || !url) return null
+  try {
+    const parsed = new URL(url)
+    if (parsed.origin !== 'https://chatgpt.com') return null
+    const match = parsed.pathname.match(/^\/g\/(g-p-[a-f0-9]{32})(?:-[^/]+)?(?=\/)/i)
+    return match ? `${parsed.origin}/g/${match[1].toLowerCase()}` : null
+  } catch {
+    return null
+  }
+}
+
+async function findProjectConversationSeedUrl(projectUrl) {
+  const expectedIdentity = projectIdentity(projectUrl)
+  if (!expectedIdentity) return null
+  for (const tab of await chrome.tabs.query({})) {
+    const currentUrl = stableConversationUrl(tabPageUrl(tab))
+    if (!currentUrl || projectIdentity(currentUrl) !== expectedIdentity) continue
+    return currentUrl
+  }
+  return null
+}
+
 function postNative(message) {
   if (!nativePort) throw new Error('Native host is not connected')
   nativePort.postMessage(message)
@@ -391,6 +414,29 @@ async function waitForProjectHome(tabId) {
   throw new Error(`Timed out waiting for ChatGPT Project creation${lastUrl ? `; last URL was ${lastUrl}` : ''}`)
 }
 
+async function waitForProjectDraftSurface(tabId, expectedProjectUrl) {
+  const expectedRoute = chatGptPageUrl(expectedProjectUrl)
+  let lastUrl = null
+  let lastError = null
+  const deadline = Date.now() + 20_000
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId)
+    lastUrl = tabPageUrl(tab)
+    const actualProjectUrl = projectHomeUrl(lastUrl)
+    if (actualProjectUrl && chatGptPageUrl(actualProjectUrl) === expectedRoute) {
+      try {
+        const page = await boundedMessage(tabId, { type: 'sidecar_ping' }, Math.min(2000, Math.max(1, deadline - Date.now())))
+        if (page?.ready === true && page?.composerPresent === true) return actualProjectUrl
+      } catch (error) {
+        lastError = error
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  const detail = lastError instanceof Error ? `; last error was ${lastError.message}` : ''
+  throw new Error(`ChatGPT Project draft surface did not become ready${lastUrl ? `; last URL was ${lastUrl}` : ''}${detail}`)
+}
+
 async function findProject(params) {
   const name = typeof params.name === 'string' ? params.name.trim() : ''
   if (!name) throw new Error('Project name is required')
@@ -455,19 +501,38 @@ async function createProject(params) {
 
 async function createConversation(params) {
   const url = params.url || CHATGPT_URL
-  const window0 = await ensureWindow0(url)
+  const projectUrl = projectHomeUrl(url)
+  const projectSeedUrl = projectUrl ? await findProjectConversationSeedUrl(projectUrl) : null
+  const initialUrl = projectUrl ? (projectSeedUrl || CHATGPT_URL) : url
+  const window0 = await ensureWindow0(initialUrl)
   const tab = window0.created
     ? window0.tab
-    : await chrome.tabs.create({ windowId: window0.windowId, url, active: false })
+    : await chrome.tabs.create({ windowId: window0.windowId, url: initialUrl, active: Boolean(projectUrl) })
 
   if (!tab || typeof tab.id !== 'number') {
     throw new Error('Chrome did not return a tab for the new conversation')
   }
 
+  let attachedUrl = tab.pendingUrl || tab.url || initialUrl
+  if (projectUrl) {
+    await waitForContentScript(tab.id)
+    const opened = await boundedMessage(tab.id, { type: 'project_open', projectUrl }, 15_000)
+    if (opened?.accepted !== true) {
+      throw new Error(opened?.error || 'ChatGPT content script could not open the Project')
+    }
+    const navigationProjectUrl = projectHomeUrl(opened?.projectUrl) || projectUrl
+    try {
+      attachedUrl = await waitForProjectDraftSurface(tab.id, navigationProjectUrl)
+    } catch (error) {
+      const control = opened?.control ? `; project_open control=${JSON.stringify(opened.control)}` : ''
+      throw new Error(`${error instanceof Error ? error.message : String(error)}${control}`)
+    }
+  }
+
   const state = {
     windowId: window0.windowId,
     tabId: tab.id,
-    url: tab.pendingUrl || tab.url || url
+    url: attachedUrl
   }
   await saveConversation(params.conversationId, state)
   return state

@@ -181,6 +181,139 @@ test('project_find returns the canonical Project URL from the current sidebar wi
   assert.equal(response.projectUrl, 'https://chatgpt.com/g/g-p-subagents-test/project')
 })
 
+test('project_open maps an existing Project conversation to the authoritative Project home link', async () => {
+  let runtimeListener = null
+  let clicked = false
+  const requestedProjectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
+  const navigationProjectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const links = [{
+    textContent: '',
+    getAttribute(name) {
+      return name === 'href' ? navigationProjectUrl : null
+    },
+    click() { clicked = true }
+  }]
+  const document = {
+    querySelector() { return null },
+    querySelectorAll(selector) {
+      if (selector === 'a[href]') return links
+      if (selector === 'button') return []
+      if (selector === 'button,[role="button"]') return []
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      return []
+    },
+    execCommand() { return true }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/c/thread-existing' },
+    chrome: {
+      runtime: {
+        async sendMessage() { return null },
+        onMessage: { addListener(listener) { runtimeListener = listener } }
+      }
+    },
+    HTMLInputElement: class {},
+    HTMLTextAreaElement: class {},
+    InputEvent: class {},
+    Date, Promise, Object, URL, console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  const response = await new Promise((resolve) => {
+    const keepOpen = runtimeListener({ type: 'project_open', projectUrl: requestedProjectUrl }, {}, resolve)
+    assert.equal(keepOpen, true)
+  })
+
+  assert.equal(response.accepted, true)
+  assert.equal(response.projectUrl, navigationProjectUrl)
+  assert.equal(response.control?.kind, 'project-link')
+  assert.equal(clicked, true)
+})
+
+test('project_open waits for the authoritative Project anchor on an existing Project conversation before using sidebar controls', async () => {
+  let runtimeListener = null
+  let rowClicked = false
+  let anchorClicked = false
+  let anchorVisible = false
+  let linkQueries = 0
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const projectAnchor = {
+    textContent: '打开“subagents”项目',
+    tagName: 'A',
+    getAttribute(name) {
+      if (name === 'href') return '/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+      if (name === 'class') return 'project-anchor'
+      return null
+    },
+    click() { anchorClicked = true }
+  }
+  const projectRow = {
+    disabled: false,
+    textContent: 'subagents',
+    tagName: 'DIV',
+    getAttribute(name) {
+      if (name === 'role') return 'button'
+      if (name === 'class') return 'project-unfurl-row'
+      return null
+    },
+    getClientRects() { return [{ width: 100, height: 20 }] },
+    click() { rowClicked = true }
+  }
+  const document = {
+    querySelector() { return null },
+    querySelectorAll(selector) {
+      if (selector === 'a[href]') {
+        linkQueries += 1
+        if (linkQueries >= 3) anchorVisible = true
+        return anchorVisible ? [projectAnchor] : []
+      }
+      if (selector === 'button') return []
+      if (selector === 'button,[role="button"]') return [projectRow]
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      return []
+    },
+    execCommand() { return true }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-existing' },
+    chrome: {
+      runtime: {
+        async sendMessage() { return null },
+        onMessage: { addListener(listener) { runtimeListener = listener } }
+      }
+    },
+    HTMLInputElement: class {},
+    HTMLTextAreaElement: class {},
+    InputEvent: class {},
+    Date, Promise, Object, URL, console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  linkQueries = 0
+  anchorVisible = false
+  const response = await new Promise((resolve) => {
+    const keepOpen = runtimeListener({ type: 'project_open', projectUrl }, {}, resolve)
+    assert.equal(keepOpen, true)
+  })
+
+  assert.equal(response.accepted, true)
+  assert.equal(response.control?.kind, 'project-link')
+  assert.equal(anchorClicked, true)
+  assert.equal(rowClicked, false)
+})
+
 test('project_create opens the New project dialog, submits a name, and acknowledges the UI action', async () => {
   let runtimeListener = null
   let dialogOpen = false
