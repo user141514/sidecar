@@ -619,8 +619,28 @@ async function performSend(params, operation) {
   }
 }
 
+async function reconcileClosedPreSubmitTurns() {
+  // Run once before accepting sends. A missing tab cannot continue prepare,
+  // and these durable phases prove the worker never issued submit.
+  const stored = await chrome.storage.local.get(null)
+  const tabs = await chrome.tabs.query({})
+  const liveTabIds = new Set(tabs.map(tab => tab.id))
+  for (const [key, pending] of Object.entries(stored)) {
+    if (!key.startsWith(PENDING_PREFIX) || !pending?.conversationId || !pending.turnId) continue
+    if (pending.phase !== 'preparing' && pending.phase !== 'prepared') continue
+    if (typeof pending.tabId !== 'number' || liveTabIds.has(pending.tabId)) continue
+    const event = {
+      type: 'error', conversationId: pending.conversationId, turnId: pending.turnId,
+      message: 'Pre-submit turn interrupted and original tab closed; prompt was not submitted'
+    }
+    await saveOutboxEvent({ eventId: terminalEventId(event), event })
+    await clearPendingTurn(pending.conversationId)
+  }
+  await flushOutbox()
+}
+
 async function executeRequest(message) {
-  await lifecycleReady
+  await recoveryReady
   if (message.method === 'extension_status') {
     const stored = await chrome.storage.local.get(null)
     const bindings = Object.entries(stored).filter(([key]) => key.startsWith(STORAGE_PREFIX))
@@ -768,6 +788,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   void extensionLifecycle.runMutation(() => claimAndKickRecoveryMonitor(tabId, changeInfo, tab)).catch(() => {})
 })
 
+const recoveryReady = lifecycleReady.then(reconcileClosedPreSubmitTurns)
 chrome.runtime.onInstalled.addListener(connectNative)
 chrome.runtime.onStartup.addListener(connectNative)
 connectNative()

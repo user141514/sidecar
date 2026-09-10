@@ -6,6 +6,33 @@ import vm from 'node:vm'
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
 const lifecycleSource = await readFile(new URL('../extension/lifecycle.js', import.meta.url), 'utf8')
 
+test('startup durably settles only pre-submit turns whose tabs are gone', async () => {
+  const storage = {}
+  for (const [id, phase, tabId] of [
+    ['preparing', 'preparing', 11], ['prepared', 'prepared', 12],
+    ['submitting', 'submitting', 13], ['submitted', 'submitted', 14],
+    ['live', 'preparing', 15], ['legacy', undefined, 16]
+  ]) storage['pending:' + id] = { conversationId: id, turnId: 'turn-' + id, phase, tabId }
+  const harness = makeHarness({ storage, tabs: [{ id: 15, windowId: 1, url: 'https://chatgpt.com/' }] })
+  await harness.request('extension_status', {})
+  for (const id of ['preparing', 'prepared']) {
+    assert.equal(harness.storageState['pending:' + id], undefined)
+    const eventId = 'terminal:' + id + ':turn-' + id + ':error'
+    const record = harness.storageState['outbox:' + eventId]
+    assert.equal(record.event.turnId, 'turn-' + id)
+    assert.match(record.event.message, /not submitted/)
+    assert.ok(harness.nativeMessages.some(message => message.eventId === eventId))
+    await harness.sendNativeMessage({ kind: 'event_ack', eventId })
+    assert.equal(harness.storageState['outbox:' + eventId], undefined)
+  }
+  for (const id of ['submitting', 'submitted', 'live', 'legacy']) {
+    assert.deepEqual(harness.storageState['pending:' + id], storage['pending:' + id])
+  }
+  assert.equal(harness.createdTabs.length, 0)
+  assert.equal(harness.createdWindows.length, 0)
+  assert.equal(harness.sentToTabs.length, 0)
+})
+
 function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
