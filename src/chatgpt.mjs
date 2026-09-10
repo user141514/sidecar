@@ -16,7 +16,7 @@ function normalizeProjectHomeUrl(value) {
   if (!/^\/g\/g-p-[^/]+\/project$/.test(path)) {
     throw new Error('project_url must be a ChatGPT Project home URL')
   }
-  return `${parsed.origin}${path}`
+  return `${parsed.origin}${path.replace(/^(\/g\/g-p-[0-9a-f]{32})-[^/]+(\/project)$/i, '$1$2')}`
 }
 
 export class ChatGptConversationHost {
@@ -80,7 +80,7 @@ export class ChatGptConversationHost {
         tabId: browser.tabId,
         externalUrl: browser.url || createUrl
       })
-      return { ...created, windowId: browser.windowId, tabId: browser.tabId }
+      return { ...created, phase: 'allocated', threadCreated: false, windowId: browser.windowId, tabId: browser.tabId }
     } catch (error) {
       await this.store.append(created.id, {
         type: 'error',
@@ -106,13 +106,13 @@ export class ChatGptConversationHost {
     if (!conversation) {
       throw new Error(`Conversation ${conversationId} does not exist in the local ledger`)
     }
-    if (conversation.status === 'submitted' || conversation.status === 'generating') {
+    if (['sending', 'submitted', 'generating', 'delivery_uncertain'].includes(conversation.status)) {
       throw new Error(`Conversation ${conversationId} already has a turn in flight`)
     }
 
     const id = turnId()
     await this.store.append(conversationId, {
-      type: 'prompt_sent',
+      type: 'send_intent',
       turnId: id,
       text,
       ...(app ? { app } : {})
@@ -141,8 +141,10 @@ export class ChatGptConversationHost {
       })
       return { conversationId, turnId: id, accepted: true }
     } catch (error) {
+      error.conversationId = conversationId
+      error.turnId = id
       await this.store.append(conversationId, {
-        type: 'error',
+        type: error?.code === 'DELIVERY_UNCERTAIN' ? 'delivery_uncertain' : 'error',
         turnId: id,
         message: error instanceof Error ? error.message : String(error)
       })

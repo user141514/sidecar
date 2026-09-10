@@ -648,3 +648,65 @@ test('WorkController validates the minimal decision action schema', async () => 
     /frontier dependency cycle/
   )
 })
+
+test('uncertain dispatch stays collectible and late success completes the same frontier', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  host.send = async id => {
+    host.sent.push({ id })
+    throw Object.assign(new Error('delivery unknown'), { code: 'DELIVERY_UNCERTAIN', turnId: 'turn_unknown' })
+  }
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', depends_on: [] }]
+  })
+  const result = await controller.dispatch('work_test', 'f1')
+  assert.equal(result.deliveryUncertain, true)
+  assert.equal(result.accepted, false)
+  assert.equal((await controller.state('work_test')).frontiers[0].status, 'dispatched')
+  assert.equal(ledger.events.some(event => event.type === 'worker_result'), false)
+  await assert.rejects(controller.dispatch('work_test', 'f1'), /not pending/)
+  host.states.set(result.conversationId, { status: 'completed', latestTurnId: 'turn_unknown', latestResponse: 'late success' })
+  const collected = await controller.collect('work_test')
+  assert.equal(collected.collected, 1)
+  assert.equal(collected.state.frontiers[0].status, 'completed')
+  assert.equal(collected.state.frontiers[0].result, 'late success')
+  assert.equal(host.created.length, 1)
+})
+
+test('collect recovers a crash after allocation using persisted send intent turn identity', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', depends_on: [] }]
+  })
+  await ledger.append('work_test', 'worker_dispatched', { frontierId: 'f1', conversationId: 'conv_1', phase: 'allocated' })
+  host.states.set('conv_1', { status: 'completed', latestTurnId: 'turn_recovered', latestResponse: 'recovered' })
+  const collected = await controller.collect('work_test')
+  assert.equal(collected.collected, 1)
+  assert.equal(collected.state.frontiers[0].status, 'completed')
+})
+
+test('collect repairs a historical error only when the same worker later completes', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', depends_on: [] }]
+  })
+  await ledger.append('work_test', 'worker_dispatched', { frontierId: 'f1', conversationId: 'conv_1', phase: 'accepted', turnId: 'turn_1' })
+  await ledger.append('work_test', 'worker_result', { frontierId: 'f1', conversationId: 'conv_1', outcome: 'error', error: 'old transport timeout' })
+  host.states.set('conv_1', { status: 'error', latestTurnId: 'turn_1' })
+  assert.equal((await controller.collect('work_test')).collected, 0)
+  host.states.set('conv_1', { status: 'completed', latestTurnId: 'unrelated', latestResponse: 'wrong turn' })
+  assert.equal((await controller.collect('work_test')).collected, 0)
+  host.states.set('conv_1', { status: 'completed', latestTurnId: 'turn_1', latestResponse: 'late reality' })
+  const collected = await controller.collect('work_test')
+  assert.equal(collected.collected, 1)
+  assert.equal(collected.state.frontiers[0].result, 'late reality')
+  assert.equal((await controller.collect('work_test')).collected, 0)
+})

@@ -16,6 +16,27 @@ const WINDOW0_KEY = 'window0'
 
 let nativePort = null
 let reconnectTimer = null
+const sendOwners = new Set()
+const tabOwners = new Map()
+const activeSends = new Map()
+
+function deliveryUncertain(error) {
+  return Object.assign(new Error(error instanceof Error ? error.message : String(error)), { code: 'DELIVERY_UNCERTAIN' })
+}
+
+async function boundedMessage(tabId, message, timeoutMs) {
+  let timer
+  try {
+    return await Promise.race([
+      chrome.tabs.sendMessage(tabId, message),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Content script response timeout: ${message.type}`)), timeoutMs) })
+    ])
+  } finally { clearTimeout(timer) }
+}
+
+function canonicalProjectPath(path) {
+  return path.replace(/^(\/g\/g-p-[a-f0-9]{32})(?:-[^/]+)?(?=\/)/i, '$1')
+}
 
 function storageKey(conversationId) {
   return `${STORAGE_PREFIX}${conversationId}`
@@ -38,7 +59,7 @@ function projectHomeUrl(url) {
   try {
     const parsed = new URL(url)
     if (parsed.origin !== 'https://chatgpt.com') return null
-    const match = parsed.pathname.match(/^\/g\/g-p-[^/]+\/project\/?$/)
+    const match = canonicalProjectPath(parsed.pathname).match(/^\/g\/g-p-[^/]+\/project\/?$/)
     return match ? `${parsed.origin}${match[0].replace(/\/$/, '')}` : null
   } catch {
     return null
@@ -52,7 +73,7 @@ function stableConversationUrl(url) {
     if (parsed.origin !== 'https://chatgpt.com') return null
     const rootMatch = parsed.pathname.match(/^\/c\/[^/]+/)
     if (rootMatch) return `${parsed.origin}${rootMatch[0]}`
-    const projectMatch = parsed.pathname.match(/^\/g\/g-p-[^/]+\/c\/[^/]+/)
+    const projectMatch = canonicalProjectPath(parsed.pathname).match(/^\/g\/g-p-[^/]+\/c\/[^/]+/)
     return projectMatch ? `${parsed.origin}${projectMatch[0]}` : null
   } catch {
     return null
@@ -64,7 +85,7 @@ function chatGptPageUrl(url) {
   try {
     const parsed = new URL(url)
     if (parsed.origin !== 'https://chatgpt.com') return null
-    const pathname = parsed.pathname === '/' ? '/' : parsed.pathname.replace(/\/+$/, '')
+    const pathname = parsed.pathname === '/' ? '/' : canonicalProjectPath(parsed.pathname).replace(/\/+$/, '')
     return `${parsed.origin}${pathname}`
   } catch {
     return null
@@ -288,6 +309,7 @@ async function claimPendingTurnForTab(tab) {
   for (const [key, value] of Object.entries(stored)) {
     if (!key.startsWith(PENDING_PREFIX)) continue
     if (value?.tabId !== tab.id) continue
+    if (value.phase === 'preparing' || value.phase === 'prepared') continue
 
     const claimed = {
       ...value,
@@ -333,9 +355,10 @@ async function claimAndKickRecoveryMonitor(tabId, changeInfo, tab) {
 
 async function waitForContentScript(tabId, maxAttempts = 80) {
   let lastError = null
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  const deadline = Date.now() + maxAttempts * 250
+  for (let attempt = 0; attempt < maxAttempts && Date.now() < deadline; attempt += 1) {
     try {
-      const response = await chrome.tabs.sendMessage(tabId, { type: 'sidecar_ping' })
+      const response = await boundedMessage(tabId, { type: 'sidecar_ping' }, Math.min(2000, Math.max(1, deadline - Date.now())))
       if (response?.ready === true) return
     } catch (error) {
       lastError = error
@@ -450,20 +473,67 @@ async function ensureContentScriptForAttachment(state, reloadOnReadinessFailure)
 }
 
 async function sendConversation(params) {
+  const id = params.conversationId
+  if (sendOwners.has(id)) throw deliveryUncertain('Conversation already has an active browser send')
+  sendOwners.add(id)
+  const operation = { conversationId: id, turnId: params.turnId, phase: 'attaching', startedAt: Date.now() }
+  activeSends.set(id, operation)
+  try {
+    if (await loadPendingTurn(id)) throw deliveryUncertain('Conversation has an unresolved pending turn; read its result before sending again')
+    return await performSend(params, operation)
+  } catch (error) {
+    if (error?.code !== 'DELIVERY_UNCERTAIN') {
+      const event = {
+        type: 'error', conversationId: id, turnId: params.turnId,
+        message: error instanceof Error ? error.message : String(error)
+      }
+      await saveOutboxEvent({ eventId: terminalEventId(event), event })
+      void flushOutbox()
+    }
+    throw error
+  } finally {
+    sendOwners.delete(id)
+    activeSends.delete(id)
+    if (tabOwners.get(operation.tabId) === id) tabOwners.delete(operation.tabId)
+  }
+}
+
+async function performSend(params, operation) {
   const { state, reattached, reloadOnReadinessFailure } = await resolveConversationAttachment(
     params.conversationId,
     params.externalUrl
   )
 
+  operation.tabId = state.tabId
+  if (tabOwners.has(state.tabId)) throw deliveryUncertain('Tab already has an active browser send')
+  const stored = await chrome.storage.local.get(null)
+  if (Object.entries(stored).some(([key, value]) => key.startsWith(PENDING_PREFIX) && value?.tabId === state.tabId)) {
+    throw deliveryUncertain('Tab has an unresolved pending turn')
+  }
+  tabOwners.set(state.tabId, params.conversationId)
+  operation.phase = 'readiness'
   await ensureContentScriptForAttachment(state, reloadOnReadinessFailure)
-  const prepared = await chrome.tabs.sendMessage(state.tabId, {
+  let pending = {
+    conversationId: params.conversationId,
+    turnId: params.turnId,
+    tabId: state.tabId,
+    promptText: params.text,
+    startedAt: Date.now(),
+    phase: 'preparing',
+    monitorVersion: 1
+  }
+  await savePendingTurn(pending)
+  operation.phase = 'preparing'
+  let prepared
+  try { prepared = await boundedMessage(state.tabId, {
     type: 'conversation_prepare',
     conversationId: params.conversationId,
     turnId: params.turnId,
     text: params.text,
     ...(params.app ? { app: params.app } : {})
-  })
+  }, 60_000) } catch (error) { throw deliveryUncertain(error) }
   if (prepared?.prepared !== true) {
+    await clearPendingTurn(params.conversationId)
     throw new Error(prepared?.error || 'ChatGPT content script could not prepare the prompt')
   }
 
@@ -473,26 +543,24 @@ async function sendConversation(params) {
   }
   await saveConversation(params.conversationId, currentState)
 
-  let pending = {
-    conversationId: params.conversationId,
-    turnId: params.turnId,
-    tabId: currentState.tabId,
+  pending = {
+    ...pending,
     baselineAssistantCount: Number(prepared.baselineAssistantCount ?? 0),
-    promptText: params.text,
-    startedAt: Date.now(),
-    phase: 'prepared',
-    monitorVersion: 1
+    phase: 'prepared'
   }
   await savePendingTurn(pending)
 
   pending = { ...pending, phase: 'submitting' }
   await savePendingTurn(pending)
-  const submitted = await chrome.tabs.sendMessage(currentState.tabId, {
+  operation.phase = 'submitting'
+  let submitted
+  try { submitted = await boundedMessage(currentState.tabId, {
     type: 'conversation_submit',
     conversationId: params.conversationId,
     turnId: params.turnId
-  })
+  }, 15_000) } catch (error) { throw deliveryUncertain(error) }
   if (submitted?.accepted !== true) {
+    await clearPendingTurn(params.conversationId)
     throw new Error(submitted?.error || 'ChatGPT content script rejected the prompt submission')
   }
 
@@ -502,13 +570,17 @@ async function sendConversation(params) {
   }
   await saveConversation(params.conversationId, submittedState)
   pending = { ...pending, phase: 'submitted' }
+  const currentPending = await loadPendingTurn(params.conversationId)
+  if (currentPending?.turnId !== params.turnId) return { accepted: true, ...submittedState, reattached }
+  pending.monitorVersion = currentPending.monitorVersion
   await savePendingTurn(pending)
 
+  operation.phase = 'monitoring'
   try {
-    await chrome.tabs.sendMessage(submittedState.tabId, {
+    await boundedMessage(submittedState.tabId, {
       type: 'conversation_monitor_start',
       ...pending
-    })
+    }, 2000)
   } catch {
     // Navigation may replace the document immediately after submit. The new
     // content script performs bounded pending lookup retries when it loads.
@@ -526,7 +598,7 @@ async function sendConversation(params) {
 
 async function executeRequest(message) {
   await lifecycleReady
-  if (message.method === 'extension_status') return extensionLifecycle.status()
+  if (message.method === 'extension_status') return { ...await extensionLifecycle.status(), operations: [...activeSends.values()] }
   if (message.method === 'extension_reload') return extensionLifecycle.requestReload(message.params)
   if (message.method === 'project_find') return findProject(message.params ?? {})
   if (message.method === 'project_create') return extensionLifecycle.runMutation(() => createProject(message.params ?? {}))
@@ -553,7 +625,8 @@ async function handleNativeRequest(message) {
       kind: 'response',
       requestId: message.requestId,
       ok: false,
-      error: error instanceof Error ? error.message : String(error)
+      error: error instanceof Error ? error.message : String(error),
+      errorCode: error?.code
     })
   }
 }

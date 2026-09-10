@@ -214,7 +214,7 @@ test('send forwards a per-message ChatGPT app selection to the browser bridge an
 
   const sendRequest = bridge.requests.find((request) => request.method === 'conversation_send')
   assert.equal(sendRequest?.params.app, 'DevSpace')
-  assert.equal(store.events.find((event) => event.type === 'prompt_sent')?.app, 'DevSpace')
+  assert.equal(store.events.find((event) => event.type === 'send_intent')?.app, 'DevSpace')
 })
 
 test('a fresh sidecar process sends to a ledger-backed conversation and records its later completion', async (t) => {
@@ -364,4 +364,14 @@ test('extension-backed host creates a dedicated window, returns after send, and 
   const state = await host.read(created.id)
   assert.equal(state.status, 'completed')
   assert.equal(state.latestResponse, 'FINAL_RESPONSE')
+})
+
+test('project aliases use stable identity while create reports only local allocation', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  const host = new ChatGptConversationHost({ bridge: new FakeBridge(), store: new MemoryStore() })
+  const url = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
+  assert.equal((await host.pinProject(url.replace('/project', '-subagents/project'))).projectUrl, url)
+  const created = await host.create()
+  assert.equal(created.phase, 'allocated')
+  assert.equal(created.threadCreated, false)
 })

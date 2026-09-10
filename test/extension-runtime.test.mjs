@@ -6,7 +6,7 @@ import vm from 'node:vm'
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
 const lifecycleSource = await readFile(new URL('../extension/lifecycle.js', import.meta.url), 'utf8')
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, deferReloadTimer = false, failAcceptedResponsePostOnce = false } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, prepareTransportFailure = false, prepareRejected = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -25,6 +25,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
   let nextWindowId = 2000
   const deferredReloadTimers = []
   let runtimeReloadCount = 0
+  let requestSequence = 0
 
   const nativePort = {
     onMessage: {
@@ -149,6 +150,9 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           return { found: false, name: message.name }
         }
         if (message.type === 'conversation_prepare') {
+          if (prepareGate) await prepareGate
+          if (prepareTransportFailure) throw new Error('prepare response lost')
+          if (prepareRejected) return { prepared: false, error: 'editor missing' }
           return { prepared: true, url: tab.url, baselineAssistantCount: 0 }
         }
         if (message.type === 'conversation_submit') {
@@ -189,15 +193,16 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         deferredReloadTimers.push(callback)
         return deferredReloadTimers.length
       }
+      if (ms >= 2000) return setTimeout(callback, ms)
       return fastSetTimeout(callback)
     },
-    clearTimeout() {}
+    clearTimeout(timer) { clearTimeout(timer) }
   })
   vm.runInContext(workerSource, context, { filename: 'extension/service-worker.js' })
 
   async function request(method, params) {
     if (!nativeRequestListener) throw new Error('Native request listener was not registered')
-    const requestId = `req-${nativeMessages.length}`
+    const requestId = `req-${++requestSequence}`
     nativeRequestListener({ kind: 'request', requestId, method, params })
     for (let attempt = 0; attempt < 40; attempt += 1) {
       const response = nativeMessages.find((message) => message.kind === 'response' && message.requestId === requestId)
@@ -272,6 +277,78 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     }
   }
 }
+
+test('Project slug redirect preserves the existing tab', async () => {
+  const home = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
+  const alias = home.replace('/project', '-subagents/project')
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 }, 'conversation:conv_alias': { windowId: 10, tabId: 20, url: home } },
+    windows: [{ id: 10 }], tabs: [{ id: 20, windowId: 10, url: alias }]
+  })
+  const result = await harness.request('conversation_send', { conversationId: 'conv_alias', turnId: 'turn_alias', text: 'hello', externalUrl: home })
+  assert.equal(result.ok, true)
+  assert.equal(result.result.tabId, 20)
+  assert.equal(harness.createdTabs.length, 0)
+})
+
+test('pending intent precedes prepare and survives loss of its response', async () => {
+  const harness = makeHarness({ prepareTransportFailure: true })
+  const result = await harness.request('conversation_send', { conversationId: 'conv_lost', turnId: 'turn_lost', text: 'hello' })
+  assert.equal(result.ok, false)
+  assert.equal(result.errorCode, 'DELIVERY_UNCERTAIN')
+  const prepare = harness.sentToTabs.find(x => x.message.type === 'conversation_prepare')
+  assert.equal(prepare.storageSnapshot['pending:conv_lost'].phase, 'preparing')
+  assert.equal(harness.storageState['pending:conv_lost'].turnId, 'turn_lost')
+  assert.equal(harness.sentToTabs.filter(x => x.message.type === 'conversation_submit').length, 0)
+  const retry = await harness.request('conversation_send', { conversationId: 'conv_lost', turnId: 'turn_retry', text: 'again' })
+  assert.equal(retry.ok, false)
+  assert.equal(harness.sentToTabs.filter(x => x.message.type === 'conversation_prepare').length, 1)
+})
+
+test('overlapping browser sends are rejected before touching a busy conversation', async () => {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const harness = makeHarness({ prepareGate: gate })
+  await harness.sendNativeMessage({ kind: 'request', requestId: 'first', method: 'conversation_send', params: { conversationId: 'conv_busy', turnId: 'turn_first', text: 'first' } })
+  const retry = await harness.request('conversation_send', { conversationId: 'conv_busy', turnId: 'turn_retry', text: 'retry' })
+  release()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(retry.ok, false)
+  assert.equal(harness.createdTabs.length + harness.createdWindows.length, 1)
+  assert.equal(harness.sentToTabs.filter(x => x.message.type === 'conversation_prepare').length, 1)
+})
+
+test('definite pre-submit failure emits durable terminal evidence and releases pending', async () => {
+  const harness = makeHarness({ prepareRejected: true })
+  const result = await harness.request('conversation_send', { conversationId: 'conv_reject', turnId: 'turn_reject', text: 'hello' })
+  assert.equal(result.ok, false)
+  assert.equal(result.errorCode, undefined)
+  assert.equal(harness.storageState['pending:conv_reject'], undefined)
+  const event = harness.storageState['outbox:terminal:conv_reject:turn_reject:error'].event
+  assert.equal(event.message, 'editor missing')
+  assert.equal(harness.sentToTabs.filter(x => x.message.type === 'conversation_submit').length, 0)
+})
+
+test('two local conversation IDs cannot mutate the same active browser tab', async () => {
+  let release
+  const externalUrl = 'https://chatgpt.com/c/shared-thread'
+  const harness = makeHarness({
+    prepareGate: new Promise(resolve => { release = resolve }),
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_one': { windowId: 10, tabId: 20, url: externalUrl },
+      'conversation:conv_two': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }], tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+  await harness.sendNativeMessage({ kind: 'request', requestId: 'owner', method: 'conversation_send', params: { conversationId: 'conv_one', turnId: 'turn_one', text: 'first', externalUrl } })
+  const status = await harness.request('extension_status', {})
+  assert.equal(status.result.operations[0].phase, 'preparing')
+  const result = await harness.request('conversation_send', { conversationId: 'conv_two', turnId: 'turn_two', text: 'second', externalUrl })
+  release()
+  assert.equal(result.ok, false)
+  assert.equal(harness.sentToTabs.filter(x => x.message.type === 'conversation_prepare').length, 1)
+})
 
 test('project_find scans existing ChatGPT tabs and returns a canonical matching Project URL without creating browser state', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-subagents-test/project'

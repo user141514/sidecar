@@ -259,7 +259,7 @@ function normalizeManagedProjectUrl(value) {
   if (parsed.origin !== 'https://chatgpt.com' || !/^\/g\/g-p-[^/]+\/project$/.test(pathname)) {
     throw new TypeError('managed project url must be a canonical ChatGPT Project home URL')
   }
-  return `${parsed.origin}${pathname}`
+  return `${parsed.origin}${pathname.replace(/^(\/g\/g-p-[0-9a-f]{32})-[^/]+(\/project)$/i, '$1$2')}`
 }
 
 export class WorkController {
@@ -388,6 +388,23 @@ export class WorkController {
         accepted: sent.accepted === true
       }
     } catch (error) {
+      if (error?.code === 'DELIVERY_UNCERTAIN') {
+        await this.ledger.append(workId, 'worker_dispatched', {
+          frontierId,
+          conversationId: conversation.id,
+          task: frontier.task,
+          phase: 'delivery_uncertain',
+          turnId: error.turnId
+        })
+        return {
+          dispatched: true,
+          frontierId,
+          conversationId: conversation.id,
+          turnId: error.turnId,
+          accepted: false,
+          deliveryUncertain: true
+        }
+      }
       await this.ledger.append(workId, 'worker_result', {
         frontierId,
         conversationId: conversation.id,
@@ -404,8 +421,9 @@ export class WorkController {
     let collected = 0
 
     for (const frontier of before.frontiers) {
-      if (frontier.status !== 'dispatched' || !frontier.conversationId) continue
+      if (!['dispatching', 'dispatched', 'error'].includes(frontier.status) || !frontier.conversationId) continue
       const conversation = await this.conversationHost.read(frontier.conversationId)
+      if (frontier.status === 'error' && conversation.status !== 'completed') continue
       if (conversation.status !== 'completed' && conversation.status !== 'error') continue
       if (frontier.turnId && conversation.latestTurnId !== frontier.turnId) continue
       await this.ledger.append(workId, 'worker_result', {

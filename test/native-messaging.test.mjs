@@ -53,14 +53,14 @@ class FakeChannel extends EventEmitter {
   }
 }
 
-test('ExtensionBridge default timeout exceeds the extension content-script readiness budget', async () => {
+test('ExtensionBridge default timeout covers readiness plus prepare and submission serial budgets', async () => {
   const { ExtensionBridge } = await loadModule()
   assert.equal(typeof ExtensionBridge, 'function')
   if (typeof ExtensionBridge !== 'function') return
 
   const channel = new FakeChannel()
   const bridge = new ExtensionBridge({ channel })
-  assert.ok(bridge.requestTimeoutMs > 20_000)
+  assert.ok(bridge.requestTimeoutMs > 22_000 + 60_000 + 15_000 + 2_000)
 })
 
 test('ExtensionBridge sends terminal-event acknowledgements back to the extension', async () => {

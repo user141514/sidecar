@@ -14,17 +14,30 @@ function statusFromEvents(events) {
   let externalUrl = null
 
   for (const event of events) {
-    if (event.externalUrl) externalUrl = event.externalUrl
+    // Delayed events from an older turn must not replace current browser facts.
+    if (event.turnId && latestTurnId && event.turnId !== latestTurnId &&
+        !['send_intent', 'prompt_sent'].includes(event.type)) continue
+    if (event.externalUrl && !(status === 'completed' &&
+        ['generation_started', 'delivery_uncertain', 'error'].includes(event.type))) externalUrl = event.externalUrl
 
-    if (event.type === 'prompt_sent') {
+    if (event.type === 'send_intent' || event.type === 'prompt_sent') {
       latestTurnId = event.turnId ?? latestTurnId
-      status = 'submitted'
+      status = event.type === 'send_intent' ? 'sending' : 'submitted'
       latestResponse = null
       error = null
       continue
     }
 
+    if (event.type === 'delivery_uncertain') {
+      if (status !== 'completed' && status !== 'error') {
+        status = 'delivery_uncertain'
+        error = event.message ?? 'delivery outcome is unknown'
+      }
+      continue
+    }
+
     if (event.type === 'generation_started') {
+      if (status === 'completed' || status === 'error') continue
       if (latestTurnId === null) latestTurnId = event.turnId ?? null
       if (event.turnId === latestTurnId) {
         status = 'generating'
@@ -45,6 +58,7 @@ function statusFromEvents(events) {
     }
 
     if (event.type === 'error') {
+      if (status === 'completed') continue
       if (!event.turnId) {
         status = 'error'
         latestResponse = null

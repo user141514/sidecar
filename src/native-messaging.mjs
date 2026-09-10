@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 
+export const DEFAULT_EXTENSION_REQUEST_TIMEOUT_MS = 120_000
+
+function deliveryUncertain(message) {
+  return Object.assign(new Error(message), { code: 'DELIVERY_UNCERTAIN' })
+}
+
 const DEFAULT_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 
 export function encodeNativeMessage(message) {
@@ -74,13 +80,13 @@ export class NativeMessageChannel extends EventEmitter {
 }
 
 export class ExtensionBridge extends EventEmitter {
-  constructor({ channel, requestTimeoutMs = 30_000 }) {
+  constructor({ channel, requestTimeoutMs = DEFAULT_EXTENSION_REQUEST_TIMEOUT_MS }) {
     super()
     this.channel = channel
     this.requestTimeoutMs = requestTimeoutMs
     this.pending = new Map()
     channel.on('message', (message) => this.#handle(message))
-    channel.on('close', () => this.#rejectAll(new Error('Chrome extension bridge disconnected')))
+    channel.on('close', () => this.#rejectAll(deliveryUncertain('Chrome extension bridge disconnected; delivery outcome is unknown')))
     channel.on('error', (error) => this.emit('error', error))
   }
 
@@ -94,11 +100,18 @@ export class ExtensionBridge extends EventEmitter {
     const promise = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId)
-        reject(new Error(`Timed out waiting for extension response to ${method}`))
+        reject(deliveryUncertain(`Timed out waiting for extension response to ${method}; delivery outcome is unknown`))
       }, this.requestTimeoutMs)
       this.pending.set(requestId, { resolve, reject, timeout })
     })
-    this.channel.send({ kind: 'request', requestId, method, params })
+    try {
+      this.channel.send({ kind: 'request', requestId, method, params })
+    } catch (error) {
+      const pending = this.pending.get(requestId)
+      clearTimeout(pending.timeout)
+      this.pending.delete(requestId)
+      pending.reject(deliveryUncertain(error instanceof Error ? error.message : String(error)))
+    }
     return promise
   }
 
@@ -108,7 +121,10 @@ export class ExtensionBridge extends EventEmitter {
       if (!pending) return
       clearTimeout(pending.timeout)
       this.pending.delete(message.requestId)
-      if (message.ok === false) pending.reject(new Error(message.error || 'Extension request failed'))
+      if (message.ok === false) pending.reject(Object.assign(
+        new Error(message.error || 'Extension request failed'),
+        message.errorCode ? { code: message.errorCode } : {}
+      ))
       else pending.resolve(message.result ?? {})
       return
     }

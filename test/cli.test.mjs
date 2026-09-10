@@ -78,3 +78,11 @@ test('CLI rejects malformed commands before contacting the provider', async () =
   await assert.rejects(runCli(['unknown'], { fetchImpl }), /unknown command/)
   assert.equal(calls.length, 0)
 })
+
+test('CLI HTTP deadline covers the complete native request budget', async t => {
+  const budgets = []
+  const original = AbortSignal.timeout
+  t.mock.method(AbortSignal, 'timeout', ms => { budgets.push(ms); return original(ms) })
+  await runCli(['send', 'conv_1', 'one prompt'], { fetchImpl: fakeFetch([]) })
+  assert.ok(budgets[0] > 120_000)
+})

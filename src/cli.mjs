@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { DEFAULT_EXTENSION_REQUEST_TIMEOUT_MS } from './native-messaging.mjs'
 import { updateExtension } from './extension-control.mjs'
 import { checkedExtensionBuild } from '../scripts/extension-build.mjs'
 
@@ -61,7 +62,7 @@ function commandToCall(argv) {
   throw new TypeError(`unknown command: ${command}`)
 }
 
-async function callTool(fetchImpl, url, name, args, timeoutMs = 30_000) {
+async function callTool(fetchImpl, url, name, args, timeoutMs = DEFAULT_EXTENSION_REQUEST_TIMEOUT_MS + 10_000) {
   const response = await fetchImpl(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
