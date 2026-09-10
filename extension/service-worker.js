@@ -598,7 +598,14 @@ async function performSend(params, operation) {
 
 async function executeRequest(message) {
   await lifecycleReady
-  if (message.method === 'extension_status') return { ...await extensionLifecycle.status(), operations: [...activeSends.values()] }
+  if (message.method === 'extension_status') {
+    const stored = await chrome.storage.local.get(null)
+    const bindings = Object.entries(stored).filter(([key]) => key.startsWith(STORAGE_PREFIX))
+    const tabs = await chrome.tabs.query({})
+    const managedTabs = tabs.filter(tab => bindings.some(([, binding]) => binding?.tabId === tab.id))
+      .map(tab => ({ tabId: tab.id, windowId: tab.windowId, url: tabPageUrl(tab), title: tab.title, status: tab.status, discarded: tab.discarded }))
+    return { ...await extensionLifecycle.status(), operations: [...activeSends.values()], managedTabs }
+  }
   if (message.method === 'extension_reload') return extensionLifecycle.requestReload(message.params)
   if (message.method === 'project_find') return findProject(message.params ?? {})
   if (message.method === 'project_create') return extensionLifecycle.runMutation(() => createProject(message.params ?? {}))
