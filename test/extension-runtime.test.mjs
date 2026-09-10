@@ -6,7 +6,7 @@ import vm from 'node:vm'
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
 const lifecycleSource = await readFile(new URL('../extension/lifecycle.js', import.meta.url), 'utf8')
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, prepareTransportFailure = false, prepareRejected = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -193,6 +193,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         deferredReloadTimers.push(callback)
         return deferredReloadTimers.length
       }
+      if (expirePrepare && ms === 60_000) return fastSetTimeout(callback)
       if (ms >= 2000) return setTimeout(callback, ms)
       return fastSetTimeout(callback)
     },
@@ -353,6 +354,19 @@ test('two local conversation IDs cannot mutate the same active browser tab', asy
   release()
   assert.equal(result.ok, false)
   assert.equal(harness.sentToTabs.filter(x => x.message.type === 'conversation_prepare').length, 1)
+})
+
+test('a late prepare receipt closes the unsubmitted turn after timeout', async () => {
+  let release
+  const harness = makeHarness({ expirePrepare: true, prepareGate: new Promise(resolve => { release = resolve }) })
+  const result = await harness.request('conversation_send', { conversationId: 'conv_late_prepare', turnId: 'turn_late', text: 'hello' })
+  assert.equal(result.errorCode, 'DELIVERY_UNCERTAIN')
+  assert.ok(harness.storageState['pending:conv_late_prepare'])
+  release()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(harness.storageState['pending:conv_late_prepare'], undefined)
+  assert.equal(harness.sentToTabs.filter(x => x.message.type === 'conversation_submit').length, 0)
+  assert.equal(harness.storageState['outbox:terminal:conv_late_prepare:turn_late:error'].event.turnId, 'turn_late')
 })
 
 test('project_find scans existing ChatGPT tabs and returns a canonical matching Project URL without creating browser state', async () => {

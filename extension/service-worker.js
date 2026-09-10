@@ -24,12 +24,16 @@ function deliveryUncertain(error) {
   return Object.assign(new Error(error instanceof Error ? error.message : String(error)), { code: 'DELIVERY_UNCERTAIN' })
 }
 
-async function boundedMessage(tabId, message, timeoutMs) {
+async function boundedMessage(tabId, message, timeoutMs, onLateResponse) {
   let timer
+  let expired = false
   try {
     return await Promise.race([
-      chrome.tabs.sendMessage(tabId, message),
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Content script response timeout: ${message.type}`)), timeoutMs) })
+      chrome.tabs.sendMessage(tabId, message).then(result => {
+        if (expired && onLateResponse) void onLateResponse(result).catch(() => {})
+        return result
+      }),
+      new Promise((_, reject) => { timer = setTimeout(() => { expired = true; reject(new Error(`Content script response timeout: ${message.type}`)) }, timeoutMs) })
     ])
   } finally { clearTimeout(timer) }
 }
@@ -538,7 +542,19 @@ async function performSend(params, operation) {
     turnId: params.turnId,
     text: params.text,
     ...(params.app ? { app: params.app } : {})
-  }, 60_000) } catch (error) { throw deliveryUncertain(error) }
+  }, 60_000, async () => {
+    // The late receipt proves prepare has ended. This send path has already
+    // stopped before submit, so closing only this preparing turn is safe.
+    const current = await loadPendingTurn(params.conversationId)
+    if (current?.turnId !== params.turnId || current.phase !== 'preparing') return
+    const event = {
+      type: 'error', conversationId: params.conversationId, turnId: params.turnId,
+      message: 'Prepare acknowledgement arrived after timeout; prompt was not submitted'
+    }
+    await saveOutboxEvent({ eventId: terminalEventId(event), event })
+    await clearPendingTurn(params.conversationId)
+    void flushOutbox()
+  }) } catch (error) { throw deliveryUncertain(error) }
   if (prepared?.prepared !== true) {
     await clearPendingTurn(params.conversationId)
     throw new Error(prepared?.error || 'ChatGPT content script could not prepare the prompt')
