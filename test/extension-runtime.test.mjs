@@ -292,6 +292,8 @@ test('Project slug redirect preserves the existing tab', async () => {
   const status = await harness.request('extension_status', {})
   assert.equal(status.result.managedTabs[0].tabId, 20)
   assert.equal(status.result.managedTabs[0].url, alias)
+  assert.equal(harness.storageState['conversation:conv_alias'].url, alias)
+  assert.equal(result.result.url, alias)
 })
 
 test('pending intent precedes prepare and survives loss of its response', async () => {

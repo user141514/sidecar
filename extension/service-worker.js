@@ -59,7 +59,7 @@ function projectHomeUrl(url) {
   try {
     const parsed = new URL(url)
     if (parsed.origin !== 'https://chatgpt.com') return null
-    const match = canonicalProjectPath(parsed.pathname).match(/^\/g\/g-p-[^/]+\/project\/?$/)
+    const match = parsed.pathname.match(/^\/g\/g-p-[^/]+\/project\/?$/)
     return match ? `${parsed.origin}${match[0].replace(/\/$/, '')}` : null
   } catch {
     return null
@@ -73,7 +73,7 @@ function stableConversationUrl(url) {
     if (parsed.origin !== 'https://chatgpt.com') return null
     const rootMatch = parsed.pathname.match(/^\/c\/[^/]+/)
     if (rootMatch) return `${parsed.origin}${rootMatch[0]}`
-    const projectMatch = canonicalProjectPath(parsed.pathname).match(/^\/g\/g-p-[^/]+\/c\/[^/]+/)
+    const projectMatch = parsed.pathname.match(/^\/g\/g-p-[^/]+\/c\/[^/]+/)
     return projectMatch ? `${parsed.origin}${projectMatch[0]}` : null
   } catch {
     return null
@@ -85,7 +85,7 @@ function chatGptPageUrl(url) {
   try {
     const parsed = new URL(url)
     if (parsed.origin !== 'https://chatgpt.com') return null
-    const pathname = parsed.pathname === '/' ? '/' : canonicalProjectPath(parsed.pathname).replace(/\/+$/, '')
+    const pathname = parsed.pathname === '/' ? '/' : parsed.pathname.replace(/\/+$/, '')
     return `${parsed.origin}${pathname}`
   } catch {
     return null
@@ -104,10 +104,17 @@ function tabPageUrl(tab) {
   return tab?.pendingUrl || tab?.url || null
 }
 
+function pageIdentity(url) {
+  const page = chatGptPageUrl(url)
+  if (!page) return null
+  const parsed = new URL(page)
+  return parsed.origin + canonicalProjectPath(parsed.pathname)
+}
+
 function tabMatchesExpectedUrl(tab, expectedUrl) {
   const expectedStable = stableConversationUrl(expectedUrl)
-  if (expectedStable) return stableConversationUrl(tabPageUrl(tab)) === expectedStable
-  return chatGptPageUrl(tabPageUrl(tab)) === chatGptPageUrl(expectedUrl)
+  if (expectedStable) return pageIdentity(stableConversationUrl(tabPageUrl(tab))) === pageIdentity(expectedStable)
+  return pageIdentity(tabPageUrl(tab)) === pageIdentity(expectedUrl)
 }
 
 function postNative(message) {
@@ -682,8 +689,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       const wrongTab = typeof pending.tabId === 'number' && senderTabId !== pending.tabId
-      const wrongSenderUrl = Boolean(eventUrl && senderUrl && eventUrl !== senderUrl)
-      const wrongCurrentUrl = Boolean(currentUrl && eventUrl && currentUrl !== eventUrl)
+      const wrongSenderUrl = Boolean(eventUrl && senderUrl && pageIdentity(eventUrl) !== pageIdentity(senderUrl))
+      const wrongCurrentUrl = Boolean(currentUrl && eventUrl && pageIdentity(currentUrl) !== pageIdentity(eventUrl))
       if (wrongTab || wrongSenderUrl || wrongCurrentUrl) {
         sendResponse({ durable: false, reason: 'stale_source' })
         return

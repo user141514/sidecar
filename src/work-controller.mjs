@@ -259,7 +259,7 @@ function normalizeManagedProjectUrl(value) {
   if (parsed.origin !== 'https://chatgpt.com' || !/^\/g\/g-p-[^/]+\/project$/.test(pathname)) {
     throw new TypeError('managed project url must be a canonical ChatGPT Project home URL')
   }
-  return `${parsed.origin}${pathname.replace(/^(\/g\/g-p-[0-9a-f]{32})-[^/]+(\/project)$/i, '$1$2')}`
+  return `${parsed.origin}${pathname}`
 }
 
 export class WorkController {

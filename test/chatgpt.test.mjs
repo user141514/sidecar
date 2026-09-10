@@ -366,11 +366,12 @@ test('extension-backed host creates a dedicated window, returns after send, and 
   assert.equal(state.latestResponse, 'FINAL_RESPONSE')
 })
 
-test('project aliases use stable identity while create reports only local allocation', async () => {
+test('project navigation preserves the provided slug while create reports only local allocation', async () => {
   const { ChatGptConversationHost } = await loadChatGptModule()
   const host = new ChatGptConversationHost({ bridge: new FakeBridge(), store: new MemoryStore() })
   const url = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
-  assert.equal((await host.pinProject(url.replace('/project', '-subagents/project'))).projectUrl, url)
+  const navigationUrl = url.replace('/project', '-subagents/project')
+  assert.equal((await host.pinProject(navigationUrl)).projectUrl, navigationUrl)
   const created = await host.create()
   assert.equal(created.phase, 'allocated')
   assert.equal(created.threadCreated, false)

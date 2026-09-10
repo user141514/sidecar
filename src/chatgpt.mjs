@@ -16,7 +16,7 @@ function normalizeProjectHomeUrl(value) {
   if (!/^\/g\/g-p-[^/]+\/project$/.test(path)) {
     throw new Error('project_url must be a ChatGPT Project home URL')
   }
-  return `${parsed.origin}${path.replace(/^(\/g\/g-p-[0-9a-f]{32})-[^/]+(\/project)$/i, '$1$2')}`
+  return `${parsed.origin}${path}`
 }
 
 export class ChatGptConversationHost {
