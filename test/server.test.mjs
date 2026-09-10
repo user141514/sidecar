@@ -1,7 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { WorkLedger } from '../src/work-ledger.mjs'
+import { MemoryPool } from '../src/memory-pool.mjs'
 
 async function loadServerModule() {
   try {
@@ -328,6 +332,148 @@ test('dynamic work tools expose structured decision and deterministic dispatch c
     ])
   } finally {
     await app.close()
+  }
+})
+
+test('completed work is durably published to MemoryPool before completion returns success', async () => {
+  const { createSidecarServer } = await loadServerModule()
+  assert.equal(typeof createSidecarServer, 'function')
+  if (typeof createSidecarServer !== 'function') return
+
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-terminal-memory-'))
+  const workLedger = new WorkLedger(join(root, 'works'))
+  const memoryPool = new MemoryPool({ rootDir: join(root, 'memory'), workLedger })
+  const source = await workLedger.create('persist terminal work automatically')
+  await workLedger.append(source.id, 'observation', { fact: 'authoritative evidence' })
+  await workLedger.append(source.id, 'decision', { action: 'STOP', reason: 'done' })
+
+  const app = createSidecarServer({ conversationHost: new FakeHost(), workLedger, memoryPool })
+  const address = await app.listen({ host: '127.0.0.1', port: 0 })
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  try {
+    const completed = await rpc(baseUrl, {
+      jsonrpc: '2.0', id: 39, method: 'tools/call', params: {
+        name: 'work_append',
+        arguments: { work_id: source.id, type: 'completed', payload: { outcome: 'done' } }
+      }
+    })
+    assert.equal(completed.status, 200)
+    assert.equal(JSON.parse(completed.body.result.content[0].text).type, 'completed')
+
+    const manifest = (await readFile(join(root, 'memory', 'manifest.jsonl'), 'utf8'))
+      .trim().split('\n').map((line) => JSON.parse(line))
+    assert.equal(manifest.length, 1)
+    assert.equal(manifest[0].source_work_id, source.id)
+
+    const current = await workLedger.create('read persisted terminal memory')
+    const retrieval = await memoryPool.query(current.id, { contains: 'persist terminal work automatically' })
+    assert.equal(retrieval.matched.length, 1)
+    const consumed = await memoryPool.read(current.id, retrieval.retrievalId, manifest[0].memory_id)
+    assert.equal(consumed.meta.source_work_id, source.id)
+  } finally {
+    await app.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('completed work is rejected before ledger mutation when MemoryPool is unavailable', async () => {
+  const { createSidecarServer } = await loadServerModule()
+  assert.equal(typeof createSidecarServer, 'function')
+  if (typeof createSidecarServer !== 'function') return
+
+  const workLedger = new FakeWorkLedger()
+  const app = createSidecarServer({ conversationHost: new FakeHost(), workLedger })
+  const address = await app.listen({ host: '127.0.0.1', port: 0 })
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  try {
+    const completed = await rpc(baseUrl, {
+      jsonrpc: '2.0', id: 391, method: 'tools/call', params: {
+        name: 'work_append',
+        arguments: { work_id: 'work_1', type: 'completed', payload: { outcome: 'done' } }
+      }
+    })
+    const result = completed.body.result
+    assert.equal(result.isError, true)
+    assert.match(result.content[0].text, /memory pool unavailable/)
+    assert.deepEqual(workLedger.calls, [])
+  } finally {
+    await app.close()
+  }
+})
+
+test('completed work without terminal STOP is rejected before completed is appended', async () => {
+  const { createSidecarServer } = await loadServerModule()
+  assert.equal(typeof createSidecarServer, 'function')
+  if (typeof createSidecarServer !== 'function') return
+
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-terminal-guard-'))
+  const workLedger = new WorkLedger(join(root, 'works'))
+  const memoryPool = new MemoryPool({ rootDir: join(root, 'memory'), workLedger })
+  const source = await workLedger.create('do not strand an unpublished completion')
+  const app = createSidecarServer({ conversationHost: new FakeHost(), workLedger, memoryPool })
+  const address = await app.listen({ host: '127.0.0.1', port: 0 })
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  try {
+    const completed = await rpc(baseUrl, {
+      jsonrpc: '2.0', id: 392, method: 'tools/call', params: {
+        name: 'work_append',
+        arguments: { work_id: source.id, type: 'completed', payload: { outcome: 'done' } }
+      }
+    })
+    assert.equal(completed.body.result.isError, true)
+    assert.match(completed.body.result.content[0].text, /terminal STOP/)
+    const state = await workLedger.read(source.id)
+    assert.deepEqual(state.events.map((event) => event.type), ['goal'])
+  } finally {
+    await app.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('retry after memory publication failure does not append a second completed event', async () => {
+  const { createSidecarServer } = await loadServerModule()
+  assert.equal(typeof createSidecarServer, 'function')
+  if (typeof createSidecarServer !== 'function') return
+
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-terminal-retry-'))
+  const workLedger = new WorkLedger(join(root, 'works'))
+  const realMemoryPool = new MemoryPool({ rootDir: join(root, 'memory'), workLedger })
+  const source = await workLedger.create('retry terminal memory commit')
+  await workLedger.append(source.id, 'decision', { action: 'STOP', reason: 'done' })
+  let attempts = 0
+  const flakyMemoryPool = {
+    async publish(workId) {
+      attempts += 1
+      if (attempts === 1) throw new Error('simulated memory write failure')
+      return realMemoryPool.publish(workId)
+    }
+  }
+  const app = createSidecarServer({ conversationHost: new FakeHost(), workLedger, memoryPool: flakyMemoryPool })
+  const address = await app.listen({ host: '127.0.0.1', port: 0 })
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  const request = {
+    jsonrpc: '2.0', id: 393, method: 'tools/call', params: {
+      name: 'work_append',
+      arguments: { work_id: source.id, type: 'completed', payload: { outcome: 'done' } }
+    }
+  }
+  try {
+    const first = await rpc(baseUrl, request)
+    assert.equal(first.body.result.isError, true)
+    assert.match(first.body.result.content[0].text, /simulated memory write failure/)
+
+    const second = await rpc(baseUrl, { ...request, id: 394 })
+    assert.equal(second.body.result.isError, undefined)
+    assert.equal(JSON.parse(second.body.result.content[0].text).type, 'completed')
+    assert.equal(attempts, 2)
+
+    const state = await workLedger.read(source.id)
+    assert.equal(state.events.filter((event) => event.type === 'completed').length, 1)
+    const manifest = (await readFile(join(root, 'memory', 'manifest.jsonl'), 'utf8')).trim().split('\n')
+    assert.equal(manifest.length, 1)
+  } finally {
+    await app.close()
+    await rm(root, { recursive: true, force: true })
   }
 })
 
