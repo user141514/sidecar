@@ -47,11 +47,12 @@ function preview(events, manifestEntry) {
 }
 
 export class MemoryPool {
-  constructor({ rootDir, workLedger, now = () => new Date().toISOString(), randomId = randomUUID }) {
+  constructor({ rootDir, workLedger, now = () => new Date().toISOString(), randomId = randomUUID, onPublished = null }) {
     this.rootDir = rootDir
     this.workLedger = workLedger
     this.now = now
     this.randomId = randomId
+    this.onPublished = onPublished
     this.publishQueue = Promise.resolve()
   }
 
@@ -106,7 +107,13 @@ export class MemoryPool {
   async publish(sourceWorkId) {
     const run = this.publishQueue.then(() => this.#publish(sourceWorkId))
     this.publishQueue = run.catch(() => {})
-    return run
+    const result = await run
+    try {
+      this.onPublished?.(result)
+    } catch {
+      // Online synchronization is opportunistic and cannot invalidate local durability.
+    }
+    return result
   }
 
   async #publish(sourceWorkId) {

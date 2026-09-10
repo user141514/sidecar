@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -75,6 +76,42 @@ test('MemoryPool publishes only terminal work as an immutable copied snapshot an
 
     const manifest = (await readFile(join(f.memoryRoot, 'manifest.jsonl'), 'utf8')).trim().split('\n')
     assert.equal(manifest.length, 1)
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('MemoryPool invokes onPublished only after local durability and does not await callback work', async () => {
+  const f = await fixture()
+  try {
+    assert.equal(typeof f.MemoryPool, 'function')
+    if (typeof f.MemoryPool !== 'function') return
+    const callbacks = []
+    const never = new Promise(() => {})
+    const pool = new f.MemoryPool({
+      rootDir: f.memoryRoot,
+      workLedger: f.workLedger,
+      onPublished: (result) => {
+        callbacks.push({
+          result,
+          manifestExists: existsSync(join(f.memoryRoot, 'manifest.jsonl')),
+          recordExists: existsSync(join(f.memoryRoot, 'records', result.memory_id, 'meta.json'))
+        })
+        return never
+      }
+    })
+    const source = await completedWork(f.workLedger, 'publish callback', 'done')
+
+    const first = await pool.publish(source.id)
+    assert.equal(callbacks.length, 1)
+    assert.equal(callbacks[0].result.memory_id, first.memory_id)
+    assert.equal(callbacks[0].manifestExists, true)
+    assert.equal(callbacks[0].recordExists, true)
+
+    const second = await pool.publish(source.id)
+    assert.equal(second.existing, true)
+    assert.equal(callbacks.length, 2)
+    assert.equal(callbacks[1].result.memory_id, first.memory_id)
   } finally {
     await f.cleanup()
   }

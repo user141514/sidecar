@@ -527,6 +527,48 @@ test('memory tools dispatch explicit publish, query, and read through MemoryPool
   }
 })
 
+test('runtime wiring kicks memory sync at startup and after durable MemoryPool publish without awaiting it', async () => {
+  const { createRuntimeComponents, createSidecarServer } = await loadServerModule()
+  assert.equal(typeof createRuntimeComponents, 'function')
+  assert.equal(typeof createSidecarServer, 'function')
+  if (typeof createRuntimeComponents !== 'function' || typeof createSidecarServer !== 'function') return
+
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-memory-sync-wiring-'))
+  let kicks = 0
+  const never = new Promise(() => {})
+  const memorySyncBridge = {
+    kick() {
+      kicks += 1
+      return never
+    }
+  }
+  const components = createRuntimeComponents({
+    bridge: new EventEmitter(),
+    dataRoot: root,
+    memorySyncBridge
+  })
+  const source = await components.workLedger.create('auto sync wiring')
+  await components.workLedger.append(source.id, 'decision', { action: 'STOP', reason: 'done' })
+  const app = createSidecarServer({ ...components })
+  const address = await app.listen({ host: '127.0.0.1', port: 0 })
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  try {
+    assert.equal(kicks, 1)
+    const completed = await rpc(baseUrl, {
+      jsonrpc: '2.0', id: 495, method: 'tools/call', params: {
+        name: 'work_append',
+        arguments: { work_id: source.id, type: 'completed', payload: { outcome: 'done' } }
+      }
+    })
+    assert.equal(completed.body.result.isError, undefined)
+    assert.equal(JSON.parse(completed.body.result.content[0].text).type, 'completed')
+    assert.equal(kicks, 2)
+  } finally {
+    await app.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('runtime components place conversations, works, and memory under one stable data root', async () => {
   const { createRuntimeComponents } = await loadServerModule()
   assert.equal(typeof createRuntimeComponents, 'function')
@@ -534,11 +576,13 @@ test('runtime components place conversations, works, and memory under one stable
 
   const dataRoot = join('C:\\runtime-home', 'data')
   const bridge = new EventEmitter()
-  const components = createRuntimeComponents({ bridge, dataRoot })
+  const memorySyncBridge = { kick() {} }
+  const components = createRuntimeComponents({ bridge, dataRoot, memorySyncBridge })
 
   assert.equal(components.store.rootDir, join(dataRoot, 'conversations'))
   assert.equal(components.workLedger.rootDir, join(dataRoot, 'works'))
   assert.equal(components.memoryPool.rootDir, join(dataRoot, 'memory'))
+  assert.equal(components.memorySyncBridge, memorySyncBridge)
   assert.equal(components.workController.ledger, components.workLedger)
   assert.equal(components.workController.conversationHost, components.conversationHost)
 })
