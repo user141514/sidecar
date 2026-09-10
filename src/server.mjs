@@ -3,13 +3,14 @@ import http from 'node:http'
 import { EXTENSION_TOOLS, dispatchExtensionTool } from './extension-control.mjs'
 import { CONVERSATION_TOOLS, dispatchConversationTool } from './conversation-tools.mjs'
 import { fileURLToPath } from 'node:url'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { ChatGptConversationHost } from './chatgpt.mjs'
 import { ExtensionBridge, NativeMessageChannel } from './native-messaging.mjs'
 import { ConversationStore } from './store.mjs'
 import { WorkLedger } from './work-ledger.mjs'
 import { WorkController } from './work-controller.mjs'
 import { MemoryPool } from './memory-pool.mjs'
+import { MemorySyncBridge } from './memory-sync-bridge.mjs'
 
 const TOOLS = [
   ...EXTENSION_TOOLS,
@@ -487,7 +488,7 @@ async function handleRpc(conversationHost, workLedger, workController, memoryPoo
   return { status: 200, body: jsonRpcError(id, -32601, `Method not found: ${message.method}`) }
 }
 
-export function createSidecarServer({ conversationHost, workLedger = null, workController = null, memoryPool = null, runtimeRelease = null }) {
+export function createSidecarServer({ conversationHost, workLedger = null, workController = null, memoryPool = null, memorySyncBridge = null, runtimeRelease = null }) {
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost')
@@ -519,6 +520,11 @@ export function createSidecarServer({ conversationHost, workLedger = null, workC
         server.once('error', reject)
         server.listen(port, host, () => {
           server.off('error', reject)
+          try {
+            memorySyncBridge?.kick()
+          } catch {
+            // Online synchronization is opportunistic and cannot invalidate startup.
+          }
           resolve(server.address())
         })
       })
@@ -534,19 +540,28 @@ export function createSidecarServer({ conversationHost, workLedger = null, workC
 const defaultConversationRoot = fileURLToPath(new URL('../data/conversations/', import.meta.url))
 const defaultWorkRoot = fileURLToPath(new URL('../data/works/', import.meta.url))
 const defaultMemoryRoot = fileURLToPath(new URL('../data/memory/', import.meta.url))
+const defaultMymemRepo = resolve(fileURLToPath(new URL('../', import.meta.url)), '..', 'mymem')
 
 export function createRuntimeComponents({
   bridge,
   dataRoot = null,
   legacyConversationRoot = process.env.SIDECAR_DATA_DIR ?? defaultConversationRoot,
-  managedProjectUrl = process.env.SIDECAR_MANAGED_PROJECT_URL ?? null
+  managedProjectUrl = process.env.SIDECAR_MANAGED_PROJECT_URL ?? null,
+  mymemRepo = process.env.SIDECAR_MYMEM_REPO ?? defaultMymemRepo,
+  memorySyncBridge: providedMemorySyncBridge = null
 } = {}) {
   const store = new ConversationStore(dataRoot ? join(dataRoot, 'conversations') : legacyConversationRoot)
   const conversationHost = new ChatGptConversationHost({ bridge, store })
   const workLedger = new WorkLedger(dataRoot ? join(dataRoot, 'works') : defaultWorkRoot)
   const workController = new WorkController({ ledger: workLedger, conversationHost, managedProjectUrl })
-  const memoryPool = new MemoryPool({ rootDir: dataRoot ? join(dataRoot, 'memory') : defaultMemoryRoot, workLedger })
-  return { store, conversationHost, workLedger, workController, memoryPool }
+  const memoryRoot = dataRoot ? join(dataRoot, 'memory') : defaultMemoryRoot
+  const memorySyncBridge = providedMemorySyncBridge ?? new MemorySyncBridge({ memoryRoot, mymemRepo })
+  const memoryPool = new MemoryPool({
+    rootDir: memoryRoot,
+    workLedger,
+    onPublished: () => memorySyncBridge.kick()
+  })
+  return { store, conversationHost, workLedger, workController, memoryPool, memorySyncBridge }
 }
 
 async function startDefault() {
