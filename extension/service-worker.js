@@ -604,6 +604,10 @@ async function executeRequest(message) {
     const tabs = await chrome.tabs.query({})
     const managedTabs = tabs.filter(tab => bindings.some(([, binding]) => binding?.tabId === tab.id))
       .map(tab => ({ tabId: tab.id, windowId: tab.windowId, url: tabPageUrl(tab), title: tab.title, status: tab.status, discarded: tab.discarded }))
+    await Promise.all(managedTabs.map(async tab => {
+      try { tab.page = await boundedMessage(tab.tabId, { type: 'sidecar_ping' }, 2000) }
+      catch (error) { tab.pageError = error instanceof Error ? error.message : String(error) }
+    }))
     return { ...await extensionLifecycle.status(), operations: [...activeSends.values()], managedTabs }
   }
   if (message.method === 'extension_reload') return extensionLifecycle.requestReload(message.params)

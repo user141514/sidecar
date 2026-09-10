@@ -460,7 +460,15 @@ async function resumePendingTurn() {
 function onSidecarMessage(message, _sender, sendResponse) {
   if (contentDisposed) return
   if (message?.type === 'sidecar_ping') {
-    sendResponse({ ready: true, url: location.href, buildId: contentBuildId, generating: isGenerating() })
+    sendResponse({
+      ready: true, url: location.href, buildId: contentBuildId, generating: isGenerating(),
+      composerPresent: Boolean(findPromptEditor()), title: document.title,
+      headings: [...document.querySelectorAll('h1, h2')].map(node => node.textContent?.trim()).slice(0, 8),
+      buttons: [...document.querySelectorAll('button')].map(elementLabel).filter(Boolean).slice(0, 16),
+      editors: [...document.querySelectorAll('textarea, [contenteditable="true"]')].map(node => ({
+        tag: node.tagName, id: node.id, placeholder: node.getAttribute('placeholder'), label: node.getAttribute('aria-label')
+      })).slice(0, 5)
+    })
     return
   }
 
