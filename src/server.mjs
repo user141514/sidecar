@@ -221,7 +221,7 @@ const TOOLS = [
   },
   {
     name: 'work_memory_publish',
-    description: 'Explicitly publish one terminal STOP+completed Work Ledger as an immutable historical memory snapshot.',
+    description: 'Repair/backfill publication for a terminal STOP+completed Work Ledger. Normal completed work is published to MemoryPool automatically before completion returns success.',
     inputSchema: {
       type: 'object',
       properties: { source_work_id: { type: 'string' } },
@@ -294,6 +294,41 @@ function writeJson(res, statusCode, body) {
   res.end(payload)
 }
 
+async function completeWorkWithMemory(workLedger, memoryPool, workId, payload) {
+  if (!memoryPool) throw new Error('memory pool unavailable for completed work')
+
+  while (true) {
+    const work = await workLedger.read(workId)
+    const completedIndexes = work.events
+      .map((event, index) => event.type === 'completed' ? index : -1)
+      .filter((index) => index >= 0)
+    if (completedIndexes.length > 1) throw new Error('work has multiple completed events')
+
+    if (completedIndexes.length === 1) {
+      const completedIndex = completedIndexes[0]
+      if (completedIndex !== work.events.length - 1) throw new Error('completed must be the final event')
+      const existing = work.events[completedIndex]
+      if (JSON.stringify(existing.payload) !== JSON.stringify(payload)) {
+        throw new Error('completed payload differs from existing terminal event')
+      }
+      await memoryPool.publish(workId)
+      return existing
+    }
+
+    const hasStop = work.events.some((event) => event.type === 'decision' && event.payload?.action === 'STOP')
+    if (!hasStop) throw new Error('completed work requires terminal STOP before completion')
+
+    try {
+      const completed = await workLedger.appendIfEventCount(workId, work.events.length, 'completed', payload)
+      await memoryPool.publish(workId)
+      return completed
+    } catch (error) {
+      if (error?.code === 'WORK_STALE') continue
+      throw error
+    }
+  }
+}
+
 async function dispatchTool(conversationHost, workLedger, workController, memoryPool, name, args = {}) {
   if (name === 'extension_status' || name === 'extension_reload') {
     return dispatchExtensionTool(conversationHost.bridge, name, args)
@@ -316,6 +351,9 @@ async function dispatchTool(conversationHost, workLedger, workController, memory
     }
     if (!['action', 'observation', 'completed'].includes(args.type)) {
       throw new TypeError('work_append only accepts action, observation, or completed')
+    }
+    if (args.type === 'completed') {
+      return completeWorkWithMemory(workLedger, memoryPool, args.work_id, args.payload)
     }
     return workLedger.append(args.work_id, args.type, args.payload)
   }
@@ -411,7 +449,7 @@ async function handleRpc(conversationHost, workLedger, workController, memoryPoo
         protocolVersion: message.params?.protocolVersion ?? '2025-06-18',
         capabilities: { tools: {} },
         serverInfo: { name: 'conversation-sidecar', version: '0.0.2' },
-        instructions: 'Use project_create/project_pin for optional Project setup, conversation_create/conversation_send/conversation_read for conversations, work_* for structured coordinator trajectories, and work_memory_* only for explicit historical-memory publication/query/consumption. Historical memory is optional and never auto-injected. Raw local events are the source of truth. Reasoning effort is configured manually by the user in ChatGPT; the sidecar does not change it.'
+        instructions: 'Use project_create/project_pin for optional Project setup, conversation_create/conversation_send/conversation_read for conversations, and work_* for structured coordinator trajectories. A successful work_append(type=completed) requires prior STOP and durable MemoryPool publication; work_memory_publish remains an idempotent repair/backfill tool. Historical memory is never auto-injected. Raw local events are the source of truth. Reasoning effort is configured manually by the user in ChatGPT; the sidecar does not change it.'
       })
     }
   }
