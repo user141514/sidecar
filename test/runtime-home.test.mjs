@@ -43,6 +43,7 @@ test('runtime paths stay under one Runtime Home on Windows and Linux', async () 
     runtimeHome: '/home/ad/.local/share/conversation-sidecar',
     config: '/home/ad/.local/share/conversation-sidecar/runtime.json',
     releases: '/home/ad/.local/share/conversation-sidecar/releases',
+    extensionCurrent: '/home/ad/.local/share/conversation-sidecar/extension-current',
     bin: '/home/ad/.local/share/conversation-sidecar/bin',
     data: '/home/ad/.local/share/conversation-sidecar/data',
     conversations: '/home/ad/.local/share/conversation-sidecar/data/conversations',
@@ -53,6 +54,7 @@ test('runtime paths stay under one Runtime Home on Windows and Linux', async () 
 
   const win = resolveRuntimePaths('C:\\Users\\14579\\AppData\\Local\\Conversation Sidecar', { platform: 'win32' })
   assert.equal(win.config, 'C:\\Users\\14579\\AppData\\Local\\Conversation Sidecar\\runtime.json')
+  assert.equal(win.extensionCurrent, 'C:\\Users\\14579\\AppData\\Local\\Conversation Sidecar\\extension-current')
   assert.equal(win.memory, 'C:\\Users\\14579\\AppData\\Local\\Conversation Sidecar\\data\\memory')
 })
 

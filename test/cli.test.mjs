@@ -58,6 +58,65 @@ test('CLI prints help when invoked directly with Node on either OS', () => {
   assert.match(result.stdout, /extension-update/)
 })
 
+test('CLI defaults extension update verification to 60 seconds', async () => {
+  let seen = null
+  const state = { reloaded: false, requestId: null, expectedBuildId: null }
+  const extensionId = 'cfifihieaffhniimpimnfmignbbdaalb'
+  const fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body)
+    const name = body.params.name
+    if (name === 'extension_reload') {
+      state.reloaded = true
+      state.requestId = body.params.arguments.request_id
+      state.expectedBuildId = body.params.arguments.expected_build_id
+      return {
+        ok: true,
+        async json() {
+          return { jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: JSON.stringify({ accepted: true }) }] } }
+        }
+      }
+    }
+    const status = state.reloaded
+      ? {
+          extensionId,
+          buildId: state.expectedBuildId,
+          instanceId: 'new-instance',
+          pendingCount: 0,
+          outboxCount: 0,
+          activeOperations: 0,
+          reloading: false,
+          lastReload: { requestId: state.requestId, previousInstanceId: 'old-instance' },
+          restoration: { state: 'ready' }
+        }
+      : {
+          extensionId,
+          buildId: 'old-build',
+          instanceId: 'old-instance',
+          pendingCount: 0,
+          outboxCount: 0,
+          activeOperations: 0,
+          reloading: false
+        }
+    return {
+      ok: true,
+      async json() {
+        return { jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: JSON.stringify(status) }] } }
+      }
+    }
+  }
+
+  await runCli(['extension-update'], {
+    fetchImpl,
+    checkedExtensionBuildImpl: async () => ({ buildId: 'b'.repeat(64), extensionId }),
+    updateExtensionImpl: async (_callTool, options) => {
+      seen = options
+      return { verified: true }
+    }
+  })
+
+  assert.equal(seen?.timeoutMs, 60_000)
+})
+
 test('CLI runs through a POSIX installed bin symlink without changing command semantics', { skip: process.platform === 'win32' }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'chatgpt-conversation-bin-'))
   t.after(() => rm(dir, { recursive: true, force: true }))

@@ -11,22 +11,23 @@ npm link
 npm run install:host
 ```
 
-`npm link` creates the platform-appropriate command shim for `chatgpt-conversation`; all command semantics are in the same `src/cli.mjs`. The native installer registers Chrome -> manifest -> launcher. Only `install/platform-link.mjs` plus the POSIX/Windows launcher differ by OS. Registration selects ONE installation for the fixed extension ID; do not register Sidecar and standalone on top of one another unintentionally.
+`npm link` creates the platform-appropriate command shim for `chatgpt-conversation`; all command semantics are in the same `src/cli.mjs`. On Windows the native installer registers both Chrome and Edge -> manifest -> launcher. Only `install/platform-link.mjs` plus the POSIX/Windows launcher differ by OS. Registration selects ONE installation for the fixed extension ID; do not register Sidecar and standalone on top of one another unintentionally.
 
-Load this checkout's `extension/` once using Chrome's unpacked-extension UI. When upgrading a release that lacks the self-reload handler, a ONE-TIME manual bootstrap reload is required. Neither a CLI nor a new source file can invoke a handler that the old extension has never loaded. Do not use CDP, profile edits, remote-debugging permissions or browser UI automation to bypass that initial step. The new `scripting` permission allows non-navigating reinjection into managed tabs.
+For Agent Runtime installs, bootstrap publishes the verified release extension at the stable Runtime Home path `extension-current/`. Load that stable directory once using Chrome or Edge's unpacked-extension UI; do not load `releases/<sha>/extension`, because that binds browser trust to one immutable release. After the one-time trust action, later bootstrap upgrades replace `extension-current/` from a verified release while keeping the browser source path stable, and `chatgpt-conversation extension-update` reloads the already-trusted extension to activate the new bytes. When upgrading an older installation that was originally loaded from a checkout or `releases/<sha>/extension`, one final manual migration to `extension-current/` is required. Do not use CDP, direct profile edits, or remote-debugging permissions to bypass that trust boundary.
 
 ## Updating an existing installation
 
-First fetch/review source through the approved Git SSH remote workflow. The update command does not download arbitrary executable code and does not perform an implicit git pull.
+First fetch/review source through the approved Git SSH remote workflow. The update command does not download arbitrary executable code and does not perform an implicit git pull. For Agent Runtime, run bootstrap first so the new verified release is published into the stable `extension-current/` path, then reload that same trusted path.
 
 ```text
 npm run extension:build
 npm test
+npm run bootstrap -- --activate
 chatgpt-conversation extension-status
 chatgpt-conversation extension-update
 ```
 
-`extension-reload` is an alias for `extension-update`. Optional `--timeout-ms N` accepts 100–300000; default 30000. This timeout bounds the updater's reconnect verification; it is NOT a worker generation deadline. `npm run extension:check` detects stale generated build metadata without changing files.
+`extension-reload` is an alias for `extension-update`. Optional `--timeout-ms N` accepts 100–300000; default 60000. This timeout bounds the updater's reconnect verification; it is NOT a worker generation deadline. `npm run extension:check` detects stale generated build metadata without changing files.
 
 The CLI refuses reload when the extension has pending turns, unacknowledged terminal outbox records or in-flight browser operations. There is no `--force`. Do not delete pending records merely to permit an update. A failed update prints a nonzero exit status and must not be reported as success.
 

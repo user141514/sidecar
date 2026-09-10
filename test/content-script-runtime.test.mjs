@@ -583,6 +583,94 @@ test('recovery anchors the current assistant to the last matching user prompt in
   assert.equal(emitted[0].text, '恢复后的最终回答')
 })
 
+test('recovery waits for an assistant node before comparing DOM position', async () => {
+  const emitted = []
+  let now = 0
+  let poll = 0
+
+  const turnRoot = {
+    querySelector(selector) {
+      return selector.includes('copy-turn-action-button') ? { disabled: false } : null
+    }
+  }
+  const assistantNode = {
+    innerText: '稍后出现的回答',
+    textContent: '稍后出现的回答',
+    closest() {
+      return turnRoot
+    }
+  }
+  const userNode = {
+    innerText: '等待 assistant',
+    textContent: '等待 assistant',
+    compareDocumentPosition(other) {
+      if (other !== assistantNode) {
+        throw new TypeError("Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'.")
+      }
+      return 4
+    }
+  }
+  const document = {
+    querySelector() {
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return poll < 2 ? [] : [assistantNode]
+      if (selector === '[data-message-author-role="user"]') return [userNode]
+      if (selector === 'button') return []
+      if (selector === '[contenteditable="true"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-delayed-assistant' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'pending_turn_lookup') return null
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test-delayed-assistant' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date {
+      static now() {
+        return now
+      }
+    },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      poll += 1
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.__sidecarContentRuntime.monitorTurn({
+    conversationId: 'conv_project',
+    turnId: 'turn_delayed_assistant',
+    baselineAssistantCount: 0,
+    promptText: '等待 assistant',
+    recovery: true
+  })
+
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].type, 'response_completed')
+  assert.equal(emitted[0].text, '稍后出现的回答')
+})
+
 test('recovered monitor uses the original startedAt deadline instead of granting a fresh 20 minutes without liveness', async () => {
   const emitted = []
   let now = 600_000

@@ -328,6 +328,40 @@ async function installOrReuseRelease({ runtimeHome, revision, deps, paths }) {
   }
 }
 
+export async function installStableExtension({ runtimeHome, releaseDir, platform = currentPlatform(), randomId = randomUUID } = {}) {
+  const paths = resolveRuntimePaths(runtimeHome, { platform })
+  const path = pathApi(platform)
+  const source = path.join(releaseDir, 'extension')
+  const target = paths.extensionCurrent
+  const sourceBuildInfo = await readFile(path.join(source, 'build-info.js'), 'utf8')
+  let currentBuildInfo = null
+  try {
+    currentBuildInfo = await readFile(path.join(target, 'build-info.js'), 'utf8')
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+  if (currentBuildInfo === sourceBuildInfo) return { extensionPath: target, changed: false }
+
+  const staging = `${target}.staging-${randomId()}`
+  const backup = `${target}.backup-${randomId()}`
+  await rm(staging, { recursive: true, force: true })
+  await cp(source, staging, { recursive: true, errorOnExist: true, force: false })
+  const hadTarget = await exists(target)
+  try {
+    if (hadTarget) await rename(target, backup)
+    try {
+      await rename(staging, target)
+    } catch (error) {
+      if (hadTarget) await rename(backup, target).catch(() => {})
+      throw error
+    }
+    if (hadTarget) await rm(backup, { recursive: true, force: true })
+    return { extensionPath: target, changed: true }
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
 async function migrateLegacyData({ options, deps, paths, activeRegistration }) {
   await mkdir(paths.data, { recursive: true })
   if (await dataRootIsNonEmpty(paths.data)) return { status: 'existing', source: null, directories: [] }
@@ -407,6 +441,7 @@ async function applyRegistration({ options, deps, paths, activeRegistration }) {
     return { status: 'prepared_not_activated', changed: false, hostPath: activeRegistration.hostPath }
   }
   if (activeRegistration && samePath(activeRegistration.hostPath, hostPath, deps.platform)) {
+    await deps.installNativeHost({ platform: deps.platform, hostPath })
     return { status: 'already_active', changed: false, hostPath }
   }
   await deps.installNativeHost({ platform: deps.platform, hostPath })
@@ -424,6 +459,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
     exportRuntime: defaultExportRuntime,
     verifyRuntime: defaultVerifyRuntime,
     installRuntimeLaunchers: defaultInstallRuntimeLaunchers,
+    installStableExtension,
     installRuntimeUserEntrypoints: defaultInstallRuntimeUserEntrypoints,
     readActiveRegistration: defaultReadActiveRegistration,
     installNativeHost: defaultInstallNativeHost,
@@ -454,6 +490,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
   const paths = resolveRuntimePaths(runtimeHome, { platform: deps.platform })
   let existingConfig = null
   let release
+  let stableExtension
   let migration
   let activeRegistration
   let userInstallPreflight
@@ -530,6 +567,19 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
     commandPathReady: userInstall.pathReady === true
   }
 
+  if (activation.status !== 'prepared_not_activated') {
+    try {
+      stableExtension = await deps.installStableExtension({
+        runtimeHome,
+        releaseDir: release.releaseDir,
+        platform: deps.platform,
+        randomId: deps.randomId
+      })
+    } catch (error) {
+      return { ok: false, state: existingConfig?.state ?? 'prepared', runtimeHome, sourceRevision: revision, activation, userInstall, error: resultError('self_check_failed', error.message) }
+    }
+  }
+
   if (!managedProjectUrl) {
     const found = await deps.projectFind('subagents')
     managedProjectUrl = canonicalProjectUrl(found?.projectUrl)
@@ -556,6 +606,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
       runtimeHome,
       sourceRevision: revision,
       currentRelease: revision,
+      extensionPath: stableExtension?.extensionPath ?? null,
       managedProject: null,
       activation,
       migration,
@@ -644,6 +695,7 @@ export async function bootstrapRuntime(options = {}, overrides = {}) {
     runtimeHome,
     sourceRevision: revision,
     currentRelease: revision,
+    extensionPath: stableExtension?.extensionPath ?? null,
     managedProject: validatedReady.managed_project,
     activation,
     migration,
@@ -661,6 +713,7 @@ function printHuman(result) {
     `release: ${result.currentRelease ?? result.sourceRevision ?? 'unknown'}`,
     `managed-project: ${result.managedProject?.url ?? 'unresolved'}`
   ]
+  if (result.extensionPath) lines.push(`extension-path: ${result.extensionPath}`)
   if (result.userInstall) {
     lines.push(`command-dir: ${result.userInstall.commandDir}`)
     lines.push(`skill-dir: ${result.userInstall.skillDir}`)
