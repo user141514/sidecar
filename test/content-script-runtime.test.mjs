@@ -534,12 +534,21 @@ test('webgpt shift probe waits for a semantic strength control rendered as role 
     HTMLTextAreaElement: class {},
     HTMLInputElement: class {},
     InputEvent: class {},
+    MessageChannel: class {
+      constructor() {
+        this.port1 = { onmessage: null, close() {} }
+        this.port2 = {
+          postMessage: () => queueMicrotask(() => this.port1.onmessage?.()),
+          close() {}
+        }
+      }
+    },
     Date,
     Promise,
     Object,
     URL,
     console,
-    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    setTimeout() { throw new Error('WebGPT strength probing must not depend on timers') },
     clearTimeout() {}
   }
 

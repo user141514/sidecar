@@ -203,11 +203,27 @@ function findWebGptStrengthControl() {
   }) || null
 }
 
+async function yieldWebGptUi() {
+  if (typeof MessageChannel !== 'function') {
+    await Promise.resolve()
+    return
+  }
+  await new Promise((resolveYield) => {
+    const channel = new MessageChannel()
+    channel.port1.onmessage = () => {
+      channel.port1.close?.()
+      channel.port2.close?.()
+      resolveYield()
+    }
+    channel.port2.postMessage(0)
+  })
+}
+
 async function waitForWebGptStrengthControl() {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const control = findWebGptStrengthControl()
     if (control) return control
-    await sleep(100)
+    await yieldWebGptUi()
   }
   return null
 }
@@ -333,7 +349,7 @@ async function runWebGptShiftTest(target) {
     if (option) break
     slider = findWebGptStrengthSlider(control)
     if (slider) break
-    await sleep(100)
+    await yieldWebGptUi()
   }
   if (option) {
     option.click()
@@ -352,7 +368,7 @@ async function runWebGptShiftTest(target) {
     const afterControl = findWebGptStrengthControl()
     const after = webGptStrengthFromSlider(slider) || (afterControl ? (webGptStrengthFromNode(afterControl) || elementLabel(afterControl)) : null)
     if (after === wanted) return { switched: true, before, after }
-    await sleep(100)
+    await yieldWebGptUi()
   }
   throw new Error(`WebGPT thinking control did not read back target: ${wanted}`)
 }
