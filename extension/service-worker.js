@@ -693,7 +693,7 @@ async function webGptShiftTest(params) {
   const candidates = tabs.filter((tab) => Boolean(chatGptPageUrl(tabPageUrl(tab))))
   const tab = candidates.find((candidate) => candidate.active) || candidates[0]
   if (!tab || !Number.isInteger(tab.id)) throw new Error('No existing ChatGPT tab was found')
-  const result = await chrome.tabs.sendMessage(tab.id, { type: 'webgpt_shift_test', target: params.target })
+  const result = await boundedMessage(tab.id, { type: 'webgpt_shift_test', target: params.target }, 10_000)
   if (result?.switched !== true) throw new Error(result?.error || 'WebGPT shift probe failed')
   return { ...result, tabId: tab.id, url: tabPageUrl(tab) }
 }

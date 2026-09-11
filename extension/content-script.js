@@ -181,7 +181,7 @@ function webGptStrengthFromNode(node) {
 function webGptStrengthControlCandidates() {
   const seen = new Set()
   const out = []
-  for (const selector of ['button', '[role="button"]', '[aria-haspopup]', '[aria-controls]']) {
+  for (const selector of ['button', '[role="button"]', '[aria-haspopup]', '[aria-controls]', '.__composer-pill']) {
     for (const node of document.querySelectorAll(selector)) {
       if (seen.has(node)) continue
       seen.add(node)

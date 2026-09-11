@@ -33,7 +33,7 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
   assert.equal(harness.sentToTabs.length, 0)
 })
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -199,6 +199,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           return { accepted: true, url: tab.url, baselineAssistantCount: 0 }
         }
         if (message.type === 'webgpt_shift_test') {
+          if (hangWebGptShift) return await new Promise(() => {})
           return { switched: true, before: 'High', after: message.target }
         }
         if (message.type === 'conversation_monitor_start') return { started: true }
@@ -233,6 +234,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         return deferredReloadTimers.length
       }
       if (expirePrepare && ms === 60_000) return fastSetTimeout(callback)
+      if (fastWebGptShiftTimeout && ms === 10_000) return fastSetTimeout(callback)
       if (ms >= 2000) return setTimeout(callback, ms)
       return fastSetTimeout(callback)
     },
@@ -571,6 +573,22 @@ test('webgpt shift probe reuses an existing ChatGPT tab without creating a tab',
     harness.sentToTabs.some(({ tabId, message }) => tabId === 20 && message.type === 'webgpt_shift_test'),
     true
   )
+})
+
+test('webgpt shift probe bounds a missing content-script response', async () => {
+  const externalUrl = 'https://chatgpt.com/c/profile-test'
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl, active: true }],
+    hangWebGptShift: true,
+    fastWebGptShiftTimeout: true
+  })
+
+  const response = await harness.request('webgpt_shift_test', { target: 'High' })
+
+  assert.equal(response.ok, false)
+  assert.match(response.error, /Content script response timeout: webgpt_shift_test/)
 })
 
 test('send reloads a matching tab whose content script was invalidated by extension reload', async () => {
