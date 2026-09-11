@@ -406,8 +406,8 @@ test('webgpt shift probe opens Radix strength menu on pointerdown when click is 
 
 test('webgpt shift probe drives the capability slider by index and leaves the fifth position untouched', async () => {
   let pickerOpen = false
-  let index = 4
-  const labels = { 1: '即时', 2: '中等', 3: '高', 4: '极高', 5: 'Pro' }
+  let index = 3
+  const labels = { 0: '即时', 1: '中等', 2: '高', 3: '极高', 4: 'Pro' }
   class FakePointerEvent {
     constructor(type, init = {}) { this.type = type; Object.assign(this, init) }
   }
@@ -420,14 +420,14 @@ test('webgpt shift probe drives the capability slider by index and leaves the fi
     getAttribute(name) {
       if (name === 'role') return 'slider'
       if (name === 'aria-valuenow') return String(index)
-      if (name === 'aria-valuemin') return '1'
-      if (name === 'aria-valuemax') return '5'
+      if (name === 'aria-valuemin') return '0'
+      if (name === 'aria-valuemax') return '4'
       if (name === 'aria-valuetext') return labels[index]
       return null
     },
     dispatchEvent(event) {
-      if (event.type === 'keydown' && event.key === 'ArrowLeft' && index > 1) index -= 1
-      if (event.type === 'keydown' && event.key === 'ArrowRight' && index < 5) index += 1
+      if (event.type === 'keydown' && event.key === 'ArrowLeft' && index > 0) index -= 1
+      if (event.type === 'keydown' && event.key === 'ArrowRight' && index < 4) index += 1
       return true
     },
     focus() {}
@@ -482,7 +482,7 @@ test('webgpt shift probe drives the capability slider by index and leaves the fi
     await new Promise((resolve) => setImmediate(resolve))
   }
 
-  assert.equal(index, 3)
+  assert.equal(index, 2)
   assert.equal(document.title, 'WEBGPT_SHIFT_OK|思考强度|High')
 })
 

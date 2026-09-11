@@ -156,11 +156,11 @@ const WEBGPT_STRENGTH_ALIASES = [
   { strength: 'Medium', aliases: ['medium', '中等'] },
   { strength: 'High', aliases: ['high', '高'] }
 ]
-const WEBGPT_STRENGTH_INDEX = new Map([
-  ['Instant', 1],
-  ['Medium', 2],
-  ['High', 3],
-  ['Extra High', 4]
+const WEBGPT_STRENGTH_OFFSET = new Map([
+  ['Instant', 0],
+  ['Medium', 1],
+  ['High', 2],
+  ['Extra High', 3]
 ])
 
 function canonicalWebGptStrength(value) {
@@ -244,33 +244,50 @@ function findWebGptStrengthSlider(control) {
   }) || null
 }
 
+function webGptStrengthBaseIndex(slider) {
+  const min = Number(slider?.getAttribute?.('aria-valuemin'))
+  const max = Number(slider?.getAttribute?.('aria-valuemax'))
+  if (Number.isInteger(min) && Number.isInteger(max) && max - min >= 4) return min
+  return 1
+}
+
+function webGptStrengthTargetIndex(slider, strength) {
+  const offset = WEBGPT_STRENGTH_OFFSET.get(strength)
+  if (!Number.isInteger(offset)) return null
+  return webGptStrengthBaseIndex(slider) + offset
+}
+
 function webGptStrengthFromSlider(slider) {
   if (!slider) return null
   const valueText = slider.getAttribute?.('aria-valuetext')
   const labeled = canonicalWebGptStrength(valueText) || canonicalWebGptStrength(elementLabel(slider))
   if (labeled) return labeled
   const index = Number(slider.getAttribute?.('aria-valuenow'))
-  for (const [strength, targetIndex] of WEBGPT_STRENGTH_INDEX) {
-    if (index === targetIndex) return strength
+  const base = webGptStrengthBaseIndex(slider)
+  for (const [strength, offset] of WEBGPT_STRENGTH_OFFSET) {
+    if (index === base + offset) return strength
   }
   return null
 }
 
 async function driveWebGptStrengthSlider(slider, wanted) {
-  const targetIndex = WEBGPT_STRENGTH_INDEX.get(wanted)
+  const targetIndex = webGptStrengthTargetIndex(slider, wanted)
   let currentIndex = Number(slider?.getAttribute?.('aria-valuenow'))
   if (!Number.isInteger(targetIndex) || !Number.isInteger(currentIndex)) return false
   if (currentIndex === targetIndex) return true
   if (typeof KeyboardEvent !== 'function' || typeof slider?.dispatchEvent !== 'function') return false
 
   slider.focus?.()
-  const key = targetIndex < currentIndex ? 'ArrowLeft' : 'ArrowRight'
-  for (let step = 0; step < Math.abs(targetIndex - currentIndex); step += 1) {
+  const maxSteps = Math.abs(targetIndex - currentIndex)
+  for (let step = 0; step < maxSteps && currentIndex !== targetIndex; step += 1) {
+    const key = targetIndex < currentIndex ? 'ArrowLeft' : 'ArrowRight'
     slider.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key, code: key }))
     slider.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key, code: key }))
-    await sleep(100)
+    await Promise.resolve()
+    const nextIndex = Number(slider.getAttribute?.('aria-valuenow'))
+    if (!Number.isInteger(nextIndex) || nextIndex === currentIndex) return false
+    currentIndex = nextIndex
   }
-  currentIndex = Number(slider.getAttribute?.('aria-valuenow'))
   return currentIndex === targetIndex
 }
 
