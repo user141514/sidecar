@@ -709,22 +709,47 @@ async function webGptStrengthDomDiagnostic(tabId) {
         }
         return [...document.querySelectorAll('.__composer-pill')]
           .slice(0, 12)
-          .map((node) => ({
-            tagName: node.tagName,
-            id: node.id || null,
-            className: typeof node.className === 'string' ? node.className : null,
-            text: labelOf(node),
-            ariaLabel: node.getAttribute?.('aria-label') || null,
-            title: node.getAttribute?.('title') || null,
-            textContent: (node.textContent || '').trim(),
-            attributes: Object.fromEntries([...node.attributes].map((attribute) => [attribute.name, attribute.value])),
-            handlers: handlersOf(node),
-            parent: node.parentElement ? {
-              tagName: node.parentElement.tagName,
-              className: typeof node.parentElement.className === 'string' ? node.parentElement.className : null,
-              handlers: handlersOf(node.parentElement)
-            } : null
-          }))
+          .map((node) => {
+            const popupId = node.getAttribute?.('aria-controls') || null
+            const popup = popupId ? document.getElementById(popupId) : null
+            const popupItems = popup?.querySelectorAll
+              ? [...popup.querySelectorAll('[role], [aria-valuenow], [aria-checked], button, input')].slice(0, 40).map((item) => ({
+                tagName: item.tagName,
+                role: item.getAttribute?.('role') || null,
+                text: labelOf(item),
+                ariaChecked: item.getAttribute?.('aria-checked') || null,
+                ariaSelected: item.getAttribute?.('aria-selected') || null,
+                ariaValueNow: item.getAttribute?.('aria-valuenow') || null,
+                ariaValueText: item.getAttribute?.('aria-valuetext') || null,
+                dataState: item.getAttribute?.('data-state') || null,
+                className: typeof item.className === 'string' ? item.className : null,
+                handlers: handlersOf(item)
+              }))
+              : []
+            return {
+              tagName: node.tagName,
+              id: node.id || null,
+              className: typeof node.className === 'string' ? node.className : null,
+              text: labelOf(node),
+              ariaLabel: node.getAttribute?.('aria-label') || null,
+              title: node.getAttribute?.('title') || null,
+              textContent: (node.textContent || '').trim(),
+              attributes: Object.fromEntries([...node.attributes].map((attribute) => [attribute.name, attribute.value])),
+              handlers: handlersOf(node),
+              parent: node.parentElement ? {
+                tagName: node.parentElement.tagName,
+                className: typeof node.parentElement.className === 'string' ? node.parentElement.className : null,
+                handlers: handlersOf(node.parentElement)
+              } : null,
+              popup: popup ? {
+                id: popupId,
+                tagName: popup.tagName,
+                className: typeof popup.className === 'string' ? popup.className : null,
+                textContent: (popup.textContent || '').trim().slice(0, 1000),
+                items: popupItems
+              } : null
+            }
+          })
       }
     })
     return execution?.[0]?.result ?? null
