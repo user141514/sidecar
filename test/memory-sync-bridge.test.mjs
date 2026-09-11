@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 
-import { MemorySyncBridge, defaultSearchRoots } from '../src/memory-sync-bridge.mjs'
+import { MemorySyncBridge, defaultSearchRoots, discoverGitRepos } from '../src/memory-sync-bridge.mjs'
 
 function git(cwd, args) {
   const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' })
@@ -60,7 +60,7 @@ test('valid local mymem checkout kicks the uploader without blocking the caller'
 
   assert.equal(bridge.kick(), undefined)
   await waitFor(() => calls.length === 1)
-  assert.deepEqual(calls[0], { repoRoot: repo, memoryRoot: '/sidecar/data/memory' })
+  assert.deepEqual(calls[0], { repoRoot: repo, memoryRoot: resolve('/sidecar/data/memory') })
 
   gate.resolve()
   await bridge.whenIdle()
@@ -135,6 +135,25 @@ test('machine discovery finds a valid deep checkout when the preferred sibling i
   assert.equal(calls.length, 1)
   assert.equal(calls[0].repoRoot, target)
   assert.notEqual(calls[0].repoRoot, wrong)
+})
+
+test('machine discovery stops after the first accepted repository', async (t) => {
+  const machineRoot = await mkdtemp(join(tmpdir(), 'sidecar-early-stop-'))
+  t.after(() => rm(machineRoot, { recursive: true, force: true }))
+  const first = await initMymemRepo(join(machineRoot, 'first'))
+  const second = await initMymemRepo(join(machineRoot, 'second'))
+  const inspected = []
+
+  const found = await discoverGitRepos([first, second], {
+    maxDepth: 1,
+    accept: async (candidate) => {
+      inspected.push(candidate)
+      return candidate === first
+    }
+  })
+
+  assert.deepEqual(found, [first])
+  assert.deepEqual(inspected, [first])
 })
 
 test('explicit valid repo has priority over machine discovery', async (t) => {

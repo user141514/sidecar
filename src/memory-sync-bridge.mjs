@@ -104,38 +104,48 @@ export function defaultSearchRoots({
   return uniquePaths([homeDir, '/home', '/mnt', '/media', '/workspace', '/workspaces', '/data', '/srv', '/opt'])
 }
 
-export async function discoverGitRepos(searchRoots, { maxDepth = 10, maxRepos = 256 } = {}) {
+export async function discoverGitRepos(searchRoots, { maxDepth = 10, maxRepos = 256, accept = null } = {}) {
   const found = []
   const visited = new Set()
 
   async function walk(dir, depth) {
-    if (depth > maxDepth || found.length >= maxRepos) return
+    if (depth > maxDepth || found.length >= maxRepos) return false
     const resolved = resolve(dir)
-    if (visited.has(resolved)) return
+    if (visited.has(resolved)) return false
     visited.add(resolved)
 
     let entries
     try {
       entries = await readdir(resolved, { withFileTypes: true })
     } catch {
-      return
+      return false
     }
 
     if (entries.some((entry) => entry.name === '.git' && (entry.isDirectory() || entry.isFile()))) {
-      found.push(resolved)
-      if (found.length >= maxRepos) return
+      if (accept) {
+        let accepted = false
+        try {
+          accepted = Boolean(await accept(resolved))
+        } catch {}
+        if (accepted) {
+          found.push(resolved)
+          return true
+        }
+      } else {
+        found.push(resolved)
+        if (found.length >= maxRepos) return true
+      }
     }
 
     for (const entry of entries) {
       if (!entry.isDirectory() || SKIP_DIR_NAMES.has(entry.name)) continue
-      await walk(join(resolved, entry.name), depth + 1)
-      if (found.length >= maxRepos) return
+      if (await walk(join(resolved, entry.name), depth + 1)) return true
     }
+    return false
   }
 
   for (const root of uniquePaths(searchRoots)) {
-    await walk(root, 0)
-    if (found.length >= maxRepos) break
+    if (await walk(root, 0)) break
   }
   return found
 }
@@ -253,7 +263,9 @@ export class MemorySyncBridge {
 
     if (this.discoveryAttempted) return null
     this.discoveryAttempted = true
-    const discovered = await this.discoverRepos(this.searchRoots)
+    const discovered = await this.discoverRepos(this.searchRoots, {
+      accept: async (candidate) => Boolean(await inspectMymemRepo(candidate))
+    })
     const valid = []
     for (const candidate of uniquePaths(discovered)) {
       const inspected = await inspectMymemRepo(candidate)

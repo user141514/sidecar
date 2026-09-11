@@ -32,7 +32,7 @@ Behavior:
 3. If the preferred path is invalid, reuse a previously discovered valid path when available; if that cached path has become invalid, invalidate it and rediscover.
 4. Machine discovery is broad but admission is strict: scan platform-appropriate user/storage roots for Git repositories, then accept only repositories satisfying the exact remote + uploader contract. `graft` is not a runtime dependency because it requires a known repository root.
 5. Discovery runs on startup/first need or after cache invalidation, not on every MemoryPool publish. A negative discovery result remains cached for the process lifetime unless the preferred path later becomes valid or the process restarts.
-6. If several valid repositories exist, a `main` checkout is preferred, then the shorter/stable path order is used.
+6. Machine discovery stops at the first repository that satisfies the exact remote + uploader contract in search-root traversal order. The checkout branch is not an authority signal because the uploader fetches and publishes against `origin/main`.
 7. If no valid repository is available, disable that pass without affecting MemoryPool or task completion.
 8. Only one uploader run may execute at a time.
 9. A kick received while one run is active is coalesced into exactly one follow-up pass.
