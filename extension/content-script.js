@@ -203,6 +203,19 @@ function webGptStrengthOptionDiagnostics(control) {
     .slice(-20)
 }
 
+function openWebGptStrengthControl(control) {
+  if (typeof PointerEvent === 'function' && typeof control?.dispatchEvent === 'function') {
+    control.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true,
+      button: 0,
+      pointerType: 'mouse',
+      isPrimary: true
+    }))
+    return
+  }
+  control.click()
+}
+
 async function runWebGptShiftTest(target) {
   if (typeof target !== 'string' || !target.trim()) throw new Error('WebGPT shift target is required')
   const wanted = canonicalWebGptStrength(target)
@@ -210,7 +223,7 @@ async function runWebGptShiftTest(target) {
   const control = findWebGptStrengthControl()
   if (!control) throw new Error('WebGPT thinking control was not found')
   const before = webGptStrengthFromNode(control) || elementLabel(control)
-  control.click()
+  openWebGptStrengthControl(control)
 
   let option = null
   for (let attempt = 0; attempt < 20; attempt += 1) {
