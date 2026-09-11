@@ -737,12 +737,26 @@ async function webGptStrengthDomDiagnostic(tabId) {
                 ariaChecked: item.getAttribute?.('aria-checked') || null,
                 ariaSelected: item.getAttribute?.('aria-selected') || null,
                 ariaValueNow: item.getAttribute?.('aria-valuenow') || null,
+                ariaValueMin: item.getAttribute?.('aria-valuemin') || null,
+                ariaValueMax: item.getAttribute?.('aria-valuemax') || null,
                 ariaValueText: item.getAttribute?.('aria-valuetext') || null,
                 dataState: item.getAttribute?.('data-state') || null,
                 className: typeof item.className === 'string' ? item.className : null,
                 handlers: handlersOf(item),
                 handlerSources: handlerSourcesOf(item),
-                rect: rectOf(item)
+                rect: rectOf(item),
+                children: typeof item.className === 'string' && item.className.includes('SliderControl')
+                  ? [...item.querySelectorAll('*')].slice(0, 40).map((child) => ({
+                    tagName: child.tagName,
+                    role: child.getAttribute?.('role') || null,
+                    className: typeof child.className === 'string' ? child.className : null,
+                    textContent: (child.textContent || '').trim().slice(0, 100),
+                    ariaValueNow: child.getAttribute?.('aria-valuenow') || null,
+                    ariaValueMin: child.getAttribute?.('aria-valuemin') || null,
+                    ariaValueMax: child.getAttribute?.('aria-valuemax') || null,
+                    rect: rectOf(child)
+                  }))
+                  : null
               }))
               : []
             return {
