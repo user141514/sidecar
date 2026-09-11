@@ -271,6 +271,67 @@ test('webgpt shift probe reports bounded menu labels when the requested strength
   )
 })
 
+test('webgpt shift probe resolves options from the trigger aria-controls popup', async () => {
+  let pickerOpen = false
+  let selected = '极高'
+  const medium = {
+    disabled: false,
+    textContent: '中等',
+    getAttribute(name) { return name === 'aria-label' ? '中等' : null },
+    click() { selected = '中等'; pickerOpen = false }
+  }
+  const popup = {
+    querySelectorAll() { return pickerOpen ? [medium] : [] }
+  }
+  const pickerButton = {
+    disabled: false,
+    get textContent() { return selected },
+    getAttribute(name) {
+      if (name === 'aria-label') return selected
+      if (name === 'aria-controls') return 'strength-popup'
+      return null
+    },
+    click() { pickerOpen = true }
+  }
+  const document = {
+    title: 'ChatGPT',
+    getElementById(id) { return id === 'strength-popup' ? popup : null },
+    querySelector() { return null },
+    querySelectorAll(selector) {
+      if (selector === 'button') return [pickerButton]
+      if (selector.includes('[role="menuitem"]') || selector.includes('[role="option"]')) return []
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      if (selector === '[data-message-author-role="user"]') return []
+      return []
+    },
+    execCommand() { return true }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/c/profile-test#webgpt-shift-test=Medium', hash: '#webgpt-shift-test=Medium' },
+    chrome: { runtime: { sendMessage: async () => null, onMessage: { addListener() {}, removeListener() {} } } },
+    HTMLTextAreaElement: class {},
+    HTMLInputElement: class {},
+    InputEvent: class {},
+    Date,
+    Promise,
+    Object,
+    URL,
+    console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+  for (let attempt = 0; attempt < 8 && !document.title.startsWith('WEBGPT_SHIFT_'); attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  assert.equal(document.title, 'WEBGPT_SHIFT_OK|Extra High|Medium')
+})
+
 test('project_find returns the canonical Project URL from the current sidebar without clicking', async () => {
   let runtimeListener = null
   const links = [

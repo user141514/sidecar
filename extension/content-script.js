@@ -180,16 +180,24 @@ function findWebGptStrengthControl() {
   }) || null
 }
 
-function findWebGptStrengthOption(target) {
-  const wanted = canonicalWebGptStrength(target)
-  if (!wanted) return null
-  return appMenuCandidates().find((node) => !node.disabled && webGptStrengthFromNode(node) === wanted) || null
+function webGptStrengthOptionCandidates(control) {
+  const popupId = control?.getAttribute?.('aria-controls')
+  const popup = popupId && typeof document.getElementById === 'function'
+    ? document.getElementById(popupId)
+    : null
+  const popupCandidates = popup?.querySelectorAll ? [...popup.querySelectorAll('*')] : []
+  return popupCandidates.length ? popupCandidates : appMenuCandidates()
 }
 
-function webGptStrengthOptionDiagnostics() {
-  return [...document.querySelectorAll(
-    '[role="menuitem"], [role="option"], [role="menuitemradio"], [data-radix-collection-item]'
-  )]
+function findWebGptStrengthOption(target, control) {
+  const wanted = canonicalWebGptStrength(target)
+  if (!wanted) return null
+  return webGptStrengthOptionCandidates(control)
+    .find((node) => !node.disabled && webGptStrengthFromNode(node) === wanted) || null
+}
+
+function webGptStrengthOptionDiagnostics(control) {
+  return webGptStrengthOptionCandidates(control)
     .map(elementLabel)
     .filter((label) => label && label.length <= 40)
     .slice(-20)
@@ -206,12 +214,12 @@ async function runWebGptShiftTest(target) {
 
   let option = null
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    option = findWebGptStrengthOption(wanted)
+    option = findWebGptStrengthOption(wanted, control)
     if (option) break
     await sleep(100)
   }
   if (!option) {
-    const candidates = webGptStrengthOptionDiagnostics()
+    const candidates = webGptStrengthOptionDiagnostics(control)
     throw new Error(`WebGPT thinking option was not found: ${wanted}; candidates=${JSON.stringify(candidates)}`)
   }
   option.click()
