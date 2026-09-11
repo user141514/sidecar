@@ -150,14 +150,26 @@ async function selectAppForMessage(appName) {
   throw new Error(`ChatGPT app was not found in the tools menu: ${appName}`)
 }
 
-const WEBGPT_STRENGTHS = ['Extra High', 'Instant', 'Medium', 'High']
+const WEBGPT_STRENGTH_ALIASES = [
+  { strength: 'Extra High', aliases: ['extra high', '极高'] },
+  { strength: 'Instant', aliases: ['instant', '即时'] },
+  { strength: 'Medium', aliases: ['medium', '中等'] },
+  { strength: 'High', aliases: ['high', '高'] }
+]
+
+function canonicalWebGptStrength(value) {
+  const label = String(value ?? '').trim().toLowerCase()
+  for (const entry of WEBGPT_STRENGTH_ALIASES) {
+    for (const alias of entry.aliases) {
+      const target = alias.toLowerCase()
+      if (label === target || label.endsWith(` ${target}`)) return entry.strength
+    }
+  }
+  return null
+}
 
 function webGptStrengthFromNode(node) {
-  const label = elementLabel(node).toLowerCase()
-  return WEBGPT_STRENGTHS.find((strength) => {
-    const target = strength.toLowerCase()
-    return label === target || label.endsWith(` ${target}`)
-  }) || null
+  return canonicalWebGptStrength(elementLabel(node))
 }
 
 function findWebGptStrengthControl() {
@@ -169,12 +181,15 @@ function findWebGptStrengthControl() {
 }
 
 function findWebGptStrengthOption(target) {
-  const wanted = target.trim().toLowerCase()
-  return appMenuCandidates().find((node) => !node.disabled && elementLabel(node).toLowerCase() === wanted) || null
+  const wanted = canonicalWebGptStrength(target)
+  if (!wanted) return null
+  return appMenuCandidates().find((node) => !node.disabled && webGptStrengthFromNode(node) === wanted) || null
 }
 
 async function runWebGptShiftTest(target) {
   if (typeof target !== 'string' || !target.trim()) throw new Error('WebGPT shift target is required')
+  const wanted = canonicalWebGptStrength(target)
+  if (!wanted) throw new Error(`Unsupported WebGPT shift target: ${target}`)
   const control = findWebGptStrengthControl()
   if (!control) throw new Error('WebGPT thinking control was not found')
   const before = webGptStrengthFromNode(control) || elementLabel(control)
@@ -182,20 +197,20 @@ async function runWebGptShiftTest(target) {
 
   let option = null
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    option = findWebGptStrengthOption(target)
+    option = findWebGptStrengthOption(wanted)
     if (option) break
     await sleep(100)
   }
-  if (!option) throw new Error(`WebGPT thinking option was not found: ${target}`)
+  if (!option) throw new Error(`WebGPT thinking option was not found: ${wanted}`)
   option.click()
 
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const afterControl = findWebGptStrengthControl()
     const after = afterControl ? (webGptStrengthFromNode(afterControl) || elementLabel(afterControl)) : null
-    if (after?.toLowerCase() === target.trim().toLowerCase()) return { switched: true, before, after }
+    if (after === wanted) return { switched: true, before, after }
     await sleep(100)
   }
-  throw new Error(`WebGPT thinking control did not read back target: ${target}`)
+  throw new Error(`WebGPT thinking control did not read back target: ${wanted}`)
 }
 
 function controlLabel(node) {
