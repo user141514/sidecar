@@ -156,6 +156,12 @@ const WEBGPT_STRENGTH_ALIASES = [
   { strength: 'Medium', aliases: ['medium', '中等'] },
   { strength: 'High', aliases: ['high', '高'] }
 ]
+const WEBGPT_STRENGTH_INDEX = new Map([
+  ['Instant', 1],
+  ['Medium', 2],
+  ['High', 3],
+  ['Extra High', 4]
+])
 
 function canonicalWebGptStrength(value) {
   const label = String(value ?? '').trim().toLowerCase()
@@ -203,6 +209,45 @@ function webGptStrengthOptionDiagnostics(control) {
     .slice(-20)
 }
 
+function findWebGptStrengthSlider(control) {
+  return webGptStrengthOptionCandidates(control).find((node) => {
+    const role = node?.getAttribute?.('role')
+    const rawValue = node?.getAttribute?.('aria-valuenow')
+    const value = rawValue === null || rawValue === undefined ? null : Number(rawValue)
+    return role === 'slider' || Number.isInteger(value)
+  }) || null
+}
+
+function webGptStrengthFromSlider(slider) {
+  if (!slider) return null
+  const valueText = slider.getAttribute?.('aria-valuetext')
+  const labeled = canonicalWebGptStrength(valueText) || canonicalWebGptStrength(elementLabel(slider))
+  if (labeled) return labeled
+  const index = Number(slider.getAttribute?.('aria-valuenow'))
+  for (const [strength, targetIndex] of WEBGPT_STRENGTH_INDEX) {
+    if (index === targetIndex) return strength
+  }
+  return null
+}
+
+async function driveWebGptStrengthSlider(slider, wanted) {
+  const targetIndex = WEBGPT_STRENGTH_INDEX.get(wanted)
+  let currentIndex = Number(slider?.getAttribute?.('aria-valuenow'))
+  if (!Number.isInteger(targetIndex) || !Number.isInteger(currentIndex)) return false
+  if (currentIndex === targetIndex) return true
+  if (typeof KeyboardEvent !== 'function' || typeof slider?.dispatchEvent !== 'function') return false
+
+  slider.focus?.()
+  const key = targetIndex < currentIndex ? 'ArrowLeft' : 'ArrowRight'
+  for (let step = 0; step < Math.abs(targetIndex - currentIndex); step += 1) {
+    slider.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key, code: key }))
+    slider.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key, code: key }))
+    await sleep(100)
+  }
+  currentIndex = Number(slider.getAttribute?.('aria-valuenow'))
+  return currentIndex === targetIndex
+}
+
 function openWebGptStrengthControl(control) {
   if (typeof PointerEvent === 'function' && typeof control?.dispatchEvent === 'function') {
     control.dispatchEvent(new PointerEvent('pointerdown', {
@@ -226,20 +271,30 @@ async function runWebGptShiftTest(target) {
   openWebGptStrengthControl(control)
 
   let option = null
+  let slider = null
   for (let attempt = 0; attempt < 20; attempt += 1) {
     option = findWebGptStrengthOption(wanted, control)
     if (option) break
+    slider = findWebGptStrengthSlider(control)
+    if (slider) break
     await sleep(100)
   }
-  if (!option) {
+  if (option) {
+    option.click()
+  } else if (slider) {
+    const moved = await driveWebGptStrengthSlider(slider, wanted)
+    if (!moved) {
+      const index = slider.getAttribute?.('aria-valuenow')
+      throw new Error(`WebGPT capability slider did not reach ${wanted}; index=${index ?? 'unknown'}`)
+    }
+  } else {
     const candidates = webGptStrengthOptionDiagnostics(control)
     throw new Error(`WebGPT thinking option was not found: ${wanted}; candidates=${JSON.stringify(candidates)}`)
   }
-  option.click()
 
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const afterControl = findWebGptStrengthControl()
-    const after = afterControl ? (webGptStrengthFromNode(afterControl) || elementLabel(afterControl)) : null
+    const after = webGptStrengthFromSlider(slider) || (afterControl ? (webGptStrengthFromNode(afterControl) || elementLabel(afterControl)) : null)
     if (after === wanted) return { switched: true, before, after }
     await sleep(100)
   }

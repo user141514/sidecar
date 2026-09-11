@@ -404,6 +404,88 @@ test('webgpt shift probe opens Radix strength menu on pointerdown when click is 
   assert.equal(document.title, 'WEBGPT_SHIFT_OK|Extra High|High')
 })
 
+test('webgpt shift probe drives the capability slider by index and leaves the fifth position untouched', async () => {
+  let pickerOpen = false
+  let index = 4
+  const labels = { 1: '即时', 2: '中等', 3: '高', 4: '极高', 5: 'Pro' }
+  class FakePointerEvent {
+    constructor(type, init = {}) { this.type = type; Object.assign(this, init) }
+  }
+  class FakeKeyboardEvent {
+    constructor(type, init = {}) { this.type = type; Object.assign(this, init) }
+  }
+  const slider = {
+    disabled: false,
+    get textContent() { return `${labels[index]}，第 ${index} 项，共 5 项。使用左右箭头键调整能力。` },
+    getAttribute(name) {
+      if (name === 'role') return 'slider'
+      if (name === 'aria-valuenow') return String(index)
+      if (name === 'aria-valuemin') return '1'
+      if (name === 'aria-valuemax') return '5'
+      if (name === 'aria-valuetext') return labels[index]
+      return null
+    },
+    dispatchEvent(event) {
+      if (event.type === 'keydown' && event.key === 'ArrowLeft' && index > 1) index -= 1
+      if (event.type === 'keydown' && event.key === 'ArrowRight' && index < 5) index += 1
+      return true
+    },
+    focus() {}
+  }
+  const popup = { querySelectorAll() { return pickerOpen ? [slider] : [] } }
+  const pickerButton = {
+    disabled: false,
+    get textContent() { return labels[index] },
+    getAttribute(name) {
+      if (name === 'aria-label') return labels[index]
+      if (name === 'aria-controls') return 'strength-popup'
+      return null
+    },
+    dispatchEvent(event) { if (event.type === 'pointerdown') pickerOpen = true; return true },
+    click() {}
+  }
+  const document = {
+    title: 'ChatGPT',
+    getElementById(id) { return id === 'strength-popup' ? popup : null },
+    querySelector() { return null },
+    querySelectorAll(selector) {
+      if (selector === 'button') return [pickerButton]
+      if (selector.includes('[role="menuitem"]') || selector.includes('[role="option"]')) return []
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      if (selector === '[data-message-author-role="user"]') return []
+      return []
+    },
+    execCommand() { return true }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/c/profile-test#webgpt-shift-test=High', hash: '#webgpt-shift-test=High' },
+    chrome: { runtime: { sendMessage: async () => null, onMessage: { addListener() {}, removeListener() {} } } },
+    HTMLTextAreaElement: class {},
+    HTMLInputElement: class {},
+    InputEvent: class {},
+    PointerEvent: FakePointerEvent,
+    KeyboardEvent: FakeKeyboardEvent,
+    Date,
+    Promise,
+    Object,
+    URL,
+    console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+  for (let attempt = 0; attempt < 8 && !document.title.startsWith('WEBGPT_SHIFT_'); attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  assert.equal(index, 3)
+  assert.equal(document.title, 'WEBGPT_SHIFT_OK|Extra High|High')
+})
+
 test('project_find returns the canonical Project URL from the current sidebar without clicking', async () => {
   let runtimeListener = null
   const links = [
