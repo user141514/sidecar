@@ -734,12 +734,19 @@ async function webGptStrengthDomDiagnostic(tabId) {
 
 async function webGptShiftTest(params) {
   if (typeof params.target !== 'string' || !params.target.trim()) throw new Error('WebGPT shift target is required')
-  const stored = await chrome.storage.local.get(WINDOW0_KEY)
+  const stored = await chrome.storage.local.get(null)
   const window0 = stored[WINDOW0_KEY]
   if (!Number.isInteger(window0?.windowId)) throw new Error('No existing Sidecar window is registered')
   const tabs = await chrome.tabs.query({ windowId: window0.windowId })
   const candidates = tabs.filter((tab) => Boolean(chatGptPageUrl(tabPageUrl(tab))))
-  const tab = candidates.find((candidate) => candidate.active) || candidates[0]
+  const managedTabIds = new Set(
+    Object.entries(stored)
+      .filter(([key, binding]) => key.startsWith(STORAGE_PREFIX) && Number.isInteger(binding?.tabId))
+      .map(([, binding]) => binding.tabId)
+  )
+  const managedCandidates = candidates.filter((candidate) => managedTabIds.has(candidate.id))
+  const eligible = managedCandidates.length ? managedCandidates : candidates
+  const tab = eligible.find((candidate) => candidate.active) || eligible[0]
   if (!tab || !Number.isInteger(tab.id)) throw new Error('No existing ChatGPT tab was found')
   let result
   try {

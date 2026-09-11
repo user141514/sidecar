@@ -583,6 +583,29 @@ test('webgpt shift probe reuses an existing ChatGPT tab without creating a tab',
   )
 })
 
+test('webgpt shift probe prefers a managed ChatGPT tab over an active unmanaged tab', async () => {
+  const managedUrl = 'https://chatgpt.com/g/g-p-project/project'
+  const unmanagedUrl = 'https://chatgpt.com/c/unmanaged-active'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_managed': { windowId: 10, tabId: 20, url: managedUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [
+      { id: 20, windowId: 10, url: managedUrl, active: false },
+      { id: 21, windowId: 10, url: unmanagedUrl, active: true }
+    ]
+  })
+
+  const response = await harness.request('webgpt_shift_test', { target: 'High' })
+
+  assert.equal(response.ok, true)
+  const shiftCalls = harness.sentToTabs.filter(({ message }) => message.type === 'webgpt_shift_test')
+  assert.equal(shiftCalls.length, 1)
+  assert.equal(shiftCalls[0].tabId, 20)
+})
+
 test('webgpt shift probe bounds a missing content-script response', async () => {
   const externalUrl = 'https://chatgpt.com/c/profile-test'
   const harness = makeHarness({
