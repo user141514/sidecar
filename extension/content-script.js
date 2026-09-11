@@ -178,12 +178,34 @@ function webGptStrengthFromNode(node) {
   return canonicalWebGptStrength(elementLabel(node))
 }
 
+function webGptStrengthControlCandidates() {
+  const seen = new Set()
+  const out = []
+  for (const selector of ['button', '[role="button"]', '[aria-haspopup]', '[aria-controls]']) {
+    for (const node of document.querySelectorAll(selector)) {
+      if (seen.has(node)) continue
+      seen.add(node)
+      out.push(node)
+    }
+  }
+  return out
+}
+
 function findWebGptStrengthControl() {
-  return [...document.querySelectorAll('button')].find((button) => {
-    if (button.disabled) return false
-    const label = elementLabel(button).toLowerCase()
-    return label.includes('thinking') || label.includes('reasoning') || Boolean(webGptStrengthFromNode(button))
+  return webGptStrengthControlCandidates().find((control) => {
+    if (control.disabled) return false
+    const label = elementLabel(control).toLowerCase()
+    return label.includes('thinking') || label.includes('reasoning') || Boolean(webGptStrengthFromNode(control))
   }) || null
+}
+
+async function waitForWebGptStrengthControl() {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const control = findWebGptStrengthControl()
+    if (control) return control
+    await sleep(100)
+  }
+  return null
 }
 
 function webGptStrengthOptionCandidates(control) {
@@ -265,8 +287,14 @@ async function runWebGptShiftTest(target) {
   if (typeof target !== 'string' || !target.trim()) throw new Error('WebGPT shift target is required')
   const wanted = canonicalWebGptStrength(target)
   if (!wanted) throw new Error(`Unsupported WebGPT shift target: ${target}`)
-  const control = findWebGptStrengthControl()
-  if (!control) throw new Error('WebGPT thinking control was not found')
+  const control = await waitForWebGptStrengthControl()
+  if (!control) {
+    const candidates = webGptStrengthControlCandidates()
+      .map(elementLabel)
+      .filter((label) => label && label.length <= 40)
+      .slice(-20)
+    throw new Error(`WebGPT thinking control was not found; candidates=${JSON.stringify(candidates)}`)
+  }
   const before = webGptStrengthFromNode(control) || elementLabel(control)
   openWebGptStrengthControl(control)
 
