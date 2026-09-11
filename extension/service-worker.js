@@ -691,7 +691,6 @@ async function webGptStrengthDomDiagnostic(tabId) {
       target: { tabId },
       world: 'MAIN',
       func: () => {
-        const canonicalLabels = new Set(['extra high', '极高', 'instant', '即时', 'medium', '中', '中等', 'high', '高'])
         const labelOf = (node) => (
           node?.getAttribute?.('aria-label') ||
           node?.getAttribute?.('title') ||
@@ -709,13 +708,15 @@ async function webGptStrengthDomDiagnostic(tabId) {
             .sort()
         }
         return [...document.querySelectorAll('.__composer-pill')]
-          .filter((node) => canonicalLabels.has(labelOf(node).toLowerCase()))
-          .slice(0, 4)
+          .slice(0, 12)
           .map((node) => ({
             tagName: node.tagName,
             id: node.id || null,
             className: typeof node.className === 'string' ? node.className : null,
             text: labelOf(node),
+            ariaLabel: node.getAttribute?.('aria-label') || null,
+            title: node.getAttribute?.('title') || null,
+            textContent: (node.textContent || '').trim(),
             attributes: Object.fromEntries([...node.attributes].map((attribute) => [attribute.name, attribute.value])),
             handlers: handlersOf(node),
             parent: node.parentElement ? {
