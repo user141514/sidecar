@@ -24,6 +24,7 @@ test('full runtime artifact contains scheduler and memory while remaining indepe
     'src/work-controller.mjs',
     'src/work-cli.mjs',
     'src/memory-pool.mjs',
+    'src/memory-sync-bridge.mjs',
     'src/chatgpt.mjs',
     'extension/manifest.json',
     'install/platform-link.mjs',
@@ -44,6 +45,7 @@ test('full runtime artifact contains scheduler and memory while remaining indepe
   assert.match(provenance.sourceContentHash, /^[0-9a-f]{64}$/)
   assert.match(provenance.fileHashes['src/work-controller.mjs'], /^[0-9a-f]{64}$/)
   assert.match(provenance.fileHashes['src/memory-pool.mjs'], /^[0-9a-f]{64}$/)
+  assert.match(provenance.fileHashes['src/memory-sync-bridge.mjs'], /^[0-9a-f]{64}$/)
 
   const verified = await verifier.verifyRuntime(output)
   assert.equal(verified.verified, true)

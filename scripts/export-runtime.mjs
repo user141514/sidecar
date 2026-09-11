@@ -17,11 +17,13 @@ export const runtimeFiles = [...new Set([
   'src/work-controller.mjs',
   'src/work-cli.mjs',
   'src/memory-pool.mjs',
+  'src/memory-sync-bridge.mjs',
   'scripts/verify-runtime.mjs',
   'test/work-ledger.test.mjs',
   'test/work-controller.test.mjs',
   'test/work-cli.test.mjs',
   'test/memory-pool.test.mjs',
+  'test/memory-sync-bridge.test.mjs',
   'test/server.test.mjs'
 ])]
 
