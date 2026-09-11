@@ -556,13 +556,17 @@ test('webgpt shift probe waits for a semantic strength control rendered as role 
 test('webgpt shift probe accepts a localized class-only composer pill as the strength control', async () => {
   let pickerOpen = false
   let selected = '极高'
+  let pointerDowns = 0
   const pickerButton = {
     disabled: false,
+    className: '__composer-pill __composer-pill--neutral group/pill',
     get textContent() { return selected },
     getAttribute(name) {
       if (name === 'aria-label') return selected
+      if (name === 'class') return this.className
       return null
     },
+    dispatchEvent() { pointerDowns += 1; return true },
     click() { pickerOpen = true }
   }
   const high = {
@@ -597,6 +601,7 @@ test('webgpt shift probe accepts a localized class-only composer pill as the str
     HTMLTextAreaElement: class {},
     HTMLInputElement: class {},
     InputEvent: class {},
+    PointerEvent: class {},
     Date,
     Promise,
     Object,
@@ -613,6 +618,7 @@ test('webgpt shift probe accepts a localized class-only composer pill as the str
   }
 
   assert.equal(document.title, 'WEBGPT_SHIFT_OK|Extra High|High')
+  assert.equal(pointerDowns, 0)
 })
 
 test('project_find returns the canonical Project URL from the current sidebar without clicking', async () => {

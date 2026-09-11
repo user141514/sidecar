@@ -271,6 +271,13 @@ async function driveWebGptStrengthSlider(slider, wanted) {
 }
 
 function openWebGptStrengthControl(control) {
+  const className = typeof control?.className === 'string'
+    ? control.className
+    : control?.getAttribute?.('class') || ''
+  if (className.includes('__composer-pill')) {
+    control.click()
+    return
+  }
   if (typeof PointerEvent === 'function' && typeof control?.dispatchEvent === 'function') {
     control.dispatchEvent(new PointerEvent('pointerdown', {
       bubbles: true,
