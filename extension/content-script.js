@@ -150,6 +150,54 @@ async function selectAppForMessage(appName) {
   throw new Error(`ChatGPT app was not found in the tools menu: ${appName}`)
 }
 
+const WEBGPT_STRENGTHS = ['Extra High', 'Instant', 'Medium', 'High']
+
+function webGptStrengthFromNode(node) {
+  const label = elementLabel(node).toLowerCase()
+  return WEBGPT_STRENGTHS.find((strength) => {
+    const target = strength.toLowerCase()
+    return label === target || label.endsWith(` ${target}`)
+  }) || null
+}
+
+function findWebGptStrengthControl() {
+  return [...document.querySelectorAll('button')].find((button) => {
+    if (button.disabled) return false
+    const label = elementLabel(button).toLowerCase()
+    return label.includes('thinking') || label.includes('reasoning') || Boolean(webGptStrengthFromNode(button))
+  }) || null
+}
+
+function findWebGptStrengthOption(target) {
+  const wanted = target.trim().toLowerCase()
+  return appMenuCandidates().find((node) => !node.disabled && elementLabel(node).toLowerCase() === wanted) || null
+}
+
+async function runWebGptShiftTest(target) {
+  if (typeof target !== 'string' || !target.trim()) throw new Error('WebGPT shift target is required')
+  const control = findWebGptStrengthControl()
+  if (!control) throw new Error('WebGPT thinking control was not found')
+  const before = webGptStrengthFromNode(control) || elementLabel(control)
+  control.click()
+
+  let option = null
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    option = findWebGptStrengthOption(target)
+    if (option) break
+    await sleep(100)
+  }
+  if (!option) throw new Error(`WebGPT thinking option was not found: ${target}`)
+  option.click()
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const afterControl = findWebGptStrengthControl()
+    const after = afterControl ? (webGptStrengthFromNode(afterControl) || elementLabel(afterControl)) : null
+    if (after?.toLowerCase() === target.trim().toLowerCase()) return { switched: true, before, after }
+    await sleep(100)
+  }
+  throw new Error(`WebGPT thinking control did not read back target: ${target}`)
+}
+
 function controlLabel(node) {
   return (node?.getAttribute?.('aria-label') || node?.textContent || '').trim().toLowerCase()
 }
@@ -512,6 +560,16 @@ function onSidecarMessage(message, _sender, sendResponse) {
     return
   }
 
+  if (message?.type === 'webgpt_shift_test') {
+    void runWebGptShiftTest(message.target)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({
+        switched: false,
+        error: error instanceof Error ? error.message : String(error)
+      }))
+    return true
+  }
+
   if (message?.type === 'project_find') {
     void handleProjectFind(message)
       .then((result) => sendResponse(result))
@@ -579,6 +637,16 @@ function onSidecarMessage(message, _sender, sendResponse) {
   return
 }
 
+function runHashShiftProbe() {
+  const prefix = '#webgpt-shift-test='
+  if (typeof location.hash !== 'string' || !location.hash.startsWith(prefix)) return
+  const target = decodeURIComponent(location.hash.slice(prefix.length))
+  void runWebGptShiftTest(target)
+    .then((result) => { document.title = `WEBGPT_SHIFT_OK|${result.before}|${result.after}` })
+    .catch((error) => { document.title = `WEBGPT_SHIFT_ERROR|${error instanceof Error ? error.message : String(error)}` })
+}
+
 chrome.runtime.onMessage.addListener(onSidecarMessage)
 void resumePendingTurn()
+runHashShiftProbe()
 })()

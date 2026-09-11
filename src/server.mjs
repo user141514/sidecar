@@ -14,6 +14,16 @@ import { MemorySyncBridge } from './memory-sync-bridge.mjs'
 
 const TOOLS = [
   ...EXTENSION_TOOLS,
+  {
+    name: 'webgpt_shift_test',
+    description: 'Temporary probe: switch the thinking strength on an existing ChatGPT tab and read the selected value back.',
+    inputSchema: {
+      type: 'object',
+      properties: { target: { type: 'string' } },
+      required: ['target'],
+      additionalProperties: false
+    }
+  },
   ...CONVERSATION_TOOLS,
   {
     name: 'work_create',
@@ -333,6 +343,10 @@ async function completeWorkWithMemory(workLedger, memoryPool, workId, payload) {
 async function dispatchTool(conversationHost, workLedger, workController, memoryPool, name, args = {}) {
   if (name === 'extension_status' || name === 'extension_reload') {
     return dispatchExtensionTool(conversationHost.bridge, name, args)
+  }
+  if (name === 'webgpt_shift_test') {
+    if (typeof args.target !== 'string' || !args.target.trim()) throw new TypeError('webgpt_shift_test requires target')
+    return conversationHost.shiftTest(args.target)
   }
   if (CONVERSATION_TOOLS.some((tool) => tool.name === name)) {
     return dispatchConversationTool(conversationHost, name, args)

@@ -107,6 +107,59 @@ test('conversation_prepare selects a requested ChatGPT app before writing prompt
   )
 })
 
+test('webgpt shift probe switches High to Extra High on the current page and reads it back', async () => {
+  let pickerOpen = false
+  let selected = 'High'
+  const pickerButton = {
+    disabled: false,
+    get textContent() { return selected },
+    getAttribute(name) { return name === 'aria-label' ? `Thinking ${selected}` : null },
+    click() { pickerOpen = true }
+  }
+  const extraHigh = {
+    disabled: false,
+    textContent: 'Extra High',
+    getAttribute(name) { return name === 'aria-label' ? 'Extra High' : null },
+    click() { selected = 'Extra High'; pickerOpen = false }
+  }
+  const document = {
+    title: 'ChatGPT',
+    querySelector() { return null },
+    querySelectorAll(selector) {
+      if (selector === 'button') return pickerOpen ? [pickerButton, extraHigh] : [pickerButton]
+      if (selector.includes('[role="menuitem"]') || selector.includes('[role="option"]')) return pickerOpen ? [extraHigh] : []
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      if (selector === '[data-message-author-role="user"]') return []
+      return []
+    },
+    execCommand() { return true }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/c/profile-test#webgpt-shift-test=Extra%20High', hash: '#webgpt-shift-test=Extra%20High' },
+    chrome: { runtime: { sendMessage: async () => null, onMessage: { addListener() {}, removeListener() {} } } },
+    HTMLTextAreaElement: class {},
+    HTMLInputElement: class {},
+    InputEvent: class {},
+    Date,
+    Promise,
+    Object,
+    URL,
+    console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+  for (let attempt = 0; attempt < 8 && !document.title.startsWith('WEBGPT_SHIFT_'); attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  assert.equal(document.title, 'WEBGPT_SHIFT_OK|High|Extra High')
+})
+
 test('project_find returns the canonical Project URL from the current sidebar without clicking', async () => {
   let runtimeListener = null
   const links = [

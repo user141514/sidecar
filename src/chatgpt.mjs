@@ -61,6 +61,11 @@ export class ChatGptConversationHost {
     return { projectUrl: normalized }
   }
 
+  async shiftTest(target) {
+    if (typeof target !== 'string' || !target.trim()) throw new Error('WebGPT shift target is required')
+    return this.bridge.request('webgpt_shift_test', { target: target.trim() })
+  }
+
   async create({ projectUrl } = {}) {
     const pinnedProjectUrl = projectUrl ? null : await this.store.getDefaultProjectUrl()
     const createUrl = normalizeProjectHomeUrl(projectUrl || pinnedProjectUrl) || DEFAULT_CHATGPT_URL

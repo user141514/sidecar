@@ -684,6 +684,20 @@ async function performSend(params, operation) {
   }
 }
 
+async function webGptShiftTest(params) {
+  if (typeof params.target !== 'string' || !params.target.trim()) throw new Error('WebGPT shift target is required')
+  const stored = await chrome.storage.local.get(WINDOW0_KEY)
+  const window0 = stored[WINDOW0_KEY]
+  if (!Number.isInteger(window0?.windowId)) throw new Error('No existing Sidecar window is registered')
+  const tabs = await chrome.tabs.query({ windowId: window0.windowId })
+  const candidates = tabs.filter((tab) => Boolean(chatGptPageUrl(tabPageUrl(tab))))
+  const tab = candidates.find((candidate) => candidate.active) || candidates[0]
+  if (!tab || !Number.isInteger(tab.id)) throw new Error('No existing ChatGPT tab was found')
+  const result = await chrome.tabs.sendMessage(tab.id, { type: 'webgpt_shift_test', target: params.target })
+  if (result?.switched !== true) throw new Error(result?.error || 'WebGPT shift probe failed')
+  return { ...result, tabId: tab.id, url: tabPageUrl(tab) }
+}
+
 async function reconcileClosedPreSubmitTurns() {
   // Run once before accepting sends. A missing tab cannot continue prepare,
   // and these durable phases prove the worker never issued submit.
@@ -719,6 +733,7 @@ async function executeRequest(message) {
     return { ...await extensionLifecycle.status(), operations: [...activeSends.values()], managedTabs }
   }
   if (message.method === 'extension_reload') return extensionLifecycle.requestReload(message.params)
+  if (message.method === 'webgpt_shift_test') return webGptShiftTest(message.params ?? {})
   if (message.method === 'project_find') return findProject(message.params ?? {})
   if (message.method === 'project_create') return extensionLifecycle.runMutation(() => createProject(message.params ?? {}))
   if (message.method === 'conversation_create') return extensionLifecycle.runMutation(() => createConversation(message.params ?? {}))

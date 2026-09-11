@@ -94,9 +94,26 @@ class FakeBridge extends EventEmitter {
     if (method === 'conversation_send') {
       return { accepted: true, url: params.externalUrl || 'https://chatgpt.com/' }
     }
+    if (method === 'webgpt_shift_test') {
+      return { switched: true, before: 'High', after: params.target }
+    }
     throw new Error(`unexpected method ${method}`)
   }
 }
+
+test('webgpt shift probe forwards the target to the browser bridge', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const host = new ChatGptConversationHost({ bridge, store: new MemoryStore() })
+  const result = await host.shiftTest('Extra High')
+
+  assert.equal(result.after, 'Extra High')
+  assert.equal(bridge.requests[0].method, 'webgpt_shift_test')
+  assert.equal(bridge.requests[0].params.target, 'Extra High')
+})
 
 test('project_find returns a canonical current-page Project URL without changing the pinned default', async () => {
   const { ChatGptConversationHost } = await loadChatGptModule()

@@ -113,6 +113,11 @@ class FakeHost {
     }
   }
 
+  async shiftTest(target) {
+    this.shiftTarget = target
+    return { switched: true, before: 'High', after: target }
+  }
+
   async create(options = {}) {
     this.createCalls.push(options)
     return {
@@ -188,7 +193,7 @@ test('server exposes health, project pinning, and the three conversation tools',
     const listed = await rpc(baseUrl, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
     assert.deepEqual(
       listed.body.result.tools.map((tool) => tool.name),
-      ['extension_status', 'extension_reload', 'project_create', 'project_find', 'project_pin', 'conversation_create', 'conversation_send', 'conversation_read', 'work_create', 'work_append', 'work_read', 'work_state', 'work_decide', 'work_checkpoint', 'work_dispatch', 'work_collect', 'work_memory_publish', 'work_memory_query', 'work_memory_read']
+      ['extension_status', 'extension_reload', 'webgpt_shift_test', 'project_create', 'project_find', 'project_pin', 'conversation_create', 'conversation_send', 'conversation_read', 'work_create', 'work_append', 'work_read', 'work_state', 'work_decide', 'work_checkpoint', 'work_dispatch', 'work_collect', 'work_memory_publish', 'work_memory_query', 'work_memory_read']
     )
     const conversationSend = listed.body.result.tools.find((tool) => tool.name === 'conversation_send')
     assert.equal(conversationSend.inputSchema.properties.app.type, 'string')
@@ -597,6 +602,14 @@ test('tools/call dispatches create, send, and read to the conversation host', as
   const address = await app.listen({ host: '127.0.0.1', port: 0 })
   const baseUrl = `http://127.0.0.1:${address.port}`
   try {
+    const shifted = await rpc(baseUrl, {
+      jsonrpc: '2.0', id: 7, method: 'tools/call', params: {
+        name: 'webgpt_shift_test', arguments: { target: 'Extra High' }
+      }
+    })
+    assert.equal(JSON.parse(shifted.body.result.content[0].text).after, 'Extra High')
+    assert.equal(host.shiftTarget, 'Extra High')
+
     const projectCreated = await rpc(baseUrl, {
       jsonrpc: '2.0', id: 8, method: 'tools/call', params: {
         name: 'project_create',

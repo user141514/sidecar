@@ -198,6 +198,9 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         if (message.type === 'conversation_send') {
           return { accepted: true, url: tab.url, baselineAssistantCount: 0 }
         }
+        if (message.type === 'webgpt_shift_test') {
+          return { switched: true, before: 'High', after: message.target }
+        }
         if (message.type === 'conversation_monitor_start') return { started: true }
         throw new Error(`Unexpected tab message ${message.type}`)
       }
@@ -549,6 +552,25 @@ test('send preserves recoverable pending state when submit response is lost duri
   assert.match(response.error, /submit response lost/)
   assert.equal(harness.storageState['pending:conv_existing']?.turnId, 'turn_submit_race')
   assert.equal(harness.storageState['pending:conv_existing']?.phase, 'submitting')
+})
+
+test('webgpt shift probe reuses an existing ChatGPT tab without creating a tab', async () => {
+  const externalUrl = 'https://chatgpt.com/c/profile-test'
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl, active: true }]
+  })
+
+  const response = await harness.request('webgpt_shift_test', { target: 'Extra High' })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.after, 'Extra High')
+  assert.equal(harness.createdTabs.length, 0)
+  assert.equal(
+    harness.sentToTabs.some(({ tabId, message }) => tabId === 20 && message.type === 'webgpt_shift_test'),
+    true
+  )
 })
 
 test('send reloads a matching tab whose content script was invalidated by extension reload', async () => {
