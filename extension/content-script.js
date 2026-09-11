@@ -186,6 +186,15 @@ function findWebGptStrengthOption(target) {
   return appMenuCandidates().find((node) => !node.disabled && webGptStrengthFromNode(node) === wanted) || null
 }
 
+function webGptStrengthOptionDiagnostics() {
+  return [...document.querySelectorAll(
+    '[role="menuitem"], [role="option"], [role="menuitemradio"], [data-radix-collection-item]'
+  )]
+    .map(elementLabel)
+    .filter((label) => label && label.length <= 40)
+    .slice(-20)
+}
+
 async function runWebGptShiftTest(target) {
   if (typeof target !== 'string' || !target.trim()) throw new Error('WebGPT shift target is required')
   const wanted = canonicalWebGptStrength(target)
@@ -201,7 +210,10 @@ async function runWebGptShiftTest(target) {
     if (option) break
     await sleep(100)
   }
-  if (!option) throw new Error(`WebGPT thinking option was not found: ${wanted}`)
+  if (!option) {
+    const candidates = webGptStrengthOptionDiagnostics()
+    throw new Error(`WebGPT thinking option was not found: ${wanted}; candidates=${JSON.stringify(candidates)}`)
+  }
   option.click()
 
   for (let attempt = 0; attempt < 20; attempt += 1) {

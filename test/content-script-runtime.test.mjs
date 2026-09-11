@@ -213,6 +213,64 @@ test('webgpt shift probe canonicalizes Chinese strength labels and switches Extr
   assert.equal(document.title, 'WEBGPT_SHIFT_OK|Extra High|Medium')
 })
 
+test('webgpt shift probe reports bounded menu labels when the requested strength option is absent', async () => {
+  let pickerOpen = false
+  const pickerButton = {
+    disabled: false,
+    textContent: '极高',
+    getAttribute(name) { return name === 'aria-label' ? '极高' : null },
+    click() { pickerOpen = true }
+  }
+  const unknownOption = {
+    disabled: false,
+    textContent: '标准',
+    getAttribute(name) {
+      if (name === 'aria-label') return '标准'
+      if (name === 'role') return 'menuitemradio'
+      return null
+    }
+  }
+  const document = {
+    title: 'ChatGPT',
+    querySelector() { return null },
+    querySelectorAll(selector) {
+      if (selector === 'button') return [pickerButton]
+      if (selector.includes('[role="menuitem"]') || selector.includes('[role="option"]')) return pickerOpen ? [unknownOption] : []
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      if (selector === '[data-message-author-role="user"]') return []
+      return []
+    },
+    execCommand() { return true }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/c/profile-test#webgpt-shift-test=High', hash: '#webgpt-shift-test=High' },
+    chrome: { runtime: { sendMessage: async () => null, onMessage: { addListener() {}, removeListener() {} } } },
+    HTMLTextAreaElement: class {},
+    HTMLInputElement: class {},
+    InputEvent: class {},
+    Date,
+    Promise,
+    Object,
+    URL,
+    console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+  for (let attempt = 0; attempt < 8 && !document.title.startsWith('WEBGPT_SHIFT_'); attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  assert.equal(
+    document.title,
+    'WEBGPT_SHIFT_ERROR|WebGPT thinking option was not found: High; candidates=["标准"]'
+  )
+})
+
 test('project_find returns the canonical Project URL from the current sidebar without clicking', async () => {
   let runtimeListener = null
   const links = [
