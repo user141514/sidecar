@@ -697,15 +697,32 @@ async function webGptStrengthDomDiagnostic(tabId) {
           node?.textContent ||
           ''
         ).trim()
-        const handlersOf = (node) => {
-          if (!node) return []
+        const reactPropsOf = (node) => {
+          if (!node) return null
           const propsKey = Object.keys(node).find((key) => key.startsWith('__reactProps$'))
           const props = propsKey ? node[propsKey] : null
-          if (!props || typeof props !== 'object') return []
+          return props && typeof props === 'object' ? props : null
+        }
+        const handlersOf = (node) => {
+          const props = reactPropsOf(node)
+          if (!props) return []
           return Object.entries(props)
             .filter(([key, value]) => /^on[A-Z]/.test(key) && typeof value === 'function')
             .map(([key]) => key)
             .sort()
+        }
+        const handlerSourcesOf = (node) => {
+          const props = reactPropsOf(node)
+          if (!props) return {}
+          return Object.fromEntries(
+            Object.entries(props)
+              .filter(([key, value]) => /^on[A-Z]/.test(key) && typeof value === 'function')
+              .map(([key, value]) => [key, String(value).slice(0, 800)])
+          )
+        }
+        const rectOf = (node) => {
+          const rect = node?.getBoundingClientRect?.()
+          return rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null
         }
         return [...document.querySelectorAll('.__composer-pill')]
           .slice(0, 12)
@@ -723,7 +740,9 @@ async function webGptStrengthDomDiagnostic(tabId) {
                 ariaValueText: item.getAttribute?.('aria-valuetext') || null,
                 dataState: item.getAttribute?.('data-state') || null,
                 className: typeof item.className === 'string' ? item.className : null,
-                handlers: handlersOf(item)
+                handlers: handlersOf(item),
+                handlerSources: handlerSourcesOf(item),
+                rect: rectOf(item)
               }))
               : []
             return {
@@ -736,6 +755,8 @@ async function webGptStrengthDomDiagnostic(tabId) {
               textContent: (node.textContent || '').trim(),
               attributes: Object.fromEntries([...node.attributes].map((attribute) => [attribute.name, attribute.value])),
               handlers: handlersOf(node),
+              handlerSources: handlerSourcesOf(node),
+              rect: rectOf(node),
               parent: node.parentElement ? {
                 tagName: node.parentElement.tagName,
                 className: typeof node.parentElement.className === 'string' ? node.parentElement.className : null,
