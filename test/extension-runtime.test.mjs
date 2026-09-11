@@ -33,7 +33,7 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
   assert.equal(harness.sentToTabs.length, 0)
 })
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -45,6 +45,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
   const createdTabs = []
   const createdWindows = []
   const reloadedTabs = []
+  const scriptingCalls = []
   let nativeRequestListener = null
   let nativeDisconnectListener = null
   let failNativeEventPosts = false
@@ -96,6 +97,12 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
       },
       onInstalled: { addListener() {} },
       onStartup: { addListener() {} }
+    },
+    scripting: {
+      async executeScript(options) {
+        scriptingCalls.push(options)
+        return [{ result: webGptDiagnostic }]
+      }
     },
     storage: {
       local: {
@@ -300,6 +307,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     createdTabs,
     createdWindows,
     reloadedTabs,
+    scriptingCalls,
     nativeMessages,
     request,
     emitRuntimeMessage,
@@ -582,13 +590,20 @@ test('webgpt shift probe bounds a missing content-script response', async () => 
     windows: [{ id: 10 }],
     tabs: [{ id: 20, windowId: 10, url: externalUrl, active: true }],
     hangWebGptShift: true,
-    fastWebGptShiftTimeout: true
+    fastWebGptShiftTimeout: true,
+    webGptDiagnostic: [{
+      tagName: 'DIV',
+      className: '__composer-pill',
+      handlers: ['onPointerDown', 'onKeyDown']
+    }]
   })
 
   const response = await harness.request('webgpt_shift_test', { target: 'High' })
 
   assert.equal(response.ok, false)
   assert.match(response.error, /Content script response timeout: webgpt_shift_test/)
+  assert.match(response.error, /onPointerDown/)
+  assert.equal(harness.scriptingCalls.length, 1)
 })
 
 test('send reloads a matching tab whose content script was invalidated by extension reload', async () => {

@@ -684,6 +684,54 @@ async function performSend(params, operation) {
   }
 }
 
+async function webGptStrengthDomDiagnostic(tabId) {
+  if (!chrome.scripting?.executeScript) return null
+  try {
+    const execution = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: () => {
+        const canonicalLabels = new Set(['extra high', '极高', 'instant', '即时', 'medium', '中', '中等', 'high', '高'])
+        const labelOf = (node) => (
+          node?.getAttribute?.('aria-label') ||
+          node?.getAttribute?.('title') ||
+          node?.textContent ||
+          ''
+        ).trim()
+        const handlersOf = (node) => {
+          if (!node) return []
+          const propsKey = Object.keys(node).find((key) => key.startsWith('__reactProps$'))
+          const props = propsKey ? node[propsKey] : null
+          if (!props || typeof props !== 'object') return []
+          return Object.entries(props)
+            .filter(([key, value]) => /^on[A-Z]/.test(key) && typeof value === 'function')
+            .map(([key]) => key)
+            .sort()
+        }
+        return [...document.querySelectorAll('.__composer-pill')]
+          .filter((node) => canonicalLabels.has(labelOf(node).toLowerCase()))
+          .slice(0, 4)
+          .map((node) => ({
+            tagName: node.tagName,
+            id: node.id || null,
+            className: typeof node.className === 'string' ? node.className : null,
+            text: labelOf(node),
+            attributes: Object.fromEntries([...node.attributes].map((attribute) => [attribute.name, attribute.value])),
+            handlers: handlersOf(node),
+            parent: node.parentElement ? {
+              tagName: node.parentElement.tagName,
+              className: typeof node.parentElement.className === 'string' ? node.parentElement.className : null,
+              handlers: handlersOf(node.parentElement)
+            } : null
+          }))
+      }
+    })
+    return execution?.[0]?.result ?? null
+  } catch (error) {
+    return [{ error: error instanceof Error ? error.message : String(error) }]
+  }
+}
+
 async function webGptShiftTest(params) {
   if (typeof params.target !== 'string' || !params.target.trim()) throw new Error('WebGPT shift target is required')
   const stored = await chrome.storage.local.get(WINDOW0_KEY)
@@ -693,7 +741,14 @@ async function webGptShiftTest(params) {
   const candidates = tabs.filter((tab) => Boolean(chatGptPageUrl(tabPageUrl(tab))))
   const tab = candidates.find((candidate) => candidate.active) || candidates[0]
   if (!tab || !Number.isInteger(tab.id)) throw new Error('No existing ChatGPT tab was found')
-  const result = await boundedMessage(tab.id, { type: 'webgpt_shift_test', target: params.target }, 10_000)
+  let result
+  try {
+    result = await boundedMessage(tab.id, { type: 'webgpt_shift_test', target: params.target }, 10_000)
+  } catch (error) {
+    const diagnostic = await webGptStrengthDomDiagnostic(tab.id)
+    const detail = diagnostic ? `; diagnostic=${JSON.stringify(diagnostic)}` : ''
+    throw new Error(`${error instanceof Error ? error.message : String(error)}${detail}`)
+  }
   if (result?.switched !== true) throw new Error(result?.error || 'WebGPT shift probe failed')
   return { ...result, tabId: tab.id, url: tabPageUrl(tab) }
 }
