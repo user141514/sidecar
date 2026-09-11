@@ -435,10 +435,10 @@ test('webgpt shift probe drives the capability slider by index and leaves the fi
   const popup = { querySelectorAll() { return pickerOpen ? [slider] : [] } }
   const pickerButton = {
     disabled: false,
-    get textContent() { return labels[index] },
+    get textContent() { return '思考强度' },
     getAttribute(name) {
-      if (name === 'aria-label') return labels[index]
       if (name === 'aria-controls') return 'strength-popup'
+      if (name === 'aria-haspopup') return 'menu'
       return null
     },
     dispatchEvent(event) { if (event.type === 'pointerdown') pickerOpen = true; return true },
@@ -483,7 +483,7 @@ test('webgpt shift probe drives the capability slider by index and leaves the fi
   }
 
   assert.equal(index, 3)
-  assert.equal(document.title, 'WEBGPT_SHIFT_OK|Extra High|High')
+  assert.equal(document.title, 'WEBGPT_SHIFT_OK|思考强度|High')
 })
 
 test('webgpt shift probe waits for a semantic strength control rendered as role button', async () => {

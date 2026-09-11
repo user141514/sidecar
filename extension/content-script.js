@@ -195,7 +195,11 @@ function findWebGptStrengthControl() {
   return webGptStrengthControlCandidates().find((control) => {
     if (control.disabled) return false
     const label = elementLabel(control).toLowerCase()
-    return label.includes('thinking') || label.includes('reasoning') || Boolean(webGptStrengthFromNode(control))
+    return label.includes('thinking') ||
+      label.includes('reasoning') ||
+      label.includes('思考强度') ||
+      label.includes('推理强度') ||
+      Boolean(webGptStrengthFromNode(control))
   }) || null
 }
 
