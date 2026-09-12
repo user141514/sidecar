@@ -153,7 +153,7 @@ async function selectAppForMessage(appName) {
 const WEBGPT_STRENGTH_ALIASES = [
   { strength: 'Extra High', aliases: ['extra high', '极高'] },
   { strength: 'Instant', aliases: ['instant', '即时'] },
-  { strength: 'Medium', aliases: ['medium', '中等'] },
+  { strength: 'Medium', aliases: ['medium', '中等', '中'] },
   { strength: 'High', aliases: ['high', '高'] }
 ]
 const WEBGPT_STRENGTH_OFFSET = new Map([

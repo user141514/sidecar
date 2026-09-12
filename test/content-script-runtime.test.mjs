@@ -213,6 +213,59 @@ test('webgpt shift probe canonicalizes Chinese strength labels and switches Extr
   assert.equal(document.title, 'WEBGPT_SHIFT_OK|Extra High|Medium')
 })
 
+test('webgpt shift probe recognizes compact Chinese Medium label used by current ChatGPT UI', async () => {
+  let pickerOpen = false
+  let selected = '中'
+  const pickerButton = {
+    disabled: false,
+    get textContent() { return selected },
+    getAttribute(name) { return name === 'aria-label' ? selected : null },
+    click() { pickerOpen = true }
+  }
+  const instant = {
+    disabled: false,
+    textContent: '即时',
+    getAttribute(name) { return name === 'aria-label' ? '即时' : null },
+    click() { selected = '即时'; pickerOpen = false }
+  }
+  const document = {
+    title: 'ChatGPT',
+    querySelector() { return null },
+    querySelectorAll(selector) {
+      if (selector === 'button') return pickerOpen ? [pickerButton, instant] : [pickerButton]
+      if (selector.includes('[role="menuitem"]') || selector.includes('[role="option"]')) return pickerOpen ? [instant] : []
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      if (selector === '[data-message-author-role="user"]') return []
+      return []
+    },
+    execCommand() { return true }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/c/profile-test#webgpt-shift-test=Instant', hash: '#webgpt-shift-test=Instant' },
+    chrome: { runtime: { sendMessage: async () => null, onMessage: { addListener() {}, removeListener() {} } } },
+    HTMLTextAreaElement: class {},
+    HTMLInputElement: class {},
+    InputEvent: class {},
+    Date,
+    Promise,
+    Object,
+    URL,
+    console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+  for (let attempt = 0; attempt < 8 && !document.title.startsWith('WEBGPT_SHIFT_'); attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  assert.equal(document.title, 'WEBGPT_SHIFT_OK|Medium|Instant')
+})
+
 test('webgpt shift probe reports bounded menu labels when the requested strength option is absent', async () => {
   let pickerOpen = false
   const pickerButton = {
