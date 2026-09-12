@@ -3,10 +3,20 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { join, win32 } from 'node:path'
 import { tmpdir } from 'node:os'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
 
 async function loadModule() {
   try { return await import('../install/runtime-user-install.mjs') } catch { return {} }
 }
+
+test('tracked Sidecar Skill uses the canonical conversation-workers identity', async () => {
+  const skill = await readFile(new URL('../skills/chatgpt-subagents/SKILL.md', import.meta.url), 'utf8')
+  assert.match(skill, /^---\s*[\s\S]*?^name:\s*conversation-workers\s*$/m)
+  assert.doesNotMatch(skill, /^name:\s*chatgpt-subagents\s*$/m)
+})
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'runtime-user-install-'))
@@ -82,7 +92,7 @@ test('Linux user install writes Runtime-Home shims and exact managed Skill idemp
   assert.equal(second.status, 'installed')
 })
 
-test('Windows user install emits cmd shims under roaming npm command directory', async (t) => {
+test('Windows user install emits POSIX and cmd shims under roaming npm command directory', async (t) => {
   const { installRuntimeUserEntrypoints } = await loadModule()
   assert.equal(typeof installRuntimeUserEntrypoints, 'function')
   if (typeof installRuntimeUserEntrypoints !== 'function') return
@@ -105,11 +115,78 @@ test('Windows user install emits cmd shims under roaming npm command directory',
     pathValue: mappedCommandDir
   })
 
-  const chat = await readFile(join(mappedCommandDir, 'chatgpt-conversation.cmd'), 'utf8')
-  assert.match(chat, /REM conversation-sidecar runtime shim/)
-  assert.match(chat, /C:\\Runtime Home\\bin\\chatgpt-conversation\.cmd/)
+  const chatPosix = await readFile(join(mappedCommandDir, 'chatgpt-conversation'), 'utf8')
+  const chatCmd = await readFile(join(mappedCommandDir, 'chatgpt-conversation.cmd'), 'utf8')
+  const workPosix = await readFile(join(mappedCommandDir, 'conversation-work'), 'utf8')
+  const workCmd = await readFile(join(mappedCommandDir, 'conversation-work.cmd'), 'utf8')
+  assert.match(chatPosix, /conversation-sidecar runtime shim/)
+  assert.match(chatPosix, /cygpath -u/)
+  assert.match(chatPosix, /C:\\Runtime Home\\bin\\chatgpt-conversation/)
+  assert.match(chatCmd, /REM conversation-sidecar runtime shim/)
+  assert.match(chatCmd, /C:\\Runtime Home\\bin\\chatgpt-conversation\.cmd/)
+  assert.match(workPosix, /C:\\Runtime Home\\bin\\conversation-work/)
+  assert.match(workCmd, /C:\\Runtime Home\\bin\\conversation-work\.cmd/)
+  assert.deepEqual(result.commands.map((path) => win32.basename(path)).sort(), [
+    'chatgpt-conversation',
+    'chatgpt-conversation.cmd',
+    'conversation-work',
+    'conversation-work.cmd'
+  ])
   assert.equal(await readFile(join(mappedSkillDir, 'SKILL.md'), 'utf8'), f.skill)
   assert.equal(result.pathReady, true)
+})
+
+test('Windows user install preflights an extensionless foreign shim before writing managed files', async (t) => {
+  const { installRuntimeUserEntrypoints } = await loadModule()
+  assert.equal(typeof installRuntimeUserEntrypoints, 'function')
+  if (typeof installRuntimeUserEntrypoints !== 'function') return
+  const f = await fixture(t)
+  const commandDir = join(f.root, 'windows-command-dir')
+  const skillDir = join(f.root, 'windows-skill-dir')
+  await mkdir(commandDir, { recursive: true })
+  await writeFile(join(commandDir, 'conversation-work'), '#!/usr/bin/env sh\necho foreign\n', 'utf8')
+
+  await assert.rejects(
+    installRuntimeUserEntrypoints({
+      runtimeHome: f.runtimeHome,
+      releaseDir: f.releaseDir,
+      platform: 'win32',
+      commandDir,
+      skillDir,
+      pathValue: commandDir
+    }),
+    (error) => error?.code === 'USER_ENTRYPOINT_CONFLICT'
+  )
+  await assert.rejects(readFile(join(commandDir, 'chatgpt-conversation.cmd'), 'utf8'), /ENOENT/)
+  await assert.rejects(readFile(join(skillDir, 'SKILL.md'), 'utf8'), /ENOENT/)
+})
+
+test('Windows Git Bash resolves the extensionless installed shim from PATH', { skip: process.platform !== 'win32' }, async (t) => {
+  const { installRuntimeUserEntrypoints } = await loadModule()
+  assert.equal(typeof installRuntimeUserEntrypoints, 'function')
+  if (typeof installRuntimeUserEntrypoints !== 'function') return
+  const f = await fixture(t)
+  const commandDir = join(f.root, 'windows-command-dir')
+  const skillDir = join(f.root, 'windows-skill-dir')
+  await writeFile(
+    join(f.runtimeHome, 'bin', 'chatgpt-conversation'),
+    '#!/usr/bin/env sh\nprintf "SIDECAR_GIT_BASH_OK:%s\\n" "$1"\n',
+    'utf8'
+  )
+  await installRuntimeUserEntrypoints({
+    runtimeHome: f.runtimeHome,
+    releaseDir: f.releaseDir,
+    platform: 'win32',
+    commandDir,
+    skillDir,
+    pathValue: commandDir
+  })
+  const commandDirPosix = (await execFileAsync('bash', ['-lc', `cygpath -u '${commandDir.replaceAll("'", "'\\''")}'`])).stdout.trim()
+  const { stdout } = await execFileAsync('bash', [
+    '-lc',
+    `PATH='${commandDirPosix.replaceAll("'", "'\\''")}'\":$PATH\" chatgpt-conversation probe`
+  ])
+  assert.match(stdout, /SIDECAR_GIT_BASH_OK:probe/)
 })
 
 test('user install refuses a foreign command before writing any managed files', async (t) => {
@@ -148,6 +225,25 @@ test('user install upgrades known legacy npm-link and checkout work wrappers', a
 
   assert.match(await readFile(join(commandDir, 'chatgpt-conversation'), 'utf8'), /conversation-sidecar runtime shim/)
   assert.match(await readFile(join(commandDir, 'conversation-work'), 'utf8'), /conversation-sidecar runtime shim/)
+})
+
+test('user install upgrades an older canonical conversation-workers Skill in place', async (t) => {
+  const { installRuntimeUserEntrypoints } = await loadModule()
+  assert.equal(typeof installRuntimeUserEntrypoints, 'function')
+  if (typeof installRuntimeUserEntrypoints !== 'function') return
+  const f = await fixture(t)
+  const home = join(f.root, 'home')
+  const skillDir = join(home, '.agents', 'skills', 'chatgpt-subagents')
+  const skillSource = join(f.releaseDir, 'skills', 'chatgpt-subagents', 'SKILL.md')
+  const v1 = '---\nname: conversation-workers\ndescription: managed runtime skill v1\n---\n\n# Runtime Skill\n'
+  const v2 = '---\nname: conversation-workers\ndescription: managed runtime skill v2\n---\n\n# Runtime Skill\n'
+  await writeFile(skillSource, v1, 'utf8')
+  await installRuntimeUserEntrypoints({ runtimeHome: f.runtimeHome, releaseDir: f.releaseDir, platform: 'linux', homeDirectory: home })
+  await writeFile(skillSource, v2, 'utf8')
+
+  await installRuntimeUserEntrypoints({ runtimeHome: f.runtimeHome, releaseDir: f.releaseDir, platform: 'linux', homeDirectory: home })
+
+  assert.equal(await readFile(join(skillDir, 'SKILL.md'), 'utf8'), v2)
 })
 
 test('dry-run reports a standard POSIX command directory as already on PATH', async (t) => {

@@ -271,7 +271,16 @@ test('WorkController dispatch creates managed workers inside the configured suba
 
   const dispatched = await controller.dispatch('work_test', 'f1')
   assert.equal(dispatched.dispatched, true)
+  assert.equal(dispatched.worker_kind, 'conversation_worker')
+  assert.equal(dispatched.backend, 'sidecar')
   assert.deepEqual(host.created, [{ projectUrl: managedProjectUrl }])
+  const dispatchEvents = ledger.events.filter((event) => event.type === 'worker_dispatched')
+  assert.equal(dispatchEvents.length, 2)
+  assert.ok(dispatchEvents.every((event) => event.payload.worker_kind === 'conversation_worker'))
+  assert.ok(dispatchEvents.every((event) => event.payload.backend === 'sidecar'))
+  const state = await controller.state('work_test')
+  assert.equal(state.frontiers[0].worker_kind, 'conversation_worker')
+  assert.equal(state.frontiers[0].backend, 'sidecar')
 })
 
 test('WorkController refuses managed dispatch before Project identity is resolved', async () => {
@@ -336,6 +345,8 @@ test('WorkController blocks dependent frontiers and enforces 120 second dispatch
   FakeLedger.now += 60_000
   const paced = await controller.dispatch('work_test', 'f3')
   assert.equal(paced.dispatched, false)
+  assert.equal(paced.worker_kind, 'conversation_worker')
+  assert.equal(paced.backend, 'sidecar')
   assert.equal(paced.reason, 'pacing')
   assert.equal(paced.retryAfterMs, 60_000)
 
@@ -427,7 +438,12 @@ test('WorkController collects completed workers into the ledger and unlocks depe
   const collected = await controller.collect('work_test')
   assert.equal(collected.collected, 1)
   assert.equal(collected.state.frontiers.find((f) => f.id === 'f1').status, 'completed')
+  assert.equal(collected.state.frontiers.find((f) => f.id === 'f1').worker_kind, 'conversation_worker')
+  assert.equal(collected.state.frontiers.find((f) => f.id === 'f1').backend, 'sidecar')
   assert.equal(collected.state.frontiers.find((f) => f.id === 'f2').status, 'pending')
+  const resultEvent = ledger.events.findLast((event) => event.type === 'worker_result')
+  assert.equal(resultEvent.payload.worker_kind, 'conversation_worker')
+  assert.equal(resultEvent.payload.backend, 'sidecar')
 
   const dispatched = await controller.dispatch('work_test', 'f2')
   assert.equal(dispatched.dispatched, true)
@@ -664,6 +680,8 @@ test('uncertain dispatch stays collectible and late success completes the same f
   const result = await controller.dispatch('work_test', 'f1')
   assert.equal(result.deliveryUncertain, true)
   assert.equal(result.accepted, false)
+  assert.equal(result.worker_kind, 'conversation_worker')
+  assert.equal(result.backend, 'sidecar')
   assert.equal((await controller.state('work_test')).frontiers[0].status, 'dispatched')
   assert.equal(ledger.events.some(event => event.type === 'worker_result'), false)
   await assert.rejects(controller.dispatch('work_test', 'f1'), /not pending/)
@@ -671,6 +689,8 @@ test('uncertain dispatch stays collectible and late success completes the same f
   const collected = await controller.collect('work_test')
   assert.equal(collected.collected, 1)
   assert.equal(collected.state.frontiers[0].status, 'completed')
+  assert.equal(collected.state.frontiers[0].worker_kind, 'conversation_worker')
+  assert.equal(collected.state.frontiers[0].backend, 'sidecar')
   assert.equal(collected.state.frontiers[0].result, 'late success')
   assert.equal(host.created.length, 1)
 })

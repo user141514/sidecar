@@ -1,9 +1,9 @@
 ---
-name: chatgpt-subagents
-description: Use for managed ChatGPT web conversations and verified self-updates of the conversation extension from a local shell on Linux or Windows.
+name: conversation-workers
+description: Use for managed ChatGPT child conversations and verified self-updates of the conversation extension from a local shell on Linux or Windows. This creates conversation_worker tasks through Sidecar/WorkController; do not use it for DevSpace local Codex/Claude/Pi host workers or Orca workers.
 ---
 
-# ChatGPT Agent Runtime
+# ChatGPT Conversation Workers
 
 The installed Runtime Home owns conversation transport, WorkController, WorkLedger and MemoryPool. Git checkouts are source inputs only; after bootstrap, Native Messaging, stable CLI entrypoints and persistent data must not point directly at an arbitrary development checkout. Orca/orca-sub is not required for this runtime.
 
@@ -17,9 +17,9 @@ A fresh machine may return `extension_trust_required` with `state: prepared`. Lo
 
 If bootstrap detects an existing working Native Messaging registration outside Runtime Home, it must not switch it unless the user has authorized `--activate`. Do not bypass that gate by manually rewriting manifests, registry entries, browser profiles or checkout-local launchers.
 
-## Managed workers and conversations
+## Managed conversation workers
 
-Managed coordinator workers use `conversation-work` / the `work_*` MCP tools. `WorkController.dispatch()` is required to create every managed child inside the canonical `subagents` Project stored in Runtime Home config; missing Project identity is a hard error and must never fall back to root `https://chatgpt.com/`.
+Managed coordinator conversation workers use `conversation-work` / the `work_*` MCP tools. Their machine-readable worker kind is `conversation_worker` and backend is `sidecar`. `WorkController.dispatch()` is required to create every managed child inside the canonical `subagents` Project stored in Runtime Home config; missing Project identity is a hard error and must never fall back to root `https://chatgpt.com/`. Do not substitute DevSpace local provider workers (`host_worker`) or Orca workers for this route.
 
 Manual transport remains available through `chatgpt-conversation create [--project <project_url>]`, `send`, and `read`. Do not use manual root conversations as a substitute for managed worker dispatch.
 

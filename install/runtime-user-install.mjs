@@ -3,7 +3,7 @@ import { homedir, platform as currentPlatform } from 'node:os'
 import { dirname, join, posix, resolve, win32 } from 'node:path'
 
 const commandMarker = 'conversation-sidecar runtime shim'
-const skillNamePattern = /^---\s*[\s\S]*?^name:\s*chatgpt-subagents\s*$/m
+const skillNamePattern = /^---\s*[\s\S]*?^name:\s*(?:conversation-workers|chatgpt-subagents)\s*$/m
 
 function pathApi(platform) {
   if (platform === 'linux') return posix
@@ -92,18 +92,27 @@ function shellDoubleQuote(value) {
   return String(value).replace(/[\\"$`]/g, '\\$&')
 }
 
+function shellSingleQuote(value) {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`
+}
+
 function cmdDoublePercent(value) {
   return String(value).replace(/%/g, '%%')
 }
 
-function commandFile(platform, command) {
-  return platform === 'win32' ? `${command}.cmd` : command
+function commandFiles(platform, command) {
+  return platform === 'win32' ? [command, `${command}.cmd`] : [command]
 }
 
-function commandBody({ platform, runtimeHome, command }) {
+function commandBody({ platform, runtimeHome, command, fileName }) {
   const path = pathApi(platform)
-  const target = path.join(runtimeHome, 'bin', commandFile(platform, command))
-  if (platform === 'linux') {
+  const isCmd = platform === 'win32' && fileName.endsWith('.cmd')
+  const runtimeFile = isCmd ? `${command}.cmd` : command
+  const target = path.join(runtimeHome, 'bin', runtimeFile)
+  if (!isCmd) {
+    if (platform === 'win32') {
+      return `#!/usr/bin/env sh\n# ${commandMarker}\ntarget=$(cygpath -u ${shellSingleQuote(target)})\nexec "$target" "$@"\n`
+    }
     return `#!/usr/bin/env sh\n# ${commandMarker}\nexec "${shellDoubleQuote(target)}" "$@"\n`
   }
   return `@echo off\r\nREM ${commandMarker}\r\ncall "${cmdDoublePercent(target)}" %*\r\n`
@@ -129,10 +138,12 @@ export async function installRuntimeUserEntrypoints({
   const commands = ['chatgpt-conversation', 'conversation-work']
   const commandPlans = []
   for (const command of commands) {
-    const targetPath = join(commandDir, commandFile(platform, command))
-    const classification = await classifyCommand(targetPath, command)
-    if (classification.kind === 'foreign') throw conflict(targetPath)
-    commandPlans.push({ command, targetPath, classification })
+    for (const fileName of commandFiles(platform, command)) {
+      const targetPath = join(commandDir, fileName)
+      const classification = await classifyCommand(targetPath, command)
+      if (classification.kind === 'foreign') throw conflict(targetPath)
+      commandPlans.push({ command, fileName, targetPath, classification })
+    }
   }
 
   const skillSource = join(releaseDir, 'skills', 'chatgpt-subagents', 'SKILL.md')
@@ -155,8 +166,13 @@ export async function installRuntimeUserEntrypoints({
   await mkdir(skillDir, { recursive: true })
   for (const plan of commandPlans) {
     if (plan.classification.kind === 'legacy-symlink') await unlink(plan.targetPath)
-    await writeFile(plan.targetPath, commandBody({ platform, runtimeHome, command: plan.command }), 'utf8')
-    if (platform === 'linux') await chmod(plan.targetPath, 0o755)
+    await writeFile(plan.targetPath, commandBody({
+      platform,
+      runtimeHome,
+      command: plan.command,
+      fileName: plan.fileName
+    }), 'utf8')
+    if (!plan.fileName.endsWith('.cmd')) await chmod(plan.targetPath, 0o755)
   }
   await writeFile(skillPath, skillContent, 'utf8')
   return result

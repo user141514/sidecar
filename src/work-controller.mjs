@@ -1,6 +1,8 @@
 const DECISION_ACTIONS = new Set(['CONTINUE', 'SPLIT', 'PRUNE', 'REVISE', 'STOP'])
 const ORCHESTRATION_MODES = new Set(['EXPLORE', 'EXECUTE', 'ADVERSARIAL', 'SYNTHESIZE'])
 const MIN_DISPATCH_INTERVAL_MS = 120_000
+const WORKER_KIND = 'conversation_worker'
+const WORKER_BACKEND = 'sidecar'
 
 function requireString(value, message) {
   if (typeof value !== 'string' || !value.trim()) throw new TypeError(message)
@@ -192,6 +194,8 @@ function deriveState(work) {
         frontier.status = event.payload?.phase === 'allocated' ? 'dispatching' : 'dispatched'
         frontier.conversationId = event.payload.conversationId
         frontier.turnId = event.payload.turnId ?? frontier.turnId ?? null
+        frontier.worker_kind = event.payload.worker_kind ?? frontier.worker_kind ?? null
+        frontier.backend = event.payload.backend ?? frontier.backend ?? null
       }
     }
 
@@ -201,6 +205,8 @@ function deriveState(work) {
         frontier.status = event.payload.outcome === 'completed' ? 'completed' : 'error'
         frontier.result = event.payload.result ?? null
         frontier.error = event.payload.error ?? null
+        frontier.worker_kind = event.payload.worker_kind ?? frontier.worker_kind ?? null
+        frontier.backend = event.payload.backend ?? frontier.backend ?? null
       }
     }
 
@@ -350,6 +356,8 @@ export class WorkController {
       if (elapsed < this.minDispatchIntervalMs) {
         return {
           dispatched: false,
+          worker_kind: WORKER_KIND,
+          backend: WORKER_BACKEND,
           reason: 'pacing',
           retryAfterMs: this.minDispatchIntervalMs - Math.max(0, elapsed)
         }
@@ -367,6 +375,8 @@ export class WorkController {
       frontierId,
       conversationId: conversation.id,
       task: frontier.task,
+      worker_kind: WORKER_KIND,
+      backend: WORKER_BACKEND,
       phase: 'allocated'
     })
 
@@ -377,11 +387,15 @@ export class WorkController {
         frontierId,
         conversationId: conversation.id,
         task: frontier.task,
+        worker_kind: WORKER_KIND,
+        backend: WORKER_BACKEND,
         phase: 'accepted',
         turnId: sent.turnId
       })
       return {
         dispatched: true,
+        worker_kind: WORKER_KIND,
+        backend: WORKER_BACKEND,
         frontierId,
         conversationId: conversation.id,
         turnId: sent.turnId,
@@ -393,11 +407,15 @@ export class WorkController {
           frontierId,
           conversationId: conversation.id,
           task: frontier.task,
+          worker_kind: WORKER_KIND,
+          backend: WORKER_BACKEND,
           phase: 'delivery_uncertain',
           turnId: error.turnId
         })
         return {
           dispatched: true,
+          worker_kind: WORKER_KIND,
+          backend: WORKER_BACKEND,
           frontierId,
           conversationId: conversation.id,
           turnId: error.turnId,
@@ -408,6 +426,8 @@ export class WorkController {
       await this.ledger.append(workId, 'worker_result', {
         frontierId,
         conversationId: conversation.id,
+        worker_kind: WORKER_KIND,
+        backend: WORKER_BACKEND,
         outcome: 'error',
         result: null,
         error: error instanceof Error ? error.message : String(error)
@@ -429,6 +449,8 @@ export class WorkController {
       await this.ledger.append(workId, 'worker_result', {
         frontierId: frontier.id,
         conversationId: frontier.conversationId,
+        worker_kind: WORKER_KIND,
+        backend: WORKER_BACKEND,
         outcome: conversation.status,
         result: conversation.latestResponse ?? null,
         error: conversation.error ?? null
