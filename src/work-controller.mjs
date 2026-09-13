@@ -466,11 +466,16 @@ export class WorkController {
       if (frontier.turnId && conversation.latestTurnId !== frontier.turnId) continue
 
       let watchdogCompletion = null
-      if (frontier.watchdog === true && this.watchdog && conversation.externalUrl) {
+      if (frontier.watchdog === true && conversation.status === 'completed') {
+        if (!this.watchdog || !conversation.externalUrl) continue
         try {
           watchdogCompletion = await this.watchdog.completion(conversation.externalUrl)
         } catch {}
         if (watchdogCompletion?.active === true) continue
+        if (watchdogCompletion?.completed !== true) {
+          try { await this.watchdog.register(conversation.externalUrl) } catch {}
+          continue
+        }
       }
 
       const watchdogCompleted = watchdogCompletion?.completed === true

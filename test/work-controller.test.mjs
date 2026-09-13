@@ -75,11 +75,12 @@ class FakeWatchdog {
     this.registered = []
     this.completions = new Map()
     this.acked = []
+    this.registerResult = true
   }
 
   async register(url) {
     this.registered.push(url)
-    return true
+    return this.registerResult
   }
 
   async completion(url) {
@@ -788,6 +789,62 @@ test('watchdog registration waits for the first terminal event carrying the exac
     externalUrl: 'https://chatgpt.com/g/g-p-subagents-test/c/6aa-test-worker'
   })
   assert.deepEqual(watchdog.registered, ['https://chatgpt.com/g/g-p-subagents-test/c/6aa-test-worker'])
+})
+
+test('collect re-registers a required watchdog after registry loss and does not fall back to phase-one completion', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  const watchdog = new FakeWatchdog()
+  const url = 'https://chatgpt.com/c/6aa-restart-worker'
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, watchdog, now: () => FakeLedger.now })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', watchdog: true, depends_on: [] }]
+  })
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'generating', latestTurnId: 'turn_1', externalUrl: url
+  })
+  await controller.dispatch('work_test', 'f1')
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'phase one only', externalUrl: url
+  })
+
+  const afterRestart = await controller.collect('work_test')
+
+  assert.equal(afterRestart.collected, 0)
+  assert.equal(afterRestart.state.frontiers[0].status, 'dispatched')
+  assert.deepEqual(watchdog.registered, [url])
+
+  watchdog.completions.set(url, { active: false, completed: true, result: 'final after restart' })
+  const collected = await controller.collect('work_test')
+  assert.equal(collected.collected, 1)
+  assert.equal(collected.state.frontiers[0].result, 'final after restart')
+})
+
+test('required watchdog registration failure is fail-closed during collect', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  const watchdog = new FakeWatchdog()
+  watchdog.registerResult = false
+  const url = 'https://chatgpt.com/c/6aa-unavailable-worker'
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, watchdog, now: () => FakeLedger.now })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', watchdog: true, depends_on: [] }]
+  })
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'generating', latestTurnId: 'turn_1', externalUrl: url
+  })
+  await controller.dispatch('work_test', 'f1')
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'must not collect', externalUrl: url
+  })
+
+  const result = await controller.collect('work_test')
+
+  assert.equal(result.collected, 0)
+  assert.equal(result.state.frontiers[0].status, 'dispatched')
+  assert.deepEqual(watchdog.registered, [url])
 })
 
 test('collect waits for watchdog completion and uses the final watchdog result', async () => {
