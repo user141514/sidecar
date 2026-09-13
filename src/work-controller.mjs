@@ -250,6 +250,7 @@ function workerPrompt(frontier, state) {
     'You are a depth-1 worker for a coordinator-managed task.',
     'Do not create, delegate to, or spawn any additional workers or agents.',
     'Complete only the bounded task below. Return your result, evidence, and any unresolved frontiers to the coordinator.',
+    'If progress requires human action, authorization, login, UI interaction, or missing input, explain exactly what is needed and end your response with [SUPERVISOR_STATE: NEED_INPUT]. This pauses automation and is not task completion; do not use the marker merely to discuss the protocol.',
     ...planContext,
     '',
     `Task: ${frontier.prompt ?? frontier.task}`

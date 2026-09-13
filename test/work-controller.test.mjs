@@ -384,6 +384,8 @@ test('WorkController blocks dependent frontiers and enforces 120 second dispatch
   assert.equal(host.created.length, 1)
   assert.match(host.sent[0].text, /depth-1 worker/i)
   assert.match(host.sent[0].text, /first task/)
+  assert.match(host.sent[0].text, /human action, authorization, login, UI interaction, or missing input/i)
+  assert.match(host.sent[0].text, /\[SUPERVISOR_STATE: NEED_INPUT\]/)
 
   FakeLedger.now += 60_000
   const paced = await controller.dispatch('work_test', 'f3')
