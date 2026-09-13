@@ -5,6 +5,84 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
 
+async function runSubmitFixture({ clickTakesEffect }) {
+  let runtimeListener = null
+  const editor = {
+    textContent: 'fixture prompt',
+    get innerText() { return this.textContent },
+    focus() {},
+    dispatchEvent() {},
+    getAttribute() { return null }
+  }
+  const sendButton = {
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'data-testid') return 'send-button'
+      if (name === 'aria-disabled') return 'false'
+      return null
+    },
+    click() {
+      if (clickTakesEffect) editor.textContent = ''
+    }
+  }
+  const document = {
+    querySelector(selector) {
+      if (selector === '#prompt-textarea') return editor
+      if (selector === '[data-testid="send-button"]') return sendButton
+      if (selector === '[data-testid="stop-button"]') return null
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return []
+      if (selector === '[data-message-author-role="user"]') return []
+      if (selector === 'button') return [sendButton]
+      if (selector === '[contenteditable="true"]') return []
+      return []
+    },
+    execCommand() { return true }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-subagents/project' },
+    chrome: {
+      runtime: {
+        async sendMessage() { return null },
+        onMessage: {
+          addListener(listener) { runtimeListener = listener },
+          removeListener() {}
+        }
+      }
+    },
+    HTMLTextAreaElement: class {},
+    HTMLInputElement: class {},
+    InputEvent: class {},
+    Date,
+    Promise,
+    Object,
+    URL,
+    console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+  return await new Promise((resolve) => {
+    const keepOpen = runtimeListener({ type: 'conversation_submit' }, {}, resolve)
+    assert.equal(keepOpen, true)
+  })
+}
+
+test('conversation_submit rejects a click that leaves the prompt draft untouched', async () => {
+  const response = await runSubmitFixture({ clickTakesEffect: false })
+  assert.equal(response.accepted, false)
+  assert.match(response.error, /submit|submission|prompt/i)
+})
+
+test('conversation_submit accepts only after observable submission progress', async () => {
+  const response = await runSubmitFixture({ clickTakesEffect: true })
+  assert.equal(response.accepted, true)
+})
+
 test('conversation_prepare selects a requested ChatGPT app before writing prompt text', async () => {
   let runtimeListener = null
   let menuOpen = false

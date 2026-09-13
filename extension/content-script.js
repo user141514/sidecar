@@ -71,9 +71,18 @@ function findSendButton() {
 async function waitAndSubmit() {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     const button = findSendButton()
-    if (button && !button.disabled) {
+    if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+      const baselineUserCount = userMessages().length
       button.click()
-      return
+      for (let confirm = 0; confirm < 20; confirm += 1) {
+        const editor = findPromptEditor()
+        const draft = editor
+          ? (typeof editor.value === 'string' ? editor.value : (editor.innerText || editor.textContent || ''))
+          : ''
+        if (!draft.trim() || userMessages().length > baselineUserCount || isGenerating()) return
+        await sleep(125)
+      }
+      throw new Error('ChatGPT submit click produced no observable submission progress')
     }
     await sleep(125)
   }
