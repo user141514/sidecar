@@ -33,7 +33,7 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
   assert.equal(harness.sentToTabs.length, 0)
 })
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -176,6 +176,9 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         if (message.type === 'project_open') {
           tab.url = message.projectUrl
           tab.composerPresent = true
+          if (projectOpenChannelClosesAfterNavigation) {
+            throw new Error('A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received')
+          }
           return {
             accepted: true,
             projectUrl: message.projectUrl,
@@ -483,6 +486,25 @@ test('conversation_create prefers an existing same-Project conversation as the h
     harness.sentToTabs.some(({ tabId, message }) => tabId === harness.createdTabs[0].id && message.type === 'project_open'),
     true
   )
+  assert.equal(response.result.url, projectUrl)
+})
+
+test('conversation_create accepts Project navigation when the message channel closes after link click', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-existing'
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: seedThreadUrl }],
+    projectOpenChannelClosesAfterNavigation: true
+  })
+
+  const response = await harness.request('conversation_create', {
+    conversationId: 'conv_project_navigation_race',
+    url: projectUrl
+  })
+
+  assert.equal(response.ok, true)
   assert.equal(response.result.url, projectUrl)
 })
 

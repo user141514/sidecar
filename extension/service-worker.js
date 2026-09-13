@@ -532,9 +532,15 @@ async function createConversation(params) {
   let attachedUrl = tab.pendingUrl || tab.url || initialUrl
   if (projectUrl) {
     await waitForContentScript(tab.id)
-    const opened = await boundedMessage(tab.id, { type: 'project_open', projectUrl }, 15_000)
-    if (opened?.accepted !== true) {
-      throw new Error(opened?.error || 'ChatGPT content script could not open the Project')
+    let opened = null
+    try {
+      opened = await boundedMessage(tab.id, { type: 'project_open', projectUrl }, 15_000)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!/message (?:channel|port) closed.*response/i.test(message)) throw error
+    }
+    if (opened && opened.accepted !== true) {
+      throw new Error(opened.error || 'ChatGPT content script could not open the Project')
     }
     const navigationProjectUrl = projectHomeUrl(opened?.projectUrl) || projectUrl
     try {
