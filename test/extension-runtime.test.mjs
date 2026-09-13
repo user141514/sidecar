@@ -33,7 +33,7 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
   assert.equal(harness.sentToTabs.length, 0)
 })
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -200,7 +200,9 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         }
         if (message.type === 'conversation_submit') {
           if (submitTransportFailure) throw new Error('submit response lost during navigation')
-          return { accepted: true, url: tab.url }
+          const responseUrl = tab.url
+          if (submitNavigatesTo) tab.url = submitNavigatesTo
+          return { accepted: true, url: responseUrl }
         }
         if (message.type === 'conversation_send') {
           return { accepted: true, url: tab.url, baselineAssistantCount: 0 }
@@ -482,6 +484,31 @@ test('conversation_create prefers an existing same-Project conversation as the h
     true
   )
   assert.equal(response.result.url, projectUrl)
+})
+
+test('conversation_send captures the stable conversation URL after Project submit navigation', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const threadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-new'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_project_nav': { windowId: 10, tabId: 20, url: projectUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: projectUrl }],
+    submitNavigatesTo: threadUrl
+  })
+
+  const response = await harness.request('conversation_send', {
+    conversationId: 'conv_project_nav',
+    turnId: 'turn_project_nav',
+    text: 'readonly watchdog acceptance task',
+    externalUrl: projectUrl
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.url, threadUrl)
+  assert.equal(harness.storageState['conversation:conv_project_nav'].url, threadUrl)
 })
 
 test('send forwards a per-message app selection to the content-script prepare step', async () => {

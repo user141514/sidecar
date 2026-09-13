@@ -437,6 +437,21 @@ async function waitForProjectDraftSurface(tabId, expectedProjectUrl) {
   throw new Error(`ChatGPT Project draft surface did not become ready${lastUrl ? `; last URL was ${lastUrl}` : ''}${detail}`)
 }
 
+async function waitForConversationThreadUrl(tabId, fallbackUrl, timeoutMs = 5000) {
+  const existing = stableConversationUrl(fallbackUrl)
+  if (existing) return existing
+  const deadline = Date.now() + timeoutMs
+  let lastUrl = fallbackUrl
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId)
+    lastUrl = tabPageUrl(tab) || lastUrl
+    const stable = stableConversationUrl(lastUrl)
+    if (stable) return stable
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  return chooseConversationUrl(lastUrl, fallbackUrl)
+}
+
 async function findProject(params) {
   const name = typeof params.name === 'string' ? params.name.trim() : ''
   if (!name) throw new Error('Project name is required')
@@ -652,9 +667,13 @@ async function performSend(params, operation) {
     throw new Error(submitted?.error || 'ChatGPT content script rejected the prompt submission')
   }
 
+  const submittedUrl = await waitForConversationThreadUrl(
+    currentState.tabId,
+    chooseConversationUrl(submitted.url, currentState.url)
+  )
   const submittedState = {
     ...currentState,
-    url: chooseConversationUrl(submitted.url, currentState.url)
+    url: submittedUrl
   }
   await saveConversation(params.conversationId, submittedState)
   pending = { ...pending, phase: 'submitted' }
