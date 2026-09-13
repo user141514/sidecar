@@ -259,7 +259,8 @@ async function ensureWindow0(url) {
   const window = await chrome.windows.create({
     url,
     type: 'normal',
-    focused: false
+    focused: false,
+    state: 'minimized'
   })
   const tab = window?.tabs?.[0]
   if (!window || typeof window.id !== 'number' || !tab || typeof tab.id !== 'number') {

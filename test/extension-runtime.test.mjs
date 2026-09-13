@@ -127,10 +127,10 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         if (!window) throw new Error(`No window ${windowId}`)
         return { ...window }
       },
-      async create({ url, type, focused }) {
+      async create({ url, type, focused, state }) {
         const windowId = nextWindowId++
         const tab = { id: nextTabId++, windowId, url }
-        const window = { id: windowId, type, focused, tabs: [tab] }
+        const window = { id: windowId, type, focused, state, tabs: [tab] }
         windowMap.set(windowId, window)
         tabMap.set(tab.id, tab)
         createdWindows.push(window)
@@ -781,6 +781,8 @@ test('send replaces stale physical window0 and attaches the old logical conversa
   assert.equal(response.result.reattached, true)
   assert.equal(harness.createdWindows.length, 1)
   assert.equal(harness.createdWindows[0].tabs[0].url, externalUrl)
+  assert.equal(harness.createdWindows[0].focused, false)
+  assert.equal(harness.createdWindows[0].state, 'minimized')
   assert.equal(harness.createdTabs.length, 0)
   assert.equal(
     harness.storageState['conversation:conv_existing'].tabId,
