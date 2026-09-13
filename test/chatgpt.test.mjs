@@ -41,8 +41,10 @@ class MemoryStore {
   async read(id) {
     const completed = [...this.events].reverse().find((event) => event.type === 'response_completed')
     const error = [...this.events].reverse().find((event) => event.type === 'error')
+    const withUrl = [...this.events].reverse().find((event) => typeof event.externalUrl === 'string')
     return {
       id,
+      externalUrl: withUrl?.externalUrl ?? this.created?.externalUrl ?? null,
       status: error ? 'error' : completed ? 'completed' : this.events.some((e) => e.type === 'generation_started') ? 'generating' : 'idle',
       latestResponse: completed?.text ?? null,
       latestTurnId: completed?.turnId ?? null,
@@ -292,6 +294,54 @@ test('a fresh sidecar process sends to a ledger-backed conversation and records 
   const state = await waitForConversationStatus(restartedHost, created.id, 'completed')
   assert.equal(state.status, 'completed')
   assert.equal(state.latestResponse, 'AFTER_RESTART')
+})
+
+test('completed reads recheck the exact live conversation after 60 seconds when the browser has more text', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  const targetUrl = 'https://chatgpt.com/g/g-p-project/c/thread-read-recheck'
+  const host = new ChatGptConversationHost({
+    bridge,
+    store,
+    sleep: async (ms) => waits.push(ms)
+  })
+  const waits = []
+  const created = await host.create()
+  await store.append(created.id, {
+    type: 'response_completed',
+    turnId: 'turn_read_recheck',
+    text: 'PARTIAL',
+    externalUrl: targetUrl
+  })
+
+  const snapshots = [
+    { found: true, url: targetUrl, generating: true, assistantText: 'PARTIAL plus more' },
+    { found: true, url: targetUrl, generating: false, assistantText: 'FULL RESPONSE' }
+  ]
+  bridge.request = async (method, params) => {
+    bridge.requests.push({ method, params })
+    if (method === 'conversation_snapshot') return snapshots.shift()
+    throw new Error(`unexpected method ${method}`)
+  }
+
+  const state = await host.read(created.id)
+
+  assert.deepEqual(waits, [60_000])
+  assert.equal(state.status, 'completed')
+  assert.equal(state.latestResponse, 'FULL RESPONSE')
+  assert.deepEqual(
+    bridge.requests
+      .filter(({ method }) => method === 'conversation_snapshot')
+      .map(({ method, params }) => [method, params.conversationId, params.externalUrl]),
+    [
+      ['conversation_snapshot', created.id, targetUrl],
+      ['conversation_snapshot', created.id, targetUrl]
+    ]
+  )
 })
 
 test('only one concurrent send may enter the browser for the same conversation', async () => {

@@ -746,6 +746,17 @@ function onSidecarMessage(message, _sender, sendResponse) {
     return
   }
 
+  if (message?.type === 'conversation_snapshot') {
+    const last = assistantMessages().at(-1)
+    sendResponse({
+      ready: true,
+      url: location.href,
+      generating: isGenerating(),
+      assistantText: (last?.innerText || last?.textContent || '').trim()
+    })
+    return
+  }
+
   if (message?.type === 'webgpt_shift_test') {
     void runWebGptShiftTest(message.target)
       .then((result) => sendResponse(result))

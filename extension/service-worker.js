@@ -862,6 +862,32 @@ async function webGptShiftTest(params) {
   return { ...result, tabId: tab.id, url: tabPageUrl(tab) }
 }
 
+async function readConversationSnapshot(params) {
+  const conversationId = params?.conversationId
+  if (typeof conversationId !== 'string' || !conversationId) throw new Error('conversation_snapshot requires conversationId')
+
+  const stored = await loadConversation(conversationId)
+  const expectedUrl = chooseConversationUrl(params?.externalUrl, stored?.url)
+  if (!stored || !stableConversationUrl(expectedUrl)) return { found: false }
+
+  let tab = await findRegisteredLiveTab(stored, expectedUrl)
+  if (!tab && Number.isInteger(stored.windowId)) {
+    tab = await findMatchingConversationTab(stored.windowId, expectedUrl)
+  }
+  if (!tab || !Number.isInteger(tab.id)) return { found: false }
+
+  const snapshot = await boundedMessage(tab.id, { type: 'conversation_snapshot' }, 2000)
+  const actualUrl = stableConversationUrl(snapshot?.url)
+  if (!actualUrl || pageIdentity(actualUrl) !== pageIdentity(expectedUrl)) return { found: false }
+
+  return {
+    found: true,
+    url: actualUrl,
+    generating: snapshot?.generating === true,
+    assistantText: typeof snapshot?.assistantText === 'string' ? snapshot.assistantText : ''
+  }
+}
+
 async function reconcileClosedPreSubmitTurns() {
   // Run once before accepting sends. A missing tab cannot continue prepare,
   // and these durable phases prove the worker never issued submit.
@@ -901,6 +927,7 @@ async function executeRequest(message) {
   if (message.method === 'project_find') return findProject(message.params ?? {})
   if (message.method === 'project_create') return extensionLifecycle.runMutation(() => createProject(message.params ?? {}))
   if (message.method === 'conversation_create') return extensionLifecycle.runMutation(() => createConversation(message.params ?? {}))
+  if (message.method === 'conversation_snapshot') return readConversationSnapshot(message.params ?? {})
   if (message.method === 'conversation_send') return extensionLifecycle.runMutation(() => sendConversation(message.params ?? {}))
   throw new Error(`Unknown native request method: ${message.method}`)
 }

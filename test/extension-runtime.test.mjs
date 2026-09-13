@@ -175,6 +175,14 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
           return { ready: true, url: tab.url, composerPresent: tab.composerPresent === true }
         }
+        if (message.type === 'conversation_snapshot') {
+          return {
+            ready: true,
+            url: tab.url,
+            generating: tab.generating === true,
+            assistantText: typeof tab.assistantText === 'string' ? tab.assistantText : ''
+          }
+        }
         if (message.type === 'project_open') {
           tab.url = message.projectUrl
           tab.composerPresent = !projectDraftRequiresReload
@@ -905,6 +913,38 @@ test('terminal events stay in a durable outbox until the native host acknowledge
 
   await harness.sendNativeMessage({ kind: 'event_ack', eventId })
   assert.equal(harness.storageState[outboxKey], undefined)
+})
+
+test('conversation snapshot reads only the exact already-bound conversation tab', async () => {
+  const externalUrl = 'https://chatgpt.com/g/g-p-project/c/exact-read'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 30, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [
+      { id: 30, windowId: 10, url: externalUrl, assistantText: 'FULL RESPONSE', generating: false },
+      { id: 31, windowId: 10, url: 'https://chatgpt.com/c/other', assistantText: 'WRONG', generating: false }
+    ]
+  })
+
+  const response = await harness.request('conversation_snapshot', {
+    conversationId: 'conv_existing',
+    externalUrl
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.found, true)
+  assert.equal(response.result.url, externalUrl)
+  assert.equal(response.result.generating, false)
+  assert.equal(response.result.assistantText, 'FULL RESPONSE')
+  assert.equal(harness.createdTabs.length, 0)
+  assert.equal(harness.createdWindows.length, 0)
+  assert.deepEqual(
+    harness.sentToTabs.filter(({ message }) => message.type === 'conversation_snapshot').map(({ tabId }) => tabId),
+    [30]
+  )
 })
 
 test('reload remains scheduled when the accepted native response transport is lost', async () => {

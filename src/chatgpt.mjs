@@ -20,10 +20,12 @@ function normalizeProjectHomeUrl(value) {
 }
 
 export class ChatGptConversationHost {
-  constructor({ bridge, store }) {
+  constructor({ bridge, store, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
     this.bridge = bridge
     this.store = store
+    this.sleep = sleep
     this.sendQueues = new Map()
+    this.activeSends = new Set()
     this.terminalListeners = new Map()
     bridge.on('event', (event) => {
       void this.#handleExtensionEvent(event)
@@ -138,6 +140,15 @@ export class ChatGptConversationHost {
   }
 
   async #send(conversationId, text, { app } = {}) {
+    this.activeSends.add(conversationId)
+    try {
+      return await this.#sendActive(conversationId, text, { app })
+    } finally {
+      this.activeSends.delete(conversationId)
+    }
+  }
+
+  async #sendActive(conversationId, text, { app } = {}) {
     const conversation = await this.#loadConversation(conversationId)
     if (!conversation) {
       throw new Error(`Conversation ${conversationId} does not exist in the local ledger`)
@@ -189,7 +200,39 @@ export class ChatGptConversationHost {
   }
 
   async read(conversationId) {
-    return this.store.read(conversationId)
+    const stored = await this.store.read(conversationId)
+    if (stored.status !== 'completed' || this.activeSends.has(conversationId) || typeof stored.externalUrl !== 'string' || !stored.externalUrl) return stored
+
+    const readLive = async () => {
+      try {
+        const snapshot = await this.bridge.request('conversation_snapshot', {
+          conversationId,
+          externalUrl: stored.externalUrl
+        })
+        if (snapshot?.found !== true) return null
+        return {
+          generating: snapshot.generating === true,
+          assistantText: typeof snapshot.assistantText === 'string' ? snapshot.assistantText.trim() : ''
+        }
+      } catch {
+        return null
+      }
+    }
+
+    const first = await readLive()
+    if (!first) return stored
+    const firstDiffers = first.assistantText !== (stored.latestResponse ?? '')
+    if (!first.generating && !firstDiffers && first.assistantText) return stored
+
+    await this.sleep(60_000)
+    const second = await readLive()
+    if (!second) return stored
+
+    return {
+      ...stored,
+      status: second.generating ? 'generating' : 'completed',
+      latestResponse: second.assistantText || first.assistantText || stored.latestResponse
+    }
   }
 
   async #loadConversation(conversationId) {

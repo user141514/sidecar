@@ -122,6 +122,35 @@ test('reinjection replaces listeners and reports the executed build without refr
   assert.equal(ping.url, 'https://chatgpt.com/c/test')
 })
 
+test('content script conversation snapshot returns the latest assistant text and generation state', async () => {
+  const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
+  const listeners = []
+  const assistant = { innerText: 'FULL RESPONSE', textContent: 'FULL RESPONSE' }
+  const context = vm.createContext({
+    __sidecarBuildId: 'snapshot-build',
+    document: {
+      querySelector: () => null,
+      querySelectorAll(selector) {
+        if (selector === '[data-message-author-role="assistant"]') return [assistant]
+        if (selector === 'button') return []
+        return []
+      }
+    },
+    location: { href: 'https://chatgpt.com/c/test' },
+    chrome: { runtime: { sendMessage: async () => null, onMessage: { addListener: (f) => listeners.push(f) } } },
+    console, setTimeout, clearTimeout
+  })
+  vm.runInContext(source, context)
+
+  let snapshot
+  listeners[0]({ type: 'conversation_snapshot' }, {}, (result) => { snapshot = result })
+
+  assert.equal(snapshot.ready, true)
+  assert.equal(snapshot.url, 'https://chatgpt.com/c/test')
+  assert.equal(snapshot.generating, false)
+  assert.equal(snapshot.assistantText, 'FULL RESPONSE')
+})
+
 test('fresh content script tolerates disposal from an invalidated extension context', async () => {
   const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
   const listeners = []
