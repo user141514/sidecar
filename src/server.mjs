@@ -12,6 +12,7 @@ import { WorkController } from './work-controller.mjs'
 import { WatchdogClient } from './watchdog-client.mjs'
 import { MemoryPool } from './memory-pool.mjs'
 import { MemorySyncBridge } from './memory-sync-bridge.mjs'
+import { SendAdmission } from './send-admission.mjs'
 
 const TOOLS = [
   ...EXTENSION_TOOLS,
@@ -508,12 +509,33 @@ async function handleRpc(conversationHost, workLedger, workController, memoryPoo
   return { status: 200, body: jsonRpcError(id, -32601, `Method not found: ${message.method}`) }
 }
 
+function isLoopback(address) {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
+}
+
 export function createSidecarServer({ conversationHost, workLedger = null, workController = null, memoryPool = null, memorySyncBridge = null, runtimeRelease = null }) {
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (req.method === 'GET' && url.pathname === '/healthz') {
         writeJson(res, 200, { ok: true, ...(runtimeRelease ? { runtimeRelease } : {}) })
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/internal/send-admission') {
+        if (!isLoopback(req.socket.remoteAddress)) {
+          writeJson(res, 403, { error: 'localhost_only' })
+          return
+        }
+        if (typeof conversationHost?.admitSend !== 'function') {
+          writeJson(res, 503, { error: 'send_admission_unavailable' })
+          return
+        }
+        const payload = await readJson(req)
+        if (typeof payload?.source !== 'string' || !payload.source.trim() || typeof payload?.target !== 'string' || !payload.target.trim()) {
+          writeJson(res, 400, { error: 'source_and_target_required' })
+          return
+        }
+        writeJson(res, 200, await conversationHost.admitSend({ source: payload.source, target: payload.target }))
         return
       }
       if (req.method !== 'POST' || url.pathname !== '/mcp') {
@@ -560,6 +582,7 @@ export function createSidecarServer({ conversationHost, workLedger = null, workC
 const defaultConversationRoot = fileURLToPath(new URL('../data/conversations/', import.meta.url))
 const defaultWorkRoot = fileURLToPath(new URL('../data/works/', import.meta.url))
 const defaultMemoryRoot = fileURLToPath(new URL('../data/memory/', import.meta.url))
+const defaultSendAdmissionPath = fileURLToPath(new URL('../data/send-admission.json', import.meta.url))
 const defaultMymemRepo = resolve(fileURLToPath(new URL('../', import.meta.url)), '..', 'mymem')
 
 export function createRuntimeComponents({
@@ -571,7 +594,8 @@ export function createRuntimeComponents({
   memorySyncBridge: providedMemorySyncBridge = null
 } = {}) {
   const store = new ConversationStore(dataRoot ? join(dataRoot, 'conversations') : legacyConversationRoot)
-  const conversationHost = new ChatGptConversationHost({ bridge, store })
+  const sendAdmission = new SendAdmission({ statePath: dataRoot ? join(dataRoot, 'send-admission.json') : defaultSendAdmissionPath })
+  const conversationHost = new ChatGptConversationHost({ bridge, store, sendAdmission })
   const workLedger = new WorkLedger(dataRoot ? join(dataRoot, 'works') : defaultWorkRoot)
   const watchdog = new WatchdogClient()
   const workController = new WorkController({ ledger: workLedger, conversationHost, managedProjectUrl, watchdog })
@@ -582,7 +606,7 @@ export function createRuntimeComponents({
     workLedger,
     onPublished: () => memorySyncBridge.kick()
   })
-  return { store, conversationHost, workLedger, workController, memoryPool, memorySyncBridge }
+  return { store, conversationHost, workLedger, workController, memoryPool, memorySyncBridge, sendAdmission }
 }
 
 async function startDefault() {

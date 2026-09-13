@@ -20,9 +20,10 @@ function normalizeProjectHomeUrl(value) {
 }
 
 export class ChatGptConversationHost {
-  constructor({ bridge, store, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+  constructor({ bridge, store, sendAdmission = null, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
     this.bridge = bridge
     this.store = store
+    this.sendAdmission = sendAdmission
     this.sleep = sleep
     this.sendQueues = new Map()
     this.activeSends = new Set()
@@ -128,33 +129,53 @@ export class ChatGptConversationHost {
     }
   }
 
-  async send(conversationId, text, { app } = {}) {
+  async admitSend({ source, target }) {
+    if (!this.sendAdmission) return { admitted: true, admittedAt: Date.now() }
+    return this.sendAdmission.admit({ source, target })
+  }
+
+  async send(conversationId, text, { app, preAdmitted = false } = {}) {
     if (typeof text !== 'string' || !text.trim()) throw new Error('text is required')
     if (app !== undefined && (typeof app !== 'string' || !app.trim())) {
       throw new Error('app must be a non-empty string')
     }
     const previous = this.sendQueues.get(conversationId) ?? Promise.resolve()
-    const run = previous.then(() => this.#send(conversationId, text, { app }))
+    const run = previous.then(() => this.#send(conversationId, text, { app, preAdmitted }))
     this.sendQueues.set(conversationId, run.catch(() => {}))
     return run
   }
 
-  async #send(conversationId, text, { app } = {}) {
+  async #send(conversationId, text, { app, preAdmitted = false } = {}) {
     this.activeSends.add(conversationId)
     try {
-      return await this.#sendActive(conversationId, text, { app })
+      return await this.#sendActive(conversationId, text, { app, preAdmitted })
     } finally {
       this.activeSends.delete(conversationId)
     }
   }
 
-  async #sendActive(conversationId, text, { app } = {}) {
+  async #sendActive(conversationId, text, { app, preAdmitted = false } = {}) {
     const conversation = await this.#loadConversation(conversationId)
     if (!conversation) {
       throw new Error(`Conversation ${conversationId} does not exist in the local ledger`)
     }
     if (['sending', 'submitted', 'generating', 'delivery_uncertain'].includes(conversation.status)) {
       throw new Error(`Conversation ${conversationId} already has a turn in flight`)
+    }
+
+    if (!preAdmitted) {
+      const admission = await this.admitSend({
+        source: 'conversation_send',
+        target: conversation.externalUrl || DEFAULT_CHATGPT_URL
+      })
+      if (admission?.admitted !== true) {
+        return {
+          conversationId,
+          accepted: false,
+          reason: 'pacing',
+          retryAfterMs: admission?.retryAfterMs ?? null
+        }
+      }
     }
 
     const id = turnId()

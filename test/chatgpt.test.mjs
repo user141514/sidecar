@@ -251,6 +251,54 @@ test('send forwards a per-message ChatGPT app selection to the browser bridge an
   assert.equal(store.events.find((event) => event.type === 'send_intent')?.app, 'DevSpace')
 })
 
+test('manual send is denied before send intent when the shared admission owner is pacing', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  const admissions = []
+  const host = new ChatGptConversationHost({
+    bridge,
+    store,
+    sendAdmission: {
+      async admit(request) {
+        admissions.push(request)
+        return { admitted: false, retryAfterMs: 42_000, lastAdmittedAt: 1 }
+      }
+    }
+  })
+  const created = await host.create()
+
+  const result = await host.send(created.id, 'paced manual send')
+
+  assert.deepEqual(result, {
+    conversationId: created.id,
+    accepted: false,
+    reason: 'pacing',
+    retryAfterMs: 42_000
+  })
+  assert.equal(store.events.some((event) => event.type === 'send_intent'), false)
+  assert.equal(bridge.requests.some(({ method }) => method === 'conversation_send'), false)
+  assert.equal(admissions[0].source, 'conversation_send')
+})
+
+test('pre-admitted send does not consume a second shared admission', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  let admissionCalls = 0
+  const host = new ChatGptConversationHost({
+    bridge,
+    store,
+    sendAdmission: { async admit() { admissionCalls += 1; return { admitted: true, admittedAt: 1 } } }
+  })
+  const created = await host.create()
+
+  const sent = await host.send(created.id, 'managed send', { preAdmitted: true })
+
+  assert.equal(sent.accepted, true)
+  assert.equal(admissionCalls, 0)
+})
+
 test('a fresh sidecar process sends to a ledger-backed conversation and records its later completion', async (t) => {
   const { ChatGptConversationHost } = await loadChatGptModule()
   assert.equal(typeof ChatGptConversationHost, 'function')

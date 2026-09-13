@@ -16,6 +16,7 @@ export const runtimeFiles = [...new Set([
   'src/work-ledger.mjs',
   'src/work-controller.mjs',
   'src/watchdog-client.mjs',
+  'src/send-admission.mjs',
   'src/work-cli.mjs',
   'src/memory-pool.mjs',
   'src/memory-sync-bridge.mjs',

@@ -92,6 +92,13 @@ class FakeHost {
   constructor() {
     this.createCalls = []
     this.sendCalls = []
+    this.admissionCalls = []
+    this.admissionResult = { admitted: true, admittedAt: 1 }
+  }
+
+  async admitSend(request) {
+    this.admissionCalls.push(request)
+    return this.admissionResult
   }
 
   async createProject(name) {
@@ -164,6 +171,30 @@ test('health reports the active Runtime Home release identity when provided', as
     const response = await fetch(`http://127.0.0.1:${address.port}/healthz`)
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), { ok: true, runtimeRelease })
+  } finally {
+    await app.close()
+  }
+})
+
+test('localhost internal send-admission endpoint reuses the conversation transport owner and is not model-facing', async () => {
+  const { createSidecarServer } = await loadServerModule()
+  const host = new FakeHost()
+  host.admissionResult = { admitted: false, retryAfterMs: 12_345, lastAdmittedAt: 7 }
+  const app = createSidecarServer({ conversationHost: host })
+  const address = await app.listen({ host: '127.0.0.1', port: 0 })
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  try {
+    const response = await fetch(`${baseUrl}/internal/send-admission`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source: 'watchdog', target: 'https://chatgpt.com/c/exact' })
+    })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), host.admissionResult)
+    assert.deepEqual(host.admissionCalls, [{ source: 'watchdog', target: 'https://chatgpt.com/c/exact' }])
+
+    const listed = await rpc(baseUrl, { jsonrpc: '2.0', id: 9, method: 'tools/list', params: {} })
+    assert.equal(listed.body.result.tools.some((tool) => tool.name === 'send_admission'), false)
   } finally {
     await app.close()
   }

@@ -41,6 +41,13 @@ class FakeHost {
     this.sent = []
     this.states = new Map()
     this.terminalListeners = new Map()
+    this.admissions = []
+    this.admitResult = { admitted: true, admittedAt: FakeLedger.now }
+  }
+
+  async admitSend(request) {
+    this.admissions.push(request)
+    return this.admitResult
   }
 
   async create(options = {}) {
@@ -48,8 +55,8 @@ class FakeHost {
     return { id: `conv_${this.created.length}`, status: 'idle' }
   }
 
-  async send(id, text) {
-    this.sent.push({ id, text })
+  async send(id, text, options = {}) {
+    this.sent.push({ id, text, options })
     return { conversationId: id, turnId: `turn_${this.sent.length}`, accepted: true }
   }
 
@@ -390,6 +397,44 @@ test('WorkController blocks dependent frontiers and enforces 120 second dispatch
   const second = await controller.dispatch('work_test', 'f3')
   assert.equal(second.dispatched, true)
   assert.equal(host.created.length, 2)
+})
+
+test('WorkController asks the shared admission owner before allocating a worker', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  host.admitResult = { admitted: false, retryAfterMs: 45_000, lastAdmittedAt: 1 }
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', depends_on: [] }]
+  })
+
+  const result = await controller.dispatch('work_test', 'f1')
+
+  assert.equal(result.dispatched, false)
+  assert.equal(result.reason, 'pacing')
+  assert.equal(result.retryAfterMs, 45_000)
+  assert.deepEqual(host.created, [])
+  assert.deepEqual(host.sent, [])
+  assert.equal(host.admissions.length, 1)
+  assert.equal(host.admissions[0].source, 'work_dispatch')
+  assert.equal(host.admissions[0].target, managedProjectUrl)
+})
+
+test('WorkController passes a successful shared admission into the managed send', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', depends_on: [] }]
+  })
+
+  const result = await controller.dispatch('work_test', 'f1')
+
+  assert.equal(result.dispatched, true)
+  assert.equal(host.admissions.length, 1)
+  assert.equal(host.sent[0].options.preAdmitted, true)
 })
 
 test('WorkController includes the latest revised plan in depth-1 worker prompts', async () => {

@@ -375,6 +375,24 @@ export class WorkController {
       throw error
     }
 
+    let preAdmitted = false
+    if (typeof this.conversationHost.admitSend === 'function') {
+      const admission = await this.conversationHost.admitSend({
+        source: 'work_dispatch',
+        target: this.managedProjectUrl
+      })
+      if (admission?.admitted !== true) {
+        return {
+          dispatched: false,
+          worker_kind: WORKER_KIND,
+          backend: WORKER_BACKEND,
+          reason: 'pacing',
+          retryAfterMs: admission?.retryAfterMs ?? null
+        }
+      }
+      preAdmitted = true
+    }
+
     const conversation = await this.conversationHost.create({ projectUrl: this.managedProjectUrl })
     await this.ledger.append(workId, 'worker_dispatched', {
       frontierId,
@@ -399,7 +417,7 @@ export class WorkController {
 
     try {
       this.lastDispatchAt = this.now()
-      const sent = await this.conversationHost.send(conversation.id, workerPrompt(frontier, state))
+      const sent = await this.conversationHost.send(conversation.id, workerPrompt(frontier, state), { preAdmitted })
       await this.ledger.append(workId, 'worker_dispatched', {
         frontierId,
         conversationId: conversation.id,
