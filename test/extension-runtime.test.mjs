@@ -33,7 +33,7 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
   assert.equal(harness.sentToTabs.length, 0)
 })
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -161,9 +161,11 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         return { ...tab }
       },
       async reload(tabId) {
-        if (!tabMap.has(tabId)) throw new Error(`No tab ${tabId}`)
+        const tab = tabMap.get(tabId)
+        if (!tab) throw new Error(`No tab ${tabId}`)
         reloadedTabs.push(tabId)
         staleContentScriptTabs.delete(tabId)
+        if (projectDraftRequiresReload) tab.composerPresent = true
       },
       async sendMessage(tabId, message) {
         const tab = tabMap.get(tabId)
@@ -175,7 +177,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         }
         if (message.type === 'project_open') {
           tab.url = message.projectUrl
-          tab.composerPresent = true
+          tab.composerPresent = !projectDraftRequiresReload
           if (projectOpenChannelClosesAfterNavigation) {
             throw new Error('A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received')
           }
@@ -506,6 +508,26 @@ test('conversation_create accepts Project navigation when the message channel cl
 
   assert.equal(response.ok, true)
   assert.equal(response.result.url, projectUrl)
+})
+
+test('conversation_create reloads an incomplete Project draft surface once', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-existing'
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: seedThreadUrl }],
+    projectDraftRequiresReload: true
+  })
+
+  const response = await harness.request('conversation_create', {
+    conversationId: 'conv_project_reload',
+    url: projectUrl
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.url, projectUrl)
+  assert.deepEqual(harness.reloadedTabs, [harness.createdTabs[0].id])
 })
 
 test('conversation_send captures the stable conversation URL after Project submit navigation', async () => {

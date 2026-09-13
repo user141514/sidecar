@@ -419,6 +419,7 @@ async function waitForProjectDraftSurface(tabId, expectedProjectUrl) {
   const expectedRoute = chatGptPageUrl(expectedProjectUrl)
   let lastUrl = null
   let lastError = null
+  let reloaded = false
   const deadline = Date.now() + 20_000
   while (Date.now() < deadline) {
     const tab = await chrome.tabs.get(tabId)
@@ -428,6 +429,14 @@ async function waitForProjectDraftSurface(tabId, expectedProjectUrl) {
       try {
         const page = await boundedMessage(tabId, { type: 'sidecar_ping' }, Math.min(2000, Math.max(1, deadline - Date.now())))
         if (page?.ready === true && page?.composerPresent === true) return actualProjectUrl
+        if (page?.ready === true && page?.composerPresent !== true && !reloaded) {
+          reloaded = true
+          try {
+            await chrome.tabs.reload(tabId)
+          } catch (error) {
+            lastError = error
+          }
+        }
       } catch (error) {
         lastError = error
       }
