@@ -478,7 +478,7 @@ test('conversation_create prefers an existing same-Project conversation as the h
   assert.equal(response.ok, true)
   assert.equal(harness.createdTabs.length, 1)
   assert.equal(harness.createdTabs[0].url, seedThreadUrl)
-  assert.equal(harness.createdTabs[0].active, false)
+  assert.equal(harness.createdTabs[0].active, true)
   assert.equal(
     harness.sentToTabs.some(({ tabId, message }) => tabId === harness.createdTabs[0].id && message.type === 'project_open'),
     true

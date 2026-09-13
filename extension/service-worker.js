@@ -522,7 +522,7 @@ async function createConversation(params) {
   const window0 = await ensureWindow0(initialUrl)
   const tab = window0.created
     ? window0.tab
-    : await chrome.tabs.create({ windowId: window0.windowId, url: initialUrl, active: false })
+    : await chrome.tabs.create({ windowId: window0.windowId, url: initialUrl, active: Boolean(projectUrl) })
 
   if (!tab || typeof tab.id !== 'number') {
     throw new Error('Chrome did not return a tab for the new conversation')
