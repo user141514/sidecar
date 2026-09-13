@@ -9,6 +9,7 @@ import { ExtensionBridge, NativeMessageChannel } from './native-messaging.mjs'
 import { ConversationStore } from './store.mjs'
 import { WorkLedger } from './work-ledger.mjs'
 import { WorkController } from './work-controller.mjs'
+import { WatchdogClient } from './watchdog-client.mjs'
 import { MemoryPool } from './memory-pool.mjs'
 import { MemorySyncBridge } from './memory-sync-bridge.mjs'
 
@@ -117,6 +118,7 @@ const TOOLS = [
                   id: { type: 'string' },
                   task: { type: 'string' },
                   prompt: { type: 'string' },
+                  watchdog: { type: 'boolean' },
                   depends_on: { type: 'array', items: { type: 'string' } }
                 },
                 required: ['id', 'task'],
@@ -185,6 +187,7 @@ const TOOLS = [
                   id: { type: 'string' },
                   task: { type: 'string' },
                   prompt: { type: 'string' },
+                  watchdog: { type: 'boolean' },
                   depends_on: { type: 'array', items: { type: 'string' } }
                 },
                 required: ['id', 'task'],
@@ -567,7 +570,8 @@ export function createRuntimeComponents({
   const store = new ConversationStore(dataRoot ? join(dataRoot, 'conversations') : legacyConversationRoot)
   const conversationHost = new ChatGptConversationHost({ bridge, store })
   const workLedger = new WorkLedger(dataRoot ? join(dataRoot, 'works') : defaultWorkRoot)
-  const workController = new WorkController({ ledger: workLedger, conversationHost, managedProjectUrl })
+  const watchdog = new WatchdogClient()
+  const workController = new WorkController({ ledger: workLedger, conversationHost, managedProjectUrl, watchdog })
   const memoryRoot = dataRoot ? join(dataRoot, 'memory') : defaultMemoryRoot
   const memorySyncBridge = providedMemorySyncBridge ?? new MemorySyncBridge({ memoryRoot, mymemRepo })
   const memoryPool = new MemoryPool({

@@ -54,10 +54,14 @@ function normalizeFrontier(frontier) {
   if (!Array.isArray(dependsOn) || dependsOn.some((value) => typeof value !== 'string' || !value.trim())) {
     throw new TypeError('frontier depends_on must be an array of ids')
   }
+  if (frontier.watchdog !== undefined && typeof frontier.watchdog !== 'boolean') {
+    throw new TypeError('frontier watchdog must be a boolean')
+  }
   return {
     id,
     task,
     ...(prompt ? { prompt } : {}),
+    ...(frontier.watchdog === true ? { watchdog: true } : {}),
     depends_on: [...new Set(dependsOn.map((value) => value.trim()))]
   }
 }
@@ -269,10 +273,11 @@ function normalizeManagedProjectUrl(value) {
 }
 
 export class WorkController {
-  constructor({ ledger, conversationHost, managedProjectUrl = null, now = () => Date.now(), minDispatchIntervalMs = MIN_DISPATCH_INTERVAL_MS }) {
+  constructor({ ledger, conversationHost, managedProjectUrl = null, watchdog = null, now = () => Date.now(), minDispatchIntervalMs = MIN_DISPATCH_INTERVAL_MS }) {
     this.ledger = ledger
     this.conversationHost = conversationHost
     this.managedProjectUrl = normalizeManagedProjectUrl(managedProjectUrl)
+    this.watchdog = watchdog
     this.now = now
     this.minDispatchIntervalMs = minDispatchIntervalMs
     this.lastDispatchAt = null
@@ -392,6 +397,12 @@ export class WorkController {
         phase: 'accepted',
         turnId: sent.turnId
       })
+      if (frontier.watchdog === true && this.watchdog) {
+        try {
+          const current = await this.conversationHost.read(conversation.id)
+          if (current?.externalUrl) await this.watchdog.register(current.externalUrl)
+        } catch {}
+      }
       return {
         dispatched: true,
         worker_kind: WORKER_KIND,
@@ -455,6 +466,11 @@ export class WorkController {
         result: conversation.latestResponse ?? null,
         error: conversation.error ?? null
       })
+      if (frontier.watchdog === true && this.watchdog && conversation.externalUrl) {
+        try {
+          await this.watchdog.unregister(conversation.externalUrl)
+        } catch {}
+      }
       collected += 1
     }
 

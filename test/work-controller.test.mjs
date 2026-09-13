@@ -57,6 +57,21 @@ class FakeHost {
   }
 }
 
+class FakeWatchdog {
+  constructor() {
+    this.registered = []
+    this.unregistered = []
+  }
+
+  async register(url) {
+    this.registered.push(url)
+  }
+
+  async unregister(url) {
+    this.unregistered.push(url)
+  }
+}
+
 test('WorkController records structured split decisions and derives frontier state', async () => {
   const { WorkController } = await loadModule()
   assert.equal(typeof WorkController, 'function')
@@ -729,4 +744,47 @@ test('collect repairs a historical error only when the same worker later complet
   assert.equal(collected.collected, 1)
   assert.equal(collected.state.frontiers[0].result, 'late reality')
   assert.equal((await controller.collect('work_test')).collected, 0)
+})
+
+test('accepted managed dispatch registers exact conversation URL with watchdog', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  const watchdog = new FakeWatchdog()
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, watchdog, now: () => FakeLedger.now })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', watchdog: true, depends_on: [] }]
+  })
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'generating', latestTurnId: 'turn_1',
+    externalUrl: 'https://chatgpt.com/g/g-p-subagents-test/c/6aa-test-worker'
+  })
+
+  await controller.dispatch('work_test', 'f1')
+
+  assert.deepEqual(watchdog.registered, ['https://chatgpt.com/g/g-p-subagents-test/c/6aa-test-worker'])
+})
+
+test('collect unregisters terminal managed conversation from watchdog', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  const watchdog = new FakeWatchdog()
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, watchdog, now: () => FakeLedger.now })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', watchdog: true, depends_on: [] }]
+  })
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'generating', latestTurnId: 'turn_1',
+    externalUrl: 'https://chatgpt.com/c/6aa-test-worker'
+  })
+  await controller.dispatch('work_test', 'f1')
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'done',
+    externalUrl: 'https://chatgpt.com/c/6aa-test-worker'
+  })
+
+  await controller.collect('work_test')
+
+  assert.deepEqual(watchdog.unregistered, ['https://chatgpt.com/c/6aa-test-worker'])
 })
