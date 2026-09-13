@@ -973,6 +973,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const eventId = terminalEventId(event)
       const existing = await loadOutboxEvent(eventId)
       if (existing) {
+        const pending = await loadPendingTurn(event.conversationId)
+        if (pending?.turnId === event.turnId) await clearPendingTurn(event.conversationId)
         sendResponse({ durable: true, eventId })
         void flushOutbox()
         return

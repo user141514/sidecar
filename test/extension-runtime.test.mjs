@@ -915,6 +915,43 @@ test('terminal events stay in a durable outbox until the native host acknowledge
   assert.equal(harness.storageState[outboxKey], undefined)
 })
 
+test('replayed durable terminal event clears the matching ghost pending turn', async () => {
+  const externalUrl = 'https://chatgpt.com/c/durable-replay'
+  const eventId = 'terminal:conv_existing:turn_replay:response_completed'
+  const terminalEvent = {
+    type: 'response_completed',
+    conversationId: 'conv_existing',
+    turnId: 'turn_replay',
+    text: 'durable result',
+    externalUrl
+  }
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 30, url: externalUrl },
+      'pending:conv_existing': {
+        conversationId: 'conv_existing',
+        turnId: 'turn_replay',
+        tabId: 30,
+        phase: 'submitted'
+      },
+      [`outbox:${eventId}`]: { eventId, event: terminalEvent }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 30, windowId: 10, url: externalUrl }]
+  })
+
+  const response = await harness.emitRuntimeMessage({
+    kind: 'conversation_event',
+    event: terminalEvent
+  }, { tab: { id: 30, windowId: 10, url: externalUrl } })
+
+  assert.equal(response?.durable, true)
+  assert.equal(response?.eventId, eventId)
+  assert.equal(harness.storageState['pending:conv_existing'], undefined)
+  assert.notEqual(harness.storageState[`outbox:${eventId}`], undefined)
+})
+
 test('conversation snapshot reads only the exact already-bound conversation tab', async () => {
   const externalUrl = 'https://chatgpt.com/g/g-p-project/c/exact-read'
   const harness = makeHarness({
