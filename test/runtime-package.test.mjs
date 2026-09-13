@@ -22,6 +22,7 @@ test('full runtime artifact contains scheduler and memory while remaining indepe
     'src/server.mjs',
     'src/work-ledger.mjs',
     'src/work-controller.mjs',
+    'src/watchdog-client.mjs',
     'src/work-cli.mjs',
     'src/memory-pool.mjs',
     'src/memory-sync-bridge.mjs',
@@ -44,6 +45,7 @@ test('full runtime artifact contains scheduler and memory while remaining indepe
   assert.match(provenance.sourceRevision, /^[0-9a-f]{40}$/)
   assert.match(provenance.sourceContentHash, /^[0-9a-f]{64}$/)
   assert.match(provenance.fileHashes['src/work-controller.mjs'], /^[0-9a-f]{64}$/)
+  assert.match(provenance.fileHashes['src/watchdog-client.mjs'], /^[0-9a-f]{64}$/)
   assert.match(provenance.fileHashes['src/memory-pool.mjs'], /^[0-9a-f]{64}$/)
   assert.match(provenance.fileHashes['src/memory-sync-bridge.mjs'], /^[0-9a-f]{64}$/)
 
