@@ -40,6 +40,7 @@ class FakeHost {
     this.created = []
     this.sent = []
     this.states = new Map()
+    this.terminalListeners = new Map()
   }
 
   async create(options = {}) {
@@ -54,6 +55,18 @@ class FakeHost {
 
   async read(id) {
     return this.states.get(id) ?? { id, status: 'generating', latestResponse: null }
+  }
+
+  onTerminal(id, listener) {
+    this.terminalListeners.set(id, listener)
+    return () => this.terminalListeners.delete(id)
+  }
+
+  async emitTerminal(id, event) {
+    const listener = this.terminalListeners.get(id)
+    if (!listener) return
+    this.terminalListeners.delete(id)
+    await listener(event)
   }
 }
 
@@ -753,7 +766,7 @@ test('collect repairs a historical error only when the same worker later complet
   assert.equal((await controller.collect('work_test')).collected, 0)
 })
 
-test('accepted managed dispatch registers exact conversation URL with watchdog', async () => {
+test('watchdog registration waits for the first terminal event carrying the exact conversation URL', async () => {
   const { WorkController } = await loadModule()
   const ledger = new FakeLedger()
   const host = new FakeHost()
@@ -764,11 +777,16 @@ test('accepted managed dispatch registers exact conversation URL with watchdog',
   })
   host.states.set('conv_1', {
     id: 'conv_1', status: 'generating', latestTurnId: 'turn_1',
-    externalUrl: 'https://chatgpt.com/g/g-p-subagents-test/c/6aa-test-worker'
+    externalUrl: 'https://chatgpt.com/g/g-p-subagents-test/project'
   })
 
   await controller.dispatch('work_test', 'f1')
+  assert.deepEqual(watchdog.registered, [])
 
+  await host.emitTerminal('conv_1', {
+    type: 'response_completed',
+    externalUrl: 'https://chatgpt.com/g/g-p-subagents-test/c/6aa-test-worker'
+  })
   assert.deepEqual(watchdog.registered, ['https://chatgpt.com/g/g-p-subagents-test/c/6aa-test-worker'])
 })
 

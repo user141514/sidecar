@@ -24,9 +24,36 @@ export class ChatGptConversationHost {
     this.bridge = bridge
     this.store = store
     this.sendQueues = new Map()
+    this.terminalListeners = new Map()
     bridge.on('event', (event) => {
       void this.#handleExtensionEvent(event)
     })
+  }
+
+  onTerminal(conversationId, listener) {
+    if (typeof conversationId !== 'string' || !conversationId) throw new TypeError('conversation id is required')
+    if (typeof listener !== 'function') throw new TypeError('terminal listener must be a function')
+    let listeners = this.terminalListeners.get(conversationId)
+    if (!listeners) {
+      listeners = new Set()
+      this.terminalListeners.set(conversationId, listeners)
+    }
+    listeners.add(listener)
+    return () => {
+      const current = this.terminalListeners.get(conversationId)
+      if (!current) return
+      current.delete(listener)
+      if (current.size === 0) this.terminalListeners.delete(conversationId)
+    }
+  }
+
+  async #notifyTerminal(conversationId, event) {
+    const listeners = this.terminalListeners.get(conversationId)
+    if (!listeners) return
+    this.terminalListeners.delete(conversationId)
+    for (const listener of listeners) {
+      try { await listener(event) } catch {}
+    }
   }
 
   async createProject(name) {
@@ -198,6 +225,7 @@ export class ChatGptConversationHost {
         text: event.text ?? '',
         externalUrl: event.externalUrl
       })
+      await this.#notifyTerminal(conversationId, event)
       return true
     }
 
@@ -209,6 +237,7 @@ export class ChatGptConversationHost {
         message: event.message ?? 'Chrome extension error',
         externalUrl: event.externalUrl
       })
+      await this.#notifyTerminal(conversationId, event)
       return true
     }
 

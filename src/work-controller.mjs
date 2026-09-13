@@ -385,6 +385,18 @@ export class WorkController {
       phase: 'allocated'
     })
 
+    let removeTerminalListener = null
+    if (
+      frontier.watchdog === true &&
+      this.watchdog &&
+      typeof this.conversationHost.onTerminal === 'function'
+    ) {
+      removeTerminalListener = this.conversationHost.onTerminal(conversation.id, async (event) => {
+        if (typeof event?.externalUrl !== 'string' || !event.externalUrl) return
+        await this.watchdog.register(event.externalUrl)
+      })
+    }
+
     try {
       this.lastDispatchAt = this.now()
       const sent = await this.conversationHost.send(conversation.id, workerPrompt(frontier, state))
@@ -397,12 +409,6 @@ export class WorkController {
         phase: 'accepted',
         turnId: sent.turnId
       })
-      if (frontier.watchdog === true && this.watchdog) {
-        try {
-          const current = await this.conversationHost.read(conversation.id)
-          if (current?.externalUrl) await this.watchdog.register(current.externalUrl)
-        } catch {}
-      }
       return {
         dispatched: true,
         worker_kind: WORKER_KIND,
@@ -413,6 +419,7 @@ export class WorkController {
         accepted: sent.accepted === true
       }
     } catch (error) {
+      if (error?.code !== 'DELIVERY_UNCERTAIN') removeTerminalListener?.()
       if (error?.code === 'DELIVERY_UNCERTAIN') {
         await this.ledger.append(workId, 'worker_dispatched', {
           frontierId,
