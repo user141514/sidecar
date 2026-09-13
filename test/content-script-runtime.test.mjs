@@ -1602,6 +1602,90 @@ test('normal completion requires observing generation before idle convergence', 
   assert.match(emitted[0].message, /Timed out/)
 })
 
+test('normal completion waits for explicit final-turn evidence instead of a stable streamed prefix', async () => {
+  const emitted = []
+  let now = 0
+  let poll = 0
+
+  const stopButton = {
+    getAttribute(name) {
+      return name === 'aria-label' ? 'Stop responding' : null
+    },
+    textContent: ''
+  }
+  const turnRoot = {
+    querySelector(selector) {
+      return poll >= 30 && selector.includes('copy-turn-action-button') ? { disabled: false } : null
+    }
+  }
+  const assistantNode = {
+    get innerText() {
+      return poll >= 30 ? 'FULL RESPONSE' : 'PARTIAL'
+    },
+    get textContent() {
+      return this.innerText
+    },
+    closest() {
+      return turnRoot
+    }
+  }
+  const document = {
+    querySelector() {
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
+      if (selector === 'button') return poll <= 2 ? [stopButton] : []
+      if (selector === '[contenteditable="true"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-late-finality' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:late-finality' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date {
+      static now() {
+        return now
+      }
+    },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      poll += 1
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.__sidecarContentRuntime.monitorTurn({
+    conversationId: 'conv_project',
+    turnId: 'turn_late_finality',
+    baselineAssistantCount: 0
+  })
+
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].type, 'response_completed')
+  assert.equal(emitted[0].text, 'FULL RESPONSE')
+})
+
 test('recovery may complete without seeing generation when terminal UI evidence converges for 10 seconds', async () => {
   const emitted = []
   let now = 0
@@ -1685,9 +1769,17 @@ test('completion retries until the service worker acknowledges durable terminal 
   let poll = 0
   let terminalAttempts = 0
 
+  const turnRoot = {
+    querySelector(selector) {
+      return selector.includes('copy-turn-action-button') ? { disabled: false } : null
+    }
+  }
   const assistantNode = {
     innerText: '完整回答',
-    textContent: '完整回答'
+    textContent: '完整回答',
+    closest() {
+      return turnRoot
+    }
   }
   const stopButton = {
     getAttribute(name) {
@@ -1757,9 +1849,17 @@ test('completion starts a fresh 10-second snapshot window after Chinese Stop ans
   let now = 0
   let poll = 0
 
+  const turnRoot = {
+    querySelector(selector) {
+      return selector.includes('copy-turn-action-button') ? { disabled: false } : null
+    }
+  }
   const assistantNode = {
     innerText: '完整回答',
-    textContent: '完整回答'
+    textContent: '完整回答',
+    closest() {
+      return turnRoot
+    }
   }
   const stopButton = {
     getAttribute(name) {
@@ -1833,9 +1933,17 @@ test('completion resets convergence when an expected assistant snapshot is tempo
   let now = 0
   let poll = 0
 
+  const turnRoot = {
+    querySelector(selector) {
+      return selector.includes('copy-turn-action-button') ? { disabled: false } : null
+    }
+  }
   const assistantNode = {
     innerText: '完整回答',
-    textContent: '完整回答'
+    textContent: '完整回答',
+    closest() {
+      return turnRoot
+    }
   }
   const stopButton = {
     getAttribute(name) {
@@ -1912,9 +2020,17 @@ test('active generation refreshes the inactivity watchdog beyond the nominal 20-
   let now = 0
   const stopUntil = 1_210_000
 
+  const turnRoot = {
+    querySelector(selector) {
+      return selector.includes('copy-turn-action-button') ? { disabled: false } : null
+    }
+  }
   const assistantNode = {
     innerText: '长任务最终回答',
-    textContent: '长任务最终回答'
+    textContent: '长任务最终回答',
+    closest() {
+      return turnRoot
+    }
   }
   const stopButton = {
     getAttribute(name) {

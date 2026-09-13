@@ -582,11 +582,11 @@ function isGenerating() {
   })
 }
 
-function hasRecoveryTerminalEvidence(message) {
+function hasTerminalEvidence(message) {
   const turn = message?.closest?.('[data-testid^="conversation-turn-"]')
   if (!turn?.querySelector) return false
   return Boolean(turn.querySelector(
-    'button[data-testid="copy-turn-action-button"], button[aria-label*="Copy response" i], button[aria-label*="复制回复"]'
+    '[data-testid="copy-turn-action-button"], [data-testid="feedback-turn-action-button"], button[aria-label*="Copy response" i], button[aria-label*="复制回复"]'
   ))
 }
 
@@ -639,7 +639,7 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
         stableSnapshotSince = null
         continue
       }
-      if (!observedGenerating && recovery && !hasRecoveryTerminalEvidence(last)) {
+      if (!hasTerminalEvidence(last)) {
         candidateText = null
         stableSnapshotSince = null
         continue
