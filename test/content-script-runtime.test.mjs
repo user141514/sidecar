@@ -5,7 +5,7 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
 
-async function runSubmitFixture({ clickTakesEffect }) {
+async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = false, hasForm = true }) {
   let runtimeListener = null
   const editor = {
     textContent: 'fixture prompt',
@@ -14,12 +14,20 @@ async function runSubmitFixture({ clickTakesEffect }) {
     dispatchEvent() {},
     getAttribute() { return null }
   }
+  const form = {
+    requestSubmit() {
+      if (requestSubmitTakesEffect) editor.textContent = ''
+    }
+  }
   const sendButton = {
     disabled: false,
     getAttribute(name) {
       if (name === 'data-testid') return 'send-button'
       if (name === 'aria-disabled') return 'false'
       return null
+    },
+    closest(selector) {
+      return selector === 'form' && hasForm ? form : null
     },
     click() {
       if (clickTakesEffect) editor.textContent = ''
@@ -78,8 +86,13 @@ test('conversation_submit rejects a click that leaves the prompt draft untouched
   assert.match(response.error, /submit|submission|prompt/i)
 })
 
-test('conversation_submit accepts only after observable submission progress', async () => {
-  const response = await runSubmitFixture({ clickTakesEffect: true })
+test('conversation_submit falls back to button click when no form is available', async () => {
+  const response = await runSubmitFixture({ clickTakesEffect: true, hasForm: false })
+  assert.equal(response.accepted, true)
+})
+
+test('conversation_submit prefers native form submission when button click is ignored', async () => {
+  const response = await runSubmitFixture({ clickTakesEffect: false, requestSubmitTakesEffect: true })
   assert.equal(response.accepted, true)
 })
 

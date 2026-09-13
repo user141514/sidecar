@@ -73,7 +73,9 @@ async function waitAndSubmit() {
     const button = findSendButton()
     if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
       const baselineUserCount = userMessages().length
-      button.click()
+      const form = button.closest?.('form')
+      if (form && typeof form.requestSubmit === 'function') form.requestSubmit(button)
+      else button.click()
       for (let confirm = 0; confirm < 20; confirm += 1) {
         const editor = findPromptEditor()
         const draft = editor
