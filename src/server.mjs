@@ -20,7 +20,10 @@ const TOOLS = [
     description: 'Temporary probe: switch the thinking strength on an existing ChatGPT tab and read the selected value back.',
     inputSchema: {
       type: 'object',
-      properties: { target: { type: 'string' } },
+      properties: {
+        target: { type: 'string' },
+        target_url: { type: 'string' }
+      },
       required: ['target'],
       additionalProperties: false
     }
@@ -349,7 +352,7 @@ async function dispatchTool(conversationHost, workLedger, workController, memory
   }
   if (name === 'webgpt_shift_test') {
     if (typeof args.target !== 'string' || !args.target.trim()) throw new TypeError('webgpt_shift_test requires target')
-    return conversationHost.shiftTest(args.target)
+    return conversationHost.shiftTest(args.target, args.target_url ?? null)
   }
   if (CONVERSATION_TOOLS.some((tool) => tool.name === name)) {
     return dispatchConversationTool(conversationHost, name, args)

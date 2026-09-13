@@ -115,6 +115,21 @@ test('webgpt shift probe forwards the target to the browser bridge', async () =>
   assert.equal(bridge.requests[0].params.target, 'Extra High')
 })
 
+test('webgpt shift probe forwards an exact conversation URL to the browser bridge', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const host = new ChatGptConversationHost({ bridge, store: new MemoryStore() })
+  const targetUrl = 'https://chatgpt.com/g/g-p-project/c/thread-target'
+  await host.shiftTest('Medium', targetUrl)
+
+  assert.equal(bridge.requests[0].method, 'webgpt_shift_test')
+  assert.equal(bridge.requests[0].params.target, 'Medium')
+  assert.equal(bridge.requests[0].params.target_url, targetUrl)
+})
+
 test('project_find returns a canonical current-page Project URL without changing the pinned default', async () => {
   const { ChatGptConversationHost } = await loadChatGptModule()
   assert.equal(typeof ChatGptConversationHost, 'function')

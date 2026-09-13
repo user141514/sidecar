@@ -88,9 +88,13 @@ export class ChatGptConversationHost {
     return { projectUrl: normalized }
   }
 
-  async shiftTest(target) {
+  async shiftTest(target, targetUrl = null) {
     if (typeof target !== 'string' || !target.trim()) throw new Error('WebGPT shift target is required')
-    return this.bridge.request('webgpt_shift_test', { target: target.trim() })
+    if (targetUrl !== null && (typeof targetUrl !== 'string' || !targetUrl.trim())) throw new Error('WebGPT shift target URL is invalid')
+    return this.bridge.request('webgpt_shift_test', {
+      target: target.trim(),
+      ...(targetUrl ? { target_url: targetUrl.trim() } : {})
+    })
   }
 
   async create({ projectUrl } = {}) {

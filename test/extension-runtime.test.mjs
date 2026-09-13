@@ -677,6 +677,34 @@ test('webgpt shift probe prefers a managed ChatGPT tab over an active unmanaged 
   assert.equal(shiftCalls[0].tabId, 20)
 })
 
+test('webgpt shift probe targets an exact managed conversation when target_url is provided', async () => {
+  const targetUrl = 'https://chatgpt.com/g/g-p-project/c/thread-target'
+  const otherUrl = 'https://chatgpt.com/g/g-p-project/c/thread-other'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_target': { windowId: 10, tabId: 20, url: targetUrl },
+      'conversation:conv_other': { windowId: 10, tabId: 21, url: otherUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [
+      { id: 20, windowId: 10, url: targetUrl, active: false },
+      { id: 21, windowId: 10, url: otherUrl, active: true }
+    ]
+  })
+
+  const response = await harness.request('webgpt_shift_test', {
+    target: 'Medium',
+    target_url: targetUrl
+  })
+
+  assert.equal(response.ok, true)
+  const shiftCalls = harness.sentToTabs.filter(({ message }) => message.type === 'webgpt_shift_test')
+  assert.equal(shiftCalls.length, 1)
+  assert.equal(shiftCalls[0].tabId, 20)
+  assert.equal(shiftCalls[0].message.target, 'Medium')
+})
+
 test('webgpt shift probe bounds a missing content-script response', async () => {
   const externalUrl = 'https://chatgpt.com/c/profile-test'
   const harness = makeHarness({

@@ -113,8 +113,9 @@ class FakeHost {
     }
   }
 
-  async shiftTest(target) {
+  async shiftTest(target, targetUrl = null) {
     this.shiftTarget = target
+    this.shiftTargetUrl = targetUrl
     return { switched: true, before: 'High', after: target }
   }
 
@@ -604,11 +605,15 @@ test('tools/call dispatches create, send, and read to the conversation host', as
   try {
     const shifted = await rpc(baseUrl, {
       jsonrpc: '2.0', id: 7, method: 'tools/call', params: {
-        name: 'webgpt_shift_test', arguments: { target: 'Extra High' }
+        name: 'webgpt_shift_test', arguments: {
+          target: 'Medium',
+          target_url: 'https://chatgpt.com/g/g-p-project/c/thread-target'
+        }
       }
     })
-    assert.equal(JSON.parse(shifted.body.result.content[0].text).after, 'Extra High')
-    assert.equal(host.shiftTarget, 'Extra High')
+    assert.equal(JSON.parse(shifted.body.result.content[0].text).after, 'Medium')
+    assert.equal(host.shiftTarget, 'Medium')
+    assert.equal(host.shiftTargetUrl, 'https://chatgpt.com/g/g-p-project/c/thread-target')
 
     const projectCreated = await rpc(baseUrl, {
       jsonrpc: '2.0', id: 8, method: 'tools/call', params: {

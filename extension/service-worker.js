@@ -842,8 +842,14 @@ async function webGptShiftTest(params) {
   )
   const managedCandidates = candidates.filter((candidate) => managedTabIds.has(candidate.id))
   const eligible = managedCandidates.length ? managedCandidates : candidates
-  const tab = eligible.find((candidate) => candidate.active) || eligible[0]
-  if (!tab || !Number.isInteger(tab.id)) throw new Error('No existing ChatGPT tab was found')
+  const targetUrl = params.target_url ? stableConversationUrl(params.target_url) : null
+  if (params.target_url && !targetUrl) throw new Error('WebGPT shift target_url must be a ChatGPT conversation URL')
+  const tab = targetUrl
+    ? eligible.find((candidate) => pageIdentity(stableConversationUrl(tabPageUrl(candidate))) === pageIdentity(targetUrl))
+    : (eligible.find((candidate) => candidate.active) || eligible[0])
+  if (!tab || !Number.isInteger(tab.id)) {
+    throw new Error(targetUrl ? 'No matching ChatGPT conversation tab was found' : 'No existing ChatGPT tab was found')
+  }
   let result
   try {
     result = await boundedMessage(tab.id, { type: 'webgpt_shift_test', target: params.target }, 10_000)
