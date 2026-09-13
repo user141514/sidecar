@@ -60,15 +60,22 @@ class FakeHost {
 class FakeWatchdog {
   constructor() {
     this.registered = []
-    this.unregistered = []
+    this.completions = new Map()
+    this.acked = []
   }
 
   async register(url) {
     this.registered.push(url)
+    return true
   }
 
-  async unregister(url) {
-    this.unregistered.push(url)
+  async completion(url) {
+    return this.completions.get(url) ?? { active: false, completed: false, result: null }
+  }
+
+  async ackCompletion(url) {
+    this.acked.push(url)
+    return true
   }
 }
 
@@ -765,26 +772,34 @@ test('accepted managed dispatch registers exact conversation URL with watchdog',
   assert.deepEqual(watchdog.registered, ['https://chatgpt.com/g/g-p-subagents-test/c/6aa-test-worker'])
 })
 
-test('collect unregisters terminal managed conversation from watchdog', async () => {
+test('collect waits for watchdog completion and uses the final watchdog result', async () => {
   const { WorkController } = await loadModule()
   const ledger = new FakeLedger()
   const host = new FakeHost()
   const watchdog = new FakeWatchdog()
+  const url = 'https://chatgpt.com/c/6aa-test-worker'
   const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, watchdog, now: () => FakeLedger.now })
   await controller.decide('work_test', {
     action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', watchdog: true, depends_on: [] }]
   })
   host.states.set('conv_1', {
-    id: 'conv_1', status: 'generating', latestTurnId: 'turn_1',
-    externalUrl: 'https://chatgpt.com/c/6aa-test-worker'
+    id: 'conv_1', status: 'generating', latestTurnId: 'turn_1', externalUrl: url
   })
   await controller.dispatch('work_test', 'f1')
   host.states.set('conv_1', {
-    id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'done',
-    externalUrl: 'https://chatgpt.com/c/6aa-test-worker'
+    id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'phase one only', externalUrl: url
   })
+  watchdog.completions.set(url, { active: true, completed: false, result: null })
 
-  await controller.collect('work_test')
+  const premature = await controller.collect('work_test')
+  assert.equal(premature.collected, 0)
+  assert.equal(premature.state.frontiers[0].status, 'dispatched')
 
-  assert.deepEqual(watchdog.unregistered, ['https://chatgpt.com/c/6aa-test-worker'])
+  watchdog.completions.set(url, { active: false, completed: true, result: 'final watchdog result' })
+  const collected = await controller.collect('work_test')
+
+  assert.equal(collected.collected, 1)
+  assert.equal(collected.state.frontiers[0].status, 'completed')
+  assert.equal(collected.state.frontiers[0].result, 'final watchdog result')
+  assert.deepEqual(watchdog.acked, [url])
 })

@@ -457,18 +457,28 @@ export class WorkController {
       if (frontier.status === 'error' && conversation.status !== 'completed') continue
       if (conversation.status !== 'completed' && conversation.status !== 'error') continue
       if (frontier.turnId && conversation.latestTurnId !== frontier.turnId) continue
+
+      let watchdogCompletion = null
+      if (frontier.watchdog === true && this.watchdog && conversation.externalUrl) {
+        try {
+          watchdogCompletion = await this.watchdog.completion(conversation.externalUrl)
+        } catch {}
+        if (watchdogCompletion?.active === true) continue
+      }
+
+      const watchdogCompleted = watchdogCompletion?.completed === true
       await this.ledger.append(workId, 'worker_result', {
         frontierId: frontier.id,
         conversationId: frontier.conversationId,
         worker_kind: WORKER_KIND,
         backend: WORKER_BACKEND,
-        outcome: conversation.status,
-        result: conversation.latestResponse ?? null,
-        error: conversation.error ?? null
+        outcome: watchdogCompleted ? 'completed' : conversation.status,
+        result: watchdogCompleted ? watchdogCompletion.result : (conversation.latestResponse ?? null),
+        error: watchdogCompleted ? null : (conversation.error ?? null)
       })
-      if (frontier.watchdog === true && this.watchdog && conversation.externalUrl) {
+      if (watchdogCompleted && conversation.externalUrl) {
         try {
-          await this.watchdog.unregister(conversation.externalUrl)
+          await this.watchdog.ackCompletion(conversation.externalUrl)
         } catch {}
       }
       collected += 1
