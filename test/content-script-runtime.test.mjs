@@ -1386,6 +1386,100 @@ test('recovery anchors the current assistant to the last matching user prompt in
   assert.equal(emitted[0].text, '恢复后的最终回答')
 })
 
+test('recovery anchors a collapsed long user prompt by message content instead of shell controls', async () => {
+  const emitted = []
+  let now = 0
+  const promptText = 'A long bounded prompt whose exact content must identify this turn.'
+
+  const turnRoot = {
+    querySelector(selector) {
+      return selector.includes('copy-turn-action-button') ? { disabled: false } : null
+    }
+  }
+  const assistantNode = {
+    innerText: '完整恢复回答',
+    textContent: '完整恢复回答',
+    closest() {
+      return turnRoot
+    }
+  }
+  const contentNode = {
+    innerText: promptText,
+    textContent: promptText
+  }
+  const userNode = {
+    innerText: `${promptText}\n展开`,
+    textContent: `${promptText}\n展开`,
+    querySelector(selector) {
+      return selector === '[data-testid="collapsible-user-message-content"]' ? contentNode : null
+    },
+    getAttribute(name) {
+      return name === 'data-message-id' ? 'user-collapsed' : null
+    },
+    compareDocumentPosition(other) {
+      return other === assistantNode ? 4 : 0
+    }
+  }
+  const document = {
+    querySelector() {
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
+      if (selector === '[data-message-author-role="user"]') return [userNode]
+      if (selector === 'button') return []
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[role="alert"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-collapsed-user' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test-collapsed-user' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date {
+      static now() {
+        return now
+      }
+    },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.__sidecarContentRuntime.monitorTurn({
+    conversationId: 'conv_project',
+    turnId: 'turn_collapsed_user',
+    baselineAssistantCount: 99,
+    promptText,
+    recovery: true
+  })
+
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].type, 'response_completed')
+  assert.equal(emitted[0].text, '完整恢复回答')
+})
+
 test('recovery waits for an assistant node before comparing DOM position', async () => {
   const emitted = []
   let now = 0

@@ -555,6 +555,11 @@ function nodeText(node) {
   return (node?.innerText || node?.textContent || '').trim()
 }
 
+function userMessageText(node) {
+  const content = node?.querySelector?.('[data-testid="collapsible-user-message-content"]')
+  return nodeText(content || node)
+}
+
 function turnKey(node) {
   const turn = node?.closest?.('[data-testid^="conversation-turn-"]')
   return turn?.getAttribute?.('data-testid') || node?.getAttribute?.('data-message-id') || null
@@ -600,7 +605,7 @@ function readTurnObservation({ baselineAssistantCount = 0, promptText = '' } = {
   let last = assistants.at(-1) ?? null
 
   if (normalizedPrompt) {
-    anchor = [...users].reverse().find((user) => nodeText(user) === normalizedPrompt) ?? null
+    anchor = [...users].reverse().find((user) => userMessageText(user) === normalizedPrompt) ?? null
     if (!anchor) last = null
     else {
       const following = assistants.filter((assistant) => {
