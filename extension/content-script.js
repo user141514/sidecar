@@ -85,7 +85,7 @@ async function waitAndSubmit(beforeClick = null) {
         const draft = editor
           ? (typeof editor.value === 'string' ? editor.value : (editor.innerText || editor.textContent || ''))
           : ''
-        if (!draft.trim() || userMessages().length > baselineUserCount || isGenerating()) return
+        if (userMessages().length > baselineUserCount || isGenerating()) return
         await sleep(125)
       }
       throw Object.assign(new Error('ChatGPT submit click produced no observable submission progress'), { deliveryUncertain: true })

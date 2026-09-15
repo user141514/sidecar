@@ -5,8 +5,9 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
 
-async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = false, hasForm = true }) {
+async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = false, hasForm = true, draftOnly = false }) {
   let runtimeListener = null
+  let userSubmitted = false
   const editor = {
     textContent: 'fixture prompt',
     get innerText() { return this.textContent },
@@ -16,7 +17,10 @@ async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = f
   }
   const form = {
     requestSubmit() {
-      if (requestSubmitTakesEffect) editor.textContent = ''
+      if (requestSubmitTakesEffect) {
+        editor.textContent = ''
+        if (!draftOnly) userSubmitted = true
+      }
     }
   }
   const sendButton = {
@@ -30,7 +34,10 @@ async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = f
       return selector === 'form' && hasForm ? form : null
     },
     click() {
-      if (clickTakesEffect) editor.textContent = ''
+      if (clickTakesEffect) {
+        editor.textContent = ''
+        if (!draftOnly) userSubmitted = true
+      }
     }
   }
   const document = {
@@ -42,7 +49,7 @@ async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = f
     },
     querySelectorAll(selector) {
       if (selector === '[data-message-author-role="assistant"]') return []
-      if (selector === '[data-message-author-role="user"]') return []
+      if (selector === '[data-message-author-role="user"]') return userSubmitted ? [{}] : []
       if (selector === 'button') return [sendButton]
       if (selector === '[contenteditable="true"]') return []
       return []
@@ -82,6 +89,12 @@ async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = f
 
 test('conversation_submit rejects a click that leaves the prompt draft untouched', async () => {
   const response = await runSubmitFixture({ clickTakesEffect: false })
+  assert.equal(response.accepted, false)
+  assert.match(response.error, /submit|submission|prompt/i)
+})
+
+test('conversation_submit rejects draft clearing without a new user turn or generation evidence', async () => {
+  const response = await runSubmitFixture({ clickTakesEffect: true, hasForm: false, draftOnly: true })
   assert.equal(response.accepted, false)
   assert.match(response.error, /submit|submission|prompt/i)
 })
