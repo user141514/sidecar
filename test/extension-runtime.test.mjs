@@ -33,7 +33,7 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
   assert.equal(harness.sentToTabs.length, 0)
 })
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -184,6 +184,9 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           }
         }
         if (message.type === 'project_open') {
+          if (projectOpenRejectOnRoot && tab.url === 'https://chatgpt.com/') {
+            return { accepted: false, error: 'ChatGPT Project anchor was not found' }
+          }
           tab.url = message.projectUrl
           tab.composerPresent = !projectDraftRequiresReload
           if (projectOpenChannelClosesAfterNavigation) {
@@ -496,6 +499,29 @@ test('conversation_create prefers an existing same-Project conversation as the h
     harness.sentToTabs.some(({ tabId, message }) => tabId === harness.createdTabs[0].id && message.type === 'project_open'),
     true
   )
+  assert.equal(response.result.url, projectUrl)
+})
+
+test('conversation_create reuses a persisted same-Project conversation when no matching tab is live', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-persisted'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_old': { windowId: 10, tabId: 999, url: seedThreadUrl }
+    },
+    windows: [{ id: 10 }],
+    projectOpenRejectOnRoot: true
+  })
+
+  const response = await harness.request('conversation_create', {
+    conversationId: 'conv_project_from_persisted_seed',
+    url: projectUrl
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.createdTabs[0].url, seedThreadUrl)
   assert.equal(response.result.url, projectUrl)
 })
 

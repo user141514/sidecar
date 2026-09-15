@@ -141,6 +141,13 @@ async function findProjectConversationSeedUrl(projectUrl) {
     if (!currentUrl || projectIdentity(currentUrl) !== expectedIdentity) continue
     return currentUrl
   }
+  const stored = await chrome.storage.local.get(null)
+  for (const [key, value] of Object.entries(stored)) {
+    if (!key.startsWith(STORAGE_PREFIX)) continue
+    const currentUrl = stableConversationUrl(value?.url)
+    if (!currentUrl || projectIdentity(currentUrl) !== expectedIdentity) continue
+    return currentUrl
+  }
   return null
 }
 
