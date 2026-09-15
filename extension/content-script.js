@@ -819,6 +819,10 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
   }
 }
 
+function composerDraft(editor = findPromptEditor()) {
+  return typeof editor?.value === 'string' ? editor.value : (editor?.innerText || editor?.textContent || '')
+}
+
 function writerObservation(ownedDraft = null) {
   const users = userMessages(), assistants = assistantMessages()
   const user = users.at(-1), assistant = assistants.at(-1)
@@ -828,7 +832,7 @@ function writerObservation(ownedDraft = null) {
   const turn = assistant?.closest?.('[data-testid^="conversation-turn-"]')
   const finalized = Boolean(turn?.querySelector?.('[data-testid="copy-turn-action-button"], [data-testid="feedback-turn-action-button"]'))
   const editor = findPromptEditor()
-  const draft = typeof editor?.value === 'string' ? editor.value : (editor?.innerText || editor?.textContent || '')
+  const draft = composerDraft(editor)
   const text = nodeText(assistant)
   const needsInput = Boolean(document.querySelector('[data-testid="tool-approval-card"]')) || /(?:^|\n)\[SUPERVISOR_STATE\s*:\s*NEED_INPUT\]\s*$/.test(text)
   const busy = isGenerating() || turn?.getAttribute?.('aria-busy') === 'true' || Boolean(turn?.querySelector?.('[aria-busy="true"]'))
@@ -856,7 +860,11 @@ async function handlePrepare(message) {
   const observation = message.guarded === true ? writerObservation() : null
   if (observation) assertWriterObservation(observation, message.expected)
   setPromptText(editor, message.text)
-  if (observation) preparedSend = { turnId: message.turnId, text: message.text, stamp: observation.stamp, expected: message.expected }
+  if (observation) {
+    const ownedDraft = composerDraft(editor)
+    if (!ownedDraft.trim()) throw new Error('composer_changed')
+    preparedSend = { turnId: message.turnId, text: ownedDraft, stamp: observation.stamp, expected: message.expected }
+  }
   return {
     prepared: true,
     url: location.href,

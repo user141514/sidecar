@@ -3,10 +3,12 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
-function fixture() {
+function fixture({ normalizeWrites = false } = {}) {
   let listener, clicks = 0, pending = false, active = false, gate = false
   class Editor {
-    value = ''
+    _value = ''
+    get value() { return this._value }
+    set value(value) { this._value = normalizeWrites ? String(value).replace(/\n/g, '\n\n') : value }
     focus() {}
     dispatchEvent() {}
     getAttribute() { return null }
@@ -57,6 +59,15 @@ test('guarded prepare never overwrites an existing human draft', async () => {
   const prepared = await f.call({ type: 'conversation_prepare', guarded: true, turnId: 't1', text: 'continue' })
   assert.equal(prepared.prepared, false)
   assert.equal(f.editor.value, 'human draft')
+})
+
+test('guarded send owns the composer representation produced synchronously by the editor', async () => {
+  const f = fixture({ normalizeWrites: true })
+  const prepared = await f.call({ type: 'conversation_prepare', guarded: true, turnId: 't1', text: 'line one\nline two', expected: { userMessageId: 'u1', assistantMessageId: 'a1' } })
+  assert.equal(prepared.prepared, true)
+  const submitted = await f.call({ type: 'conversation_submit', guarded: true, turnId: 't1' })
+  assert.equal(submitted.accepted, true)
+  assert.equal(f.clicks, 1)
 })
 
 test('matching prepared command clicks once and active generation or human gate never clicks', async () => {
