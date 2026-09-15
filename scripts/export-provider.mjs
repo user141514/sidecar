@@ -11,6 +11,8 @@ const execFileAsync = promisify(execFile)
 const root = fileURLToPath(new URL('../', import.meta.url))
 export const providerFiles = [
   'extension/manifest.json', 'extension/build-info.js', 'extension/content-script.js', 'extension/service-worker.js', 'extension/lifecycle.js',
+  'src/send-mailbox.mjs',
+  'test/send-mailbox.test.mjs', 'test/mailbox-browser-guard.test.mjs',
   'src/chatgpt.mjs', 'src/store.mjs', 'src/native-messaging.mjs', 'src/mcp-stdio.mjs', 'src/cli.mjs', 'src/extension-control.mjs', 'src/conversation-tools.mjs', 'src/provider-server.mjs',
   'scripts/extension-build.mjs', 'scripts/install-native-host.mjs', 'scripts/test.mjs', 'scripts/verify-provider.mjs',
   'install/platform-link.mjs', 'install/install-host.mjs', 'install/conversation-sidecar-host', 'install/conversation-sidecar-host.bat', 'install/install-host-win.bat',

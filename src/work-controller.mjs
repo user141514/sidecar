@@ -273,6 +273,18 @@ function normalizeManagedProjectUrl(value) {
   return `${parsed.origin}${pathname}`
 }
 
+function isWatchdogContinuation(conversation, ancestorTurnId) {
+  let current = conversation.latestTurnId
+  const seen = new Set()
+  while (current && current !== ancestorTurnId && !seen.has(current)) {
+    seen.add(current)
+    const event = [...(conversation.events || [])].reverse().find(item => item.type === 'send_intent' && item.turnId === current)
+    if (event?.source !== 'watchdog' || typeof event.continuationOf !== 'string') return false
+    current = event.continuationOf
+  }
+  return current === ancestorTurnId
+}
+
 export class WorkController {
   constructor({ ledger, conversationHost, managedProjectUrl = null, watchdog = null, now = () => Date.now(), minDispatchIntervalMs = MIN_DISPATCH_INTERVAL_MS }) {
     this.ledger = ledger
@@ -482,7 +494,8 @@ export class WorkController {
       const conversation = await this.conversationHost.read(frontier.conversationId)
       if (frontier.status === 'error' && conversation.status !== 'completed') continue
       if (conversation.status !== 'completed' && conversation.status !== 'error') continue
-      if (frontier.turnId && conversation.latestTurnId !== frontier.turnId) continue
+      if (frontier.turnId && conversation.latestTurnId !== frontier.turnId &&
+          !(frontier.watchdog === true && isWatchdogContinuation(conversation, frontier.turnId))) continue
 
       let watchdogCompletion = null
       if (frontier.watchdog === true && conversation.status === 'completed') {

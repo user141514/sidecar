@@ -3,6 +3,7 @@ try { globalThis.__sidecarContentRuntime?.dispose() } catch {
   // The prior listener belongs to an extension context Chrome has invalidated.
 }
 let contentDisposed = false
+let preparedSend = null
 const contentBuildId = globalThis.__sidecarBuildId ?? 'unversioned'
 globalThis.__sidecarContentRuntime = {
   buildId: contentBuildId,
@@ -70,10 +71,11 @@ function findSendButton() {
   })
 }
 
-async function waitAndSubmit() {
+async function waitAndSubmit(beforeClick = null) {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     const button = findSendButton()
     if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+      beforeClick?.()
       const baselineUserCount = userMessages().length
       const form = button.closest?.('form')
       if (form && typeof form.requestSubmit === 'function') form.requestSubmit(button)
@@ -86,7 +88,7 @@ async function waitAndSubmit() {
         if (!draft.trim() || userMessages().length > baselineUserCount || isGenerating()) return
         await sleep(125)
       }
-      throw new Error('ChatGPT submit click produced no observable submission progress')
+      throw Object.assign(new Error('ChatGPT submit click produced no observable submission progress'), { deliveryUncertain: true })
     }
     await sleep(125)
   }
@@ -817,6 +819,32 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
   }
 }
 
+function writerObservation(ownedDraft = null) {
+  const users = userMessages(), assistants = assistantMessages()
+  const user = users.at(-1), assistant = assistants.at(-1)
+  const userMessageId = user?.getAttribute?.('data-message-id') || ''
+  const assistantMessageId = assistant?.getAttribute?.('data-message-id') || ''
+  const userPending = Boolean(user && (!assistant || ((assistant.compareDocumentPosition?.(user) || 0) & 4)))
+  const turn = assistant?.closest?.('[data-testid^="conversation-turn-"]')
+  const finalized = Boolean(turn?.querySelector?.('[data-testid="copy-turn-action-button"], [data-testid="feedback-turn-action-button"]'))
+  const editor = findPromptEditor()
+  const draft = typeof editor?.value === 'string' ? editor.value : (editor?.innerText || editor?.textContent || '')
+  const text = nodeText(assistant)
+  const needsInput = Boolean(document.querySelector('[data-testid="tool-approval-card"]')) || /(?:^|\n)\[SUPERVISOR_STATE\s*:\s*NEED_INPUT\]\s*$/.test(text)
+  const busy = isGenerating() || turn?.getAttribute?.('aria-busy') === 'true' || Boolean(turn?.querySelector?.('[aria-busy="true"]'))
+  const reason = userPending ? 'user_turn_pending' : busy ? 'assistant_active' : needsInput ? 'need_input' :
+    !editor || editor.getAttribute?.('aria-disabled') === 'true' ? 'composer_unavailable' :
+    (ownedDraft === null ? Boolean(draft.trim()) : draft.replace(/\r\n/g, '\n') !== ownedDraft.replace(/\r\n/g, '\n')) ? 'composer_changed' :
+    assistant && !finalized ? 'terminal_evidence_missing' : null
+  return { ready: true, url: location.href, allowed: reason === null, reason, userMessageId, assistantMessageId,
+    stamp: JSON.stringify([location.href, users.length, assistants.length, userMessageId, assistantMessageId, userMessageText(user), text]) }
+}
+
+function assertWriterObservation(observation, expected = null) {
+  if (!observation.allowed) throw new Error(observation.reason)
+  if (expected && (observation.userMessageId !== expected.userMessageId || observation.assistantMessageId !== expected.assistantMessageId)) throw new Error('stale_intent')
+}
+
 async function handlePrepare(message) {
   if (typeof message.text !== 'string' || !message.text.trim()) throw new Error('Prompt text is required')
   const baselineAssistantCount = assistantMessages().length
@@ -825,7 +853,10 @@ async function handlePrepare(message) {
     await selectAppForMessage(message.app)
     editor = await waitForPromptEditor()
   }
+  const observation = message.guarded === true ? writerObservation() : null
+  if (observation) assertWriterObservation(observation, message.expected)
   setPromptText(editor, message.text)
+  if (observation) preparedSend = { turnId: message.turnId, text: message.text, stamp: observation.stamp, expected: message.expected }
   return {
     prepared: true,
     url: location.href,
@@ -833,8 +864,16 @@ async function handlePrepare(message) {
   }
 }
 
-async function handleSubmit() {
-  await waitAndSubmit()
+async function handleSubmit(message = {}) {
+  const prepared = preparedSend
+  const guard = message.guarded === true ? () => {
+    if (!prepared || prepared.turnId !== message.turnId) throw new Error('prepared_intent_missing')
+    const observation = writerObservation(prepared.text)
+    assertWriterObservation(observation, prepared.expected)
+    if (observation.stamp !== prepared.stamp) throw new Error('stale_intent')
+  } : null
+  await waitAndSubmit(guard)
+  preparedSend = null
   return {
     accepted: true,
     url: location.href
@@ -876,6 +915,11 @@ function onSidecarMessage(message, _sender, sendResponse) {
         tag: node.tagName, id: node.id, placeholder: node.getAttribute('placeholder'), label: node.getAttribute('aria-label')
       })).slice(0, 5)
     })
+    return
+  }
+
+  if (message?.type === 'conversation_observe') {
+    sendResponse(writerObservation())
     return
   }
 
@@ -955,10 +999,11 @@ function onSidecarMessage(message, _sender, sendResponse) {
   }
 
   if (message?.type === 'conversation_submit') {
-    void handleSubmit()
+    void handleSubmit(message)
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({
         accepted: false,
+        deliveryUncertain: error.deliveryUncertain === true,
         error: error instanceof Error ? error.message : String(error)
       }))
     return true

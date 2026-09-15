@@ -1,4 +1,6 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { join } from 'node:path'
+import { SendMailbox, canonicalTarget } from './send-mailbox.mjs'
 
 const DEFAULT_CHATGPT_URL = 'https://chatgpt.com/'
 
@@ -25,7 +27,7 @@ export class ChatGptConversationHost {
     this.store = store
     this.sendAdmission = sendAdmission
     this.sleep = sleep
-    this.sendQueues = new Map()
+    this.mailbox = new SendMailbox({ rootDir: store.rootDir ? join(store.rootDir, '.send-mailbox') : null })
     this.activeSends = new Set()
     this.terminalListeners = new Map()
     bridge.on('event', (event) => {
@@ -130,31 +132,67 @@ export class ChatGptConversationHost {
   }
 
   async admitSend({ source, target }) {
+    if (source === 'watchdog') return { admitted: false, reason: 'mailbox_required' }
     if (!this.sendAdmission) return { admitted: true, admittedAt: Date.now() }
     return this.sendAdmission.admit({ source, target })
   }
 
-  async send(conversationId, text, { app, preAdmitted = false } = {}) {
+  async send(conversationId, text, { app, preAdmitted = false, requestId = randomUUID() } = {}) {
     if (typeof text !== 'string' || !text.trim()) throw new Error('text is required')
     if (app !== undefined && (typeof app !== 'string' || !app.trim())) {
       throw new Error('app must be a non-empty string')
     }
-    const previous = this.sendQueues.get(conversationId) ?? Promise.resolve()
-    const run = previous.then(() => this.#send(conversationId, text, { app, preAdmitted }))
-    this.sendQueues.set(conversationId, run.catch(() => {}))
-    return run
+    const conversation = await this.#loadConversation(conversationId)
+    if (!conversation) throw new Error(`Conversation ${conversationId} does not exist in the local ledger`)
+    const prior = (conversation.events || []).find(event => event.type === 'send_intent' && event.requestId === requestId)
+    if (prior) {
+      if (prior.text !== text || prior.app !== app) throw new Error('request identity conflict')
+      const accepted = conversation.events.some(event => event.turnId === prior.turnId && ['generation_started', 'response_completed', 'need_continue'].includes(event.type))
+      if (accepted) return { conversationId, turnId: prior.turnId, accepted: true }
+      throw Object.assign(new Error('prior request delivery uncertain; read and reconcile before retry'), { code: 'DELIVERY_UNCERTAIN', conversationId, turnId: prior.turnId })
+    }
+    const result = await this.mailbox.run(conversation.externalUrl, requestId, { source: 'coordinator', conversationId, text, app },
+      markDispatching => this.#send(conversationId, text, { app, preAdmitted, requestId, markDispatching }), conversationId)
+    if (result?.deliveryUncertain === true) throw Object.assign(new Error(`delivery uncertain; reconciliation required: ${result.message || 'unknown outcome'}`), { code: 'DELIVERY_UNCERTAIN', conversationId, turnId: result.turnId })
+    return result
   }
 
-  async #send(conversationId, text, { app, preAdmitted = false } = {}) {
+  async proposeContinuation(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+        Object.keys(payload).some(key => !['kind', 'target', 'expected', 'text'].includes(key))) throw new TypeError('invalid intent fields')
+    const { kind, target, expected, text } = payload
+    const url = new URL(target)
+    if (url.origin !== 'https://chatgpt.com' || url.username || url.password || url.search || url.hash ||
+        !/\/c\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\/?$/i.test(url.pathname)) throw new TypeError('exact conversation URL required')
+    if (!expected || typeof expected !== 'object' || Array.isArray(expected) ||
+        Object.keys(expected).some(key => !['userMessageId', 'assistantMessageId'].includes(key)) ||
+        !['userMessageId', 'assistantMessageId'].every(key => typeof expected[key] === 'string' && expected[key].length > 0 && expected[key].length <= 256)) throw new TypeError('expected user and assistant message IDs required')
+    if (kind !== 'continue') return { accepted: false, reason: 'recovery_requires_reconciliation' }
+    if (typeof text !== 'string' || !text.trim() || text.length > 16_384) throw new TypeError('bounded continuation text required')
+    const requestId = createHash('sha256').update(JSON.stringify([canonicalTarget(target), kind, expected.userMessageId, expected.assistantMessageId])).digest('hex')
+    return this.mailbox.run(target, requestId, { kind, userMessageId: expected.userMessageId, assistantMessageId: expected.assistantMessageId, text }, async markDispatching => {
+      const live = await this.bridge.request('conversation_observe', { externalUrl: target })
+      if (live?.found !== true || canonicalTarget(live.url) !== canonicalTarget(target)) return { accepted: false, reason: 'target_unavailable' }
+      if (live.userMessageId !== expected.userMessageId || live.assistantMessageId !== expected.assistantMessageId) return { accepted: false, reason: 'stale_intent' }
+      if (live.allowed !== true) return { accepted: false, reason: live.reason || 'blocked' }
+      const matches = await this.store.findByExternalUrl(target)
+      if (matches.some(item => ['sending', 'submitted', 'generating', 'delivery_uncertain'].includes(item.status))) return { accepted: false, reason: 'busy' }
+      if (matches.length > 1) return { accepted: false, reason: 'ambiguous_local_binding' }
+      const conversation = matches[0] ?? await this.store.create({ backend: 'chatgpt-web-extension', externalUrl: target })
+      return this.#send(conversation.id, text, { expected, existingOnly: true, markDispatching })
+    })
+  }
+
+  async #send(conversationId, text, options = {}) {
     this.activeSends.add(conversationId)
     try {
-      return await this.#sendActive(conversationId, text, { app, preAdmitted })
+      return await this.#sendActive(conversationId, text, options)
     } finally {
       this.activeSends.delete(conversationId)
     }
   }
 
-  async #sendActive(conversationId, text, { app, preAdmitted = false } = {}) {
+  async #sendActive(conversationId, text, { app, preAdmitted = false, expected, existingOnly = false, requestId, markDispatching } = {}) {
     const conversation = await this.#loadConversation(conversationId)
     if (!conversation) {
       throw new Error(`Conversation ${conversationId} does not exist in the local ledger`)
@@ -183,17 +221,26 @@ export class ChatGptConversationHost {
       type: 'send_intent',
       turnId: id,
       text,
+      ...(requestId ? { requestId } : {}),
+      ...(expected ? { source: 'watchdog', continuationOf: conversation.latestTurnId ?? null } : {}),
       ...(app ? { app } : {})
     })
     try {
+      await markDispatching?.({ conversationId, turnId: id })
       const result = await this.bridge.request('conversation_send', {
         conversationId,
         turnId: id,
         text,
         ...(app ? { app } : {}),
+        ...(expected ? { expected } : {}),
+        ...(existingOnly ? { existingOnly: true } : {}),
         externalUrl: conversation.externalUrl || DEFAULT_CHATGPT_URL
       })
-      if (result.accepted !== true) throw new Error('Chrome extension did not accept the prompt')
+      if (!result || typeof result.accepted !== 'boolean') throw Object.assign(new Error('invalid browser submission receipt; delivery uncertain'), { code: 'DELIVERY_UNCERTAIN' })
+      if (result.accepted !== true) {
+        await this.store.append(conversationId, { type: 'error', turnId: id, message: result.reason || 'Browser rejected before submission' })
+        return { conversationId, turnId: id, accepted: false, reason: result.reason || 'blocked' }
+      }
       if (result.reattached === true) {
         await this.store.append(conversationId, {
           type: 'browser_attached',

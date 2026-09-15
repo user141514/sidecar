@@ -521,6 +521,22 @@ export function createSidecarServer({ conversationHost, workLedger = null, workC
         writeJson(res, 200, { ok: true, ...(runtimeRelease ? { runtimeRelease } : {}) })
         return
       }
+      if (req.method === 'POST' && url.pathname === '/internal/conversation-intents') {
+        if (!isLoopback(req.socket.remoteAddress) || req.headers.origin) {
+          writeJson(res, 403, { error: 'localhost_non_browser_only' })
+          return
+        }
+        if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
+          writeJson(res, 415, { error: 'json_required' })
+          return
+        }
+        if (typeof conversationHost?.proposeContinuation !== 'function') {
+          writeJson(res, 503, { error: 'intent_owner_unavailable' })
+          return
+        }
+        writeJson(res, 200, await conversationHost.proposeContinuation(await readJson(req)))
+        return
+      }
       if (req.method === 'POST' && url.pathname === '/internal/send-admission') {
         if (!isLoopback(req.socket.remoteAddress)) {
           writeJson(res, 403, { error: 'localhost_only' })

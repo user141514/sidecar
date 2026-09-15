@@ -1,4 +1,5 @@
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { canonicalTarget } from './send-mailbox.mjs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
@@ -140,6 +141,22 @@ export class ConversationStore {
     })
     this.appendQueues.set(id, write.catch(() => {}))
     return write
+  }
+
+  async findByExternalUrl(url) {
+    const key = canonicalTarget(url)
+    let entries
+    try { entries = await readdir(this.rootDir, { withFileTypes: true }) } catch (error) {
+      if (error.code === 'ENOENT') return []
+      throw error
+    }
+    const matches = []
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^conv_[a-z0-9-]+$/.test(entry.name)) continue
+      const conversation = await this.read(entry.name)
+      if (canonicalTarget(conversation.externalUrl, conversation.id) === key) matches.push(conversation)
+    }
+    return matches
   }
 
   async read(id) {

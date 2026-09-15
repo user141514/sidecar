@@ -123,6 +123,7 @@ export class ExtensionBridge extends EventEmitter {
       this.pending.delete(message.requestId)
       if (message.ok === false) pending.reject(Object.assign(
         new Error(message.error || 'Extension request failed'),
+        { definiteRejection: message.errorCode !== 'DELIVERY_UNCERTAIN' },
         message.errorCode ? { code: message.errorCode } : {}
       ))
       else pending.resolve(message.result ?? {})

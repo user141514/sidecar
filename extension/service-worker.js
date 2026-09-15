@@ -288,7 +288,15 @@ async function findMatchingConversationTab(windowId, expectedUrl) {
   return tabs.find((tab) => tabMatchesExpectedUrl(tab, expectedUrl)) ?? null
 }
 
-async function resolveConversationAttachment(conversationId, requestedUrl) {
+async function resolveConversationAttachment(conversationId, requestedUrl, existingOnly = false) {
+  if (existingOnly) {
+    const matches = (await chrome.tabs.query({})).filter(tab => tabMatchesExpectedUrl(tab, requestedUrl))
+    if (matches.length !== 1) throw new Error('exact existing conversation tab required')
+    const tab = matches[0]
+    const state = { windowId: tab.windowId, tabId: tab.id, url: tabPageUrl(tab) }
+    await saveConversation(conversationId, state)
+    return { state, reattached: true, reloadOnReadinessFailure: false }
+  }
   const stored = await loadConversation(conversationId)
   const expectedUrl = chooseConversationUrl(requestedUrl, stored?.url)
   const liveTab = await findRegisteredLiveTab(stored, expectedUrl)
@@ -608,7 +616,8 @@ async function sendConversation(params) {
 async function performSend(params, operation) {
   const { state, reattached, reloadOnReadinessFailure } = await resolveConversationAttachment(
     params.conversationId,
-    params.externalUrl
+    params.externalUrl,
+    params.existingOnly === true
   )
 
   operation.tabId = state.tabId
@@ -636,6 +645,8 @@ async function performSend(params, operation) {
     type: 'conversation_prepare',
     conversationId: params.conversationId,
     turnId: params.turnId,
+    guarded: true,
+    ...(params.expected ? { expected: params.expected } : {}),
     text: params.text,
     ...(params.app ? { app: params.app } : {})
   }, 60_000, async () => {
@@ -676,8 +687,10 @@ async function performSend(params, operation) {
   try { submitted = await boundedMessage(currentState.tabId, {
     type: 'conversation_submit',
     conversationId: params.conversationId,
-    turnId: params.turnId
+    turnId: params.turnId,
+    guarded: true
   }, 15_000) } catch (error) { throw deliveryUncertain(error) }
+  if (submitted?.deliveryUncertain === true) throw deliveryUncertain(submitted.error || 'Submit outcome unknown')
   if (submitted?.accepted !== true) {
     await clearPendingTurn(params.conversationId)
     throw new Error(submitted?.error || 'ChatGPT content script rejected the prompt submission')
@@ -927,6 +940,16 @@ async function executeRequest(message) {
   if (message.method === 'project_find') return findProject(message.params ?? {})
   if (message.method === 'project_create') return extensionLifecycle.runMutation(() => createProject(message.params ?? {}))
   if (message.method === 'conversation_create') return extensionLifecycle.runMutation(() => createConversation(message.params ?? {}))
+  if (message.method === 'conversation_observe') {
+    const expectedUrl = message.params?.externalUrl
+    if (!stableConversationUrl(expectedUrl)) throw new Error('exact conversation URL required')
+    const matches = (await chrome.tabs.query({})).filter(tab => tabMatchesExpectedUrl(tab, expectedUrl))
+    if (matches.length !== 1) return { found: false, reason: 'exact_tab_unavailable' }
+    const tab = matches[0]
+    const snapshot = await boundedMessage(tab.id, { type: 'conversation_observe' }, 2000)
+    if (snapshot?.ready !== true || !tabMatchesExpectedUrl({ url: snapshot.url }, expectedUrl)) return { found: false }
+    return { ...snapshot, found: true }
+  }
   if (message.method === 'conversation_snapshot') return readConversationSnapshot(message.params ?? {})
   if (message.method === 'conversation_send') return extensionLifecycle.runMutation(() => sendConversation(message.params ?? {}))
   throw new Error(`Unknown native request method: ${message.method}`)
