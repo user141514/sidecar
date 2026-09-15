@@ -4,7 +4,7 @@ import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
 function fixture({ normalizeWrites = false } = {}) {
-  let listener, clicks = 0, pending = false, active = false, gate = false
+  let listener, clicks = 0, pending = false, active = false, gate = false, submitted = false
   class Editor {
     _value = ''
     get value() { return this._value }
@@ -17,7 +17,7 @@ function fixture({ normalizeWrites = false } = {}) {
   const turn = { getAttribute() { return 'conversation-turn-2' }, querySelector(s) { return s.includes('turn-action') ? {} : null } }
   const assistant = { innerText: 'complete body', getAttribute(n) { return n === 'data-message-id' ? 'a1' : null }, closest() { return turn }, compareDocumentPosition(n) { return pending && n === user ? 4 : 0 } }
   const user = { innerText: 'task', getAttribute(n) { return n === 'data-message-id' ? (pending ? 'u2' : 'u1') : null }, compareDocumentPosition() { return pending ? 0 : 4 }, querySelector() { return null } }
-  const button = { disabled: false, getAttribute() { return null }, click() { clicks++; editor.value = '' } }
+  const button = { disabled: false, getAttribute() { return null }, click() { clicks++; editor.value = ''; submitted = true } }
   const document = {
     querySelector(s) {
       if (s === '#prompt-textarea') return editor
@@ -28,7 +28,7 @@ function fixture({ normalizeWrites = false } = {}) {
     },
     querySelectorAll(s) {
       if (s === '[data-message-author-role="assistant"]') return [assistant]
-      if (s === '[data-message-author-role="user"]') return [user]
+      if (s === '[data-message-author-role="user"]') return submitted ? [user, {}] : [user]
       return []
     }
   }
