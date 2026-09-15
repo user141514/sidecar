@@ -12,6 +12,7 @@ const CHATGPT_URL = 'https://chatgpt.com/'
 const STORAGE_PREFIX = 'conversation:'
 const PENDING_PREFIX = 'pending:'
 const OUTBOX_PREFIX = 'outbox:'
+const EFFECT_RECEIPT_PREFIX = 'effect-receipt:'
 const WINDOW0_KEY = 'window0'
 
 let nativePort = null
@@ -52,6 +53,10 @@ function pendingKey(conversationId) {
 
 function terminalEventId(event) {
   return `terminal:${event.conversationId}:${event.turnId}:${event.type}`
+}
+
+function effectReceiptKey(requestId) {
+  return `${EFFECT_RECEIPT_PREFIX}${requestId}`
 }
 
 function outboxKey(eventId) {
@@ -206,6 +211,23 @@ async function loadPendingTurn(conversationId) {
 
 async function clearPendingTurn(conversationId) {
   await chrome.storage.local.remove(pendingKey(conversationId))
+}
+
+async function saveEffectReceipt(receipt) {
+  const key = effectReceiptKey(receipt.requestId)
+  const stored = await chrome.storage.local.get(key)
+  const existing = stored[key]
+  if (existing && JSON.stringify(existing) !== JSON.stringify(receipt)) {
+    throw new Error('effect receipt identity conflict')
+  }
+  if (!existing) await chrome.storage.local.set({ [key]: receipt })
+  return existing ?? receipt
+}
+
+async function loadEffectReceipt(requestId) {
+  const key = effectReceiptKey(requestId)
+  const stored = await chrome.storage.local.get(key)
+  return stored[key] ?? null
 }
 
 async function saveOutboxEvent(record) {
@@ -596,6 +618,20 @@ async function ensureContentScriptForAttachment(state, reloadOnReadinessFailure)
 
 async function sendConversation(params) {
   const id = params.conversationId
+  if (typeof params.requestId === 'string' && params.requestId) {
+    const receipt = await loadEffectReceipt(params.requestId)
+    if (receipt) {
+      if (receipt.conversationId !== id || receipt.turnId !== params.turnId) {
+        throw new Error('effect receipt identity conflict')
+      }
+      return {
+        accepted: true,
+        reconciled: true,
+        userMessageId: receipt.userMessageId,
+        url: receipt.externalUrl || params.externalUrl || CHATGPT_URL
+      }
+    }
+  }
   if (sendOwners.has(id)) throw deliveryUncertain('Conversation already has an active browser send')
   sendOwners.add(id)
   const operation = { conversationId: id, turnId: params.turnId, phase: 'attaching', startedAt: Date.now() }
@@ -639,6 +675,7 @@ async function performSend(params, operation) {
   let pending = {
     conversationId: params.conversationId,
     turnId: params.turnId,
+    ...(params.requestId ? { requestId: params.requestId } : {}),
     tabId: state.tabId,
     promptText: params.text,
     startedAt: Date.now(),
@@ -701,6 +738,18 @@ async function performSend(params, operation) {
   if (submitted?.accepted !== true) {
     await clearPendingTurn(params.conversationId)
     throw new Error(submitted?.error || 'ChatGPT content script rejected the prompt submission')
+  }
+  if (typeof submitted.userMessageId !== 'string' || !submitted.userMessageId) {
+    throw deliveryUncertain('Submit acknowledgement lacked stable user message identity')
+  }
+  if (typeof params.requestId === 'string' && params.requestId) {
+    await saveEffectReceipt({
+      requestId: params.requestId,
+      conversationId: params.conversationId,
+      turnId: params.turnId,
+      userMessageId: submitted.userMessageId,
+      externalUrl: chooseConversationUrl(submitted.url, currentState.url)
+    })
   }
 
   const submittedUrl = await waitForConversationThreadUrl(
@@ -958,6 +1007,12 @@ async function executeRequest(message) {
     return { ...snapshot, found: true }
   }
   if (message.method === 'conversation_snapshot') return readConversationSnapshot(message.params ?? {})
+  if (message.method === 'conversation_effect_receipt') {
+    const requestId = message.params?.requestId
+    if (typeof requestId !== 'string' || !requestId || requestId.length > 256) throw new TypeError('valid requestId required')
+    const receipt = await loadEffectReceipt(requestId)
+    return receipt ? { found: true, receipt } : { found: false }
+  }
   if (message.method === 'conversation_send') return extensionLifecycle.runMutation(() => sendConversation(message.params ?? {}))
   throw new Error(`Unknown native request method: ${message.method}`)
 }
@@ -971,18 +1026,31 @@ async function handleNativeRequest(message) {
   }
 
   if (message?.kind !== 'request' || typeof message.requestId !== 'string') return
+  let result
   try {
-    const result = await executeRequest(message)
+    result = await executeRequest(message)
     extensionLifecycle.afterResponse(message.method, result)
-    postNative({ kind: 'response', requestId: message.requestId, ok: true, result })
   } catch (error) {
-    postNative({
-      kind: 'response',
-      requestId: message.requestId,
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-      errorCode: error?.code
-    })
+    try {
+      postNative({
+        kind: 'response',
+        requestId: message.requestId,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: error?.code
+      })
+    } catch {
+      scheduleReconnect()
+    }
+    return
+  }
+
+  try {
+    postNative({ kind: 'response', requestId: message.requestId, ok: true, result })
+  } catch {
+    // The browser effect may already be durable. Never synthesize a business
+    // rejection from response-channel loss; Sidecar will time out and reconcile.
+    scheduleReconnect()
   }
 }
 

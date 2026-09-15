@@ -52,7 +52,7 @@ async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = f
     },
     querySelectorAll(selector) {
       if (selector === '[data-message-author-role="assistant"]') return []
-      if (selector === '[data-message-author-role="user"]') return userSubmitted ? [{}] : []
+      if (selector === '[data-message-author-role="user"]') return userSubmitted ? [{ getAttribute(name) { return name === 'data-message-id' ? 'user-submitted-1' : null } }] : []
       if (selector === 'button') return [sendButton]
       if (selector === '[contenteditable="true"]') return []
       return []
@@ -111,11 +111,13 @@ test('conversation_submit rejects generation UI without a new user turn', async 
 test('conversation_submit falls back to button click when no form is available', async () => {
   const response = await runSubmitFixture({ clickTakesEffect: true, hasForm: false })
   assert.equal(response.accepted, true)
+  assert.equal(response.userMessageId, 'user-submitted-1')
 })
 
 test('conversation_submit prefers native form submission when button click is ignored', async () => {
   const response = await runSubmitFixture({ clickTakesEffect: false, requestSubmitTakesEffect: true })
   assert.equal(response.accepted, true)
+  assert.equal(response.userMessageId, 'user-submitted-1')
 })
 
 test('conversation_prepare selects a requested ChatGPT app before writing prompt text', async () => {

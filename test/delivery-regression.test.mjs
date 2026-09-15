@@ -49,6 +49,50 @@ test('timed out send remains uncertain across host restart and rejects overlappi
   assert.equal(done.latestResponse, 'late success')
 })
 
+test('restart reconciles an uncertain send from durable browser effect receipt without resending', async t => {
+  const { dir, conversation, channel, bridge, host } = await fixture(t)
+  const requestId = 'request-reconcile'
+  await assert.rejects(host.send(conversation.id, 'once', { requestId }), { code: 'DELIVERY_UNCERTAIN' })
+  const uncertain = await host.read(conversation.id)
+  assert.equal(uncertain.status, 'delivery_uncertain')
+  const firstSend = channel.sent.find(message => message.method === 'conversation_send')
+  assert.equal(firstSend.params.requestId, requestId)
+
+  bridge.requestTimeoutMs = 1000
+  const restarted = new ChatGptConversationHost({ bridge, store: new ConversationStore(dir) })
+  const priorLookupCount = channel.sent.filter(message => message.method === 'conversation_effect_receipt').length
+  const reading = restarted.read(conversation.id)
+  while (channel.sent.filter(message => message.method === 'conversation_effect_receipt').length <= priorLookupCount) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  const lookup = channel.sent.findLast(message => message.method === 'conversation_effect_receipt')
+  channel.emit('message', {
+    kind: 'response',
+    requestId: lookup.requestId,
+    ok: true,
+    result: {
+      found: true,
+      receipt: {
+        requestId,
+        conversationId: conversation.id,
+        turnId: uncertain.latestTurnId,
+        userMessageId: 'user-effect-1',
+        externalUrl: 'https://chatgpt.com/c/thread'
+      }
+    }
+  })
+
+  const reconciled = await reading
+  assert.equal(reconciled.status, 'generating')
+  assert.equal(reconciled.latestTurnId, uncertain.latestTurnId)
+  assert.equal(channel.sent.filter(message => message.method === 'conversation_send').length, 1)
+
+  const duplicate = await restarted.send(conversation.id, 'once', { requestId })
+  assert.equal(duplicate.accepted, true)
+  assert.equal(duplicate.turnId, uncertain.latestTurnId)
+  assert.equal(channel.sent.filter(message => message.method === 'conversation_send').length, 1)
+})
+
 test('completion before send acknowledgement cannot be downgraded by late acknowledgement', async t => {
   const { conversation, channel, host, bridge } = await fixture(t)
   bridge.requestTimeoutMs = 1000

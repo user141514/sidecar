@@ -45,6 +45,43 @@ test('watchdog proposal is routed through one durable host send and duplicate re
   assert.equal(sends[0].params.existingOnly, true)
 })
 
+test('watchdog retries reconcile a durable browser effect receipt instead of resending', async t => {
+  const { host, bridge } = await setup(t)
+  let firstSend = null
+  bridge.request = async (method, params) => {
+    bridge.calls.push({ method, params })
+    if (method === 'conversation_observe') return bridge.observation
+    if (method === 'conversation_send') {
+      if (firstSend) assert.fail('watchdog must not resend after external effect is proven')
+      firstSend = { method, params }
+      throw Object.assign(new Error('Sidecar lost browser acknowledgement'), { code: 'DELIVERY_UNCERTAIN' })
+    }
+    if (method === 'conversation_effect_receipt') {
+      return {
+        found: true,
+        receipt: {
+          requestId: params.requestId,
+          conversationId: firstSend.params.conversationId,
+          turnId: firstSend.params.turnId,
+          userMessageId: 'user-reconciled',
+          externalUrl: target
+        }
+      }
+    }
+    assert.fail(`unexpected browser effect: ${method}`)
+  }
+
+  const uncertain = await host.proposeContinuation(intent)
+  assert.equal(uncertain.reason, 'delivery_uncertain')
+  assert.equal(typeof firstSend.params.requestId, 'string')
+
+  const reconciled = await host.proposeContinuation(intent)
+  assert.equal(reconciled.accepted, true)
+  assert.equal(reconciled.turnId, firstSend.params.turnId)
+  assert.equal(bridge.calls.filter(call => call.method === 'conversation_send').length, 1)
+  assert.equal(bridge.calls.filter(call => call.method === 'conversation_effect_receipt').length, 1)
+})
+
 test('coordinator wins first: watchdog cannot send behind its in-flight turn', async t => {
   const { host, store, bridge } = await setup(t)
   const conversation = await store.create({ backend: 'chatgpt-web-extension', externalUrl: target })

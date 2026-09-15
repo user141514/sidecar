@@ -17,6 +17,7 @@ function fixture({ normalizeWrites = false } = {}) {
   const turn = { getAttribute() { return 'conversation-turn-2' }, querySelector(s) { return s.includes('turn-action') ? {} : null } }
   const assistant = { innerText: 'complete body', getAttribute(n) { return n === 'data-message-id' ? 'a1' : null }, closest() { return turn }, compareDocumentPosition(n) { return pending && n === user ? 4 : 0 } }
   const user = { innerText: 'task', getAttribute(n) { return n === 'data-message-id' ? (pending ? 'u2' : 'u1') : null }, compareDocumentPosition() { return pending ? 0 : 4 }, querySelector() { return null } }
+  const submittedUser = { innerText: 'submitted command', getAttribute(n) { return n === 'data-message-id' ? 'u-submit' : null }, querySelector() { return null } }
   const button = { disabled: false, getAttribute() { return null }, click() { clicks++; editor.value = ''; submitted = true } }
   const document = {
     querySelector(s) {
@@ -28,7 +29,7 @@ function fixture({ normalizeWrites = false } = {}) {
     },
     querySelectorAll(s) {
       if (s === '[data-message-author-role="assistant"]') return [assistant]
-      if (s === '[data-message-author-role="user"]') return submitted ? [user, {}] : [user]
+      if (s === '[data-message-author-role="user"]') return submitted ? [user, submittedUser] : [user]
       return []
     }
   }

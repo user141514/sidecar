@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -56,6 +59,114 @@ test('uncertain effect blocks both replay and a fresh request after restart', as
     const next = await restarted.run(url, requestId, {}, async () => assert.fail('must not replay'))
     assert.equal(next.reason, 'delivery_uncertain')
   }
+})
+
+test('authoritative effect receipt settles an uncertain pending request without replay', async t => {
+  const { box, rootDir } = await fixture(t)
+  let sends = 0
+  const first = await box.run(url, 'lost', { text: 'once' }, async dispatch => {
+    await dispatch({ conversationId: 'conv-1', turnId: 'turn-1' })
+    sends++
+    throw new Error('response lost after browser effect')
+  })
+  assert.equal(first.reason, 'delivery_uncertain')
+
+  const restarted = new mod.SendMailbox({ rootDir })
+  const reconciled = await restarted.reconcile(url, 'lost', {
+    accepted: true,
+    conversationId: 'conv-1',
+    turnId: 'turn-1',
+    reconciled: true
+  })
+  assert.equal(reconciled.accepted, true)
+
+  const replay = await restarted.run(url, 'lost', { text: 'once' }, async () => assert.fail('must not replay reconciled effect'))
+  assert.deepEqual(replay, reconciled)
+  assert.equal(sends, 1)
+})
+
+test('reconciliation fences an orphaned mailbox lock only after proving its owner dead', async t => {
+  const { box, rootDir } = await fixture(t)
+  await box.run(url, 'lost-crash', { text: 'once' }, async dispatch => {
+    await dispatch({ conversationId: 'conv-1', turnId: 'turn-1' })
+    throw new Error('effect happened before process crash')
+  })
+
+  const key = 'chatgpt:00000000-0000-0000-0000-000000000001'
+  const stateFile = join(rootDir, `${createHash('sha256').update(key).digest('hex')}.json`)
+  const lockDir = `${stateFile}.lock`
+  await mkdir(lockDir)
+  await writeFile(join(lockDir, 'owner.json'), `${JSON.stringify({ pid: 424242, ownerId: 'dead-owner' })}\n`)
+
+  const restarted = new mod.SendMailbox({ rootDir, processAlive: () => false, pid: 515151, ownerId: 'new-owner' })
+  const reconciled = await restarted.reconcile(url, 'lost-crash', {
+    accepted: true,
+    conversationId: 'conv-1',
+    turnId: 'turn-1',
+    reconciled: true
+  })
+  assert.equal(reconciled.accepted, true)
+})
+
+test('reconciliation never steals a lock whose owner is still alive', async t => {
+  const { box, rootDir } = await fixture(t)
+  await box.run(url, 'lost-live', { text: 'once' }, async dispatch => {
+    await dispatch({ conversationId: 'conv-1', turnId: 'turn-1' })
+    throw new Error('uncertain')
+  })
+
+  const key = 'chatgpt:00000000-0000-0000-0000-000000000001'
+  const stateFile = join(rootDir, `${createHash('sha256').update(key).digest('hex')}.json`)
+  const lockDir = `${stateFile}.lock`
+  await mkdir(lockDir)
+  await writeFile(join(lockDir, 'owner.json'), `${JSON.stringify({ pid: 616161, ownerId: 'live-owner' })}\n`)
+
+  const restarted = new mod.SendMailbox({ rootDir, processAlive: () => true, pid: 717171, ownerId: 'new-owner' })
+  const result = await restarted.reconcile(url, 'lost-live', {
+    accepted: true,
+    conversationId: 'conv-1',
+    turnId: 'turn-1',
+    reconciled: true
+  })
+  assert.equal(result.reason, 'delivery_uncertain')
+})
+
+test('hard-killed mailbox owner is reconciled after restart without a second effect', async t => {
+  const { rootDir } = await fixture(t)
+  const child = spawn(process.execPath, [
+    fileURLToPath(new URL('./send-mailbox-crash-child.mjs', import.meta.url)),
+    rootDir,
+    url
+  ], { stdio: ['ignore', 'pipe', 'pipe'] })
+  t.after(() => { if (child.exitCode === null) child.kill('SIGKILL') })
+
+  await new Promise((resolve, reject) => {
+    child.stdout.setEncoding('utf8')
+    let output = ''
+    child.stdout.on('data', chunk => {
+      output += chunk
+      if (output.includes('DISPATCHED')) resolve()
+    })
+    child.once('error', reject)
+    child.once('exit', code => {
+      if (!output.includes('DISPATCHED')) reject(new Error(`crash child exited before dispatch: ${code}`))
+    })
+  })
+  const deadPid = child.pid
+  child.kill('SIGKILL')
+  await new Promise(resolve => child.once('exit', resolve))
+  assert.ok(Number.isInteger(deadPid))
+
+  const restarted = new mod.SendMailbox({ rootDir })
+  const reconciled = await restarted.reconcile(url, 'crash-child', {
+    accepted: true,
+    conversationId: 'conv-crash',
+    turnId: 'turn-crash',
+    reconciled: true
+  })
+  assert.equal(reconciled.accepted, true)
+  const replay = await restarted.run(url, 'crash-child', { text: 'once' }, async () => assert.fail('must not repeat browser effect'))
+  assert.deepEqual(replay, reconciled)
 })
 
 test('preflight denial can be retried without consuming an effect reservation', async t => {

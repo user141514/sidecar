@@ -147,8 +147,11 @@ export class ChatGptConversationHost {
     const prior = (conversation.events || []).find(event => event.type === 'send_intent' && event.requestId === requestId)
     if (prior) {
       if (prior.text !== text || prior.app !== app) throw new Error('request identity conflict')
-      const accepted = conversation.events.some(event => event.turnId === prior.turnId && ['generation_started', 'response_completed', 'need_continue'].includes(event.type))
-      if (accepted) return { conversationId, turnId: prior.turnId, accepted: true }
+      let current = conversation
+      let accepted = current.events.some(event => event.turnId === prior.turnId && ['generation_started', 'response_completed', 'need_continue'].includes(event.type))
+      if (!accepted) current = await this.#reconcileDelivery(current, requestId) ?? current
+      accepted = current.events.some(event => event.turnId === prior.turnId && ['generation_started', 'response_completed', 'need_continue'].includes(event.type))
+      if (accepted) return { conversationId, turnId: prior.turnId, accepted: true, ...(current.status === 'generating' ? { reconciled: true } : {}) }
       throw Object.assign(new Error('prior request delivery uncertain; read and reconcile before retry'), { code: 'DELIVERY_UNCERTAIN', conversationId, turnId: prior.turnId })
     }
     const result = await this.mailbox.run(conversation.externalUrl, requestId, { source: 'coordinator', conversationId, text, app },
@@ -170,6 +173,11 @@ export class ChatGptConversationHost {
     if (kind !== 'continue') return { accepted: false, reason: 'recovery_requires_reconciliation' }
     if (typeof text !== 'string' || !text.trim() || text.length > 16_384) throw new TypeError('bounded continuation text required')
     const requestId = createHash('sha256').update(JSON.stringify([canonicalTarget(target), kind, expected.userMessageId, expected.assistantMessageId])).digest('hex')
+    const known = await this.store.findByExternalUrl(target)
+    for (const conversation of known) {
+      if (conversation.status !== 'delivery_uncertain') continue
+      await this.#reconcileDelivery(conversation, requestId)
+    }
     return this.mailbox.run(target, requestId, { kind, userMessageId: expected.userMessageId, assistantMessageId: expected.assistantMessageId, text }, async markDispatching => {
       const live = await this.bridge.request('conversation_observe', { externalUrl: target })
       if (live?.found !== true || canonicalTarget(live.url) !== canonicalTarget(target)) return { accepted: false, reason: 'target_unavailable' }
@@ -179,7 +187,7 @@ export class ChatGptConversationHost {
       if (matches.some(item => ['sending', 'submitted', 'generating', 'delivery_uncertain'].includes(item.status))) return { accepted: false, reason: 'busy' }
       if (matches.length > 1) return { accepted: false, reason: 'ambiguous_local_binding' }
       const conversation = matches[0] ?? await this.store.create({ backend: 'chatgpt-web-extension', externalUrl: target })
-      return this.#send(conversation.id, text, { expected, existingOnly: true, markDispatching })
+      return this.#send(conversation.id, text, { expected, existingOnly: true, requestId, markDispatching })
     })
   }
 
@@ -230,6 +238,7 @@ export class ChatGptConversationHost {
       const result = await this.bridge.request('conversation_send', {
         conversationId,
         turnId: id,
+        requestId,
         text,
         ...(app ? { app } : {}),
         ...(expected ? { expected } : {}),
@@ -268,7 +277,10 @@ export class ChatGptConversationHost {
   }
 
   async read(conversationId) {
-    const stored = await this.store.read(conversationId)
+    let stored = await this.store.read(conversationId)
+    if (stored.status === 'delivery_uncertain') {
+      stored = await this.#reconcileDelivery(stored) ?? stored
+    }
     if (stored.status !== 'completed' || this.activeSends.has(conversationId) || typeof stored.externalUrl !== 'string' || !stored.externalUrl) return stored
 
     const readLive = async () => {
@@ -301,6 +313,56 @@ export class ChatGptConversationHost {
       status: second.generating ? 'generating' : 'completed',
       latestResponse: second.assistantText || first.assistantText || stored.latestResponse
     }
+  }
+
+  async #reconcileDelivery(conversation, expectedRequestId = null) {
+    const intent = [...(conversation.events || [])].reverse().find(event =>
+      event.type === 'send_intent' &&
+      typeof event.requestId === 'string' && event.requestId &&
+      (!expectedRequestId || event.requestId === expectedRequestId)
+    )
+    if (!intent) return null
+
+    let lookup
+    try {
+      lookup = await this.bridge.request('conversation_effect_receipt', { requestId: intent.requestId })
+    } catch {
+      return null
+    }
+    const receipt = lookup?.found === true ? lookup.receipt : null
+    if (!receipt || receipt.requestId !== intent.requestId || receipt.conversationId !== conversation.id ||
+        receipt.turnId !== intent.turnId || typeof receipt.userMessageId !== 'string' || !receipt.userMessageId) return null
+
+    const result = {
+      conversationId: conversation.id,
+      turnId: intent.turnId,
+      accepted: true,
+      reconciled: true,
+      userMessageId: receipt.userMessageId
+    }
+    const settled = await this.mailbox.reconcile(
+      conversation.externalUrl,
+      intent.requestId,
+      result,
+      conversation.id
+    )
+    if (settled?.accepted !== true) return null
+
+    const current = await this.store.read(conversation.id)
+    const alreadyAccepted = current.events.some(event =>
+      event.turnId === intent.turnId && ['generation_started', 'response_completed', 'need_continue'].includes(event.type)
+    )
+    if (!alreadyAccepted) {
+      await this.store.append(conversation.id, {
+        type: 'generation_started',
+        turnId: intent.turnId,
+        externalUrl: typeof receipt.externalUrl === 'string' && receipt.externalUrl ? receipt.externalUrl : conversation.externalUrl,
+        effectRequestId: intent.requestId,
+        effectUserMessageId: receipt.userMessageId,
+        reconciled: true
+      })
+    }
+    return this.store.read(conversation.id)
   }
 
   async #loadConversation(conversationId) {

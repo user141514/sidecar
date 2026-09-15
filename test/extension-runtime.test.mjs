@@ -218,7 +218,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           if (submitTransportFailure) throw new Error('submit response lost during navigation')
           const responseUrl = tab.url
           if (submitNavigatesTo) tab.url = submitNavigatesTo
-          return { accepted: true, url: responseUrl }
+          return { accepted: true, userMessageId: `user-${message.turnId}`, url: responseUrl }
         }
         if (message.type === 'conversation_send') {
           return { accepted: true, url: tab.url, baselineAssistantCount: 0 }
@@ -364,13 +364,111 @@ test('Project slug redirect preserves the existing tab', async () => {
   assert.equal(result.result.url, alias)
 })
 
+test('accepted browser effect persists a request-to-user-turn receipt before native acknowledgement', async () => {
+  const externalUrl = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000099'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_receipt': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+
+  const result = await harness.request('conversation_send', {
+    conversationId: 'conv_receipt',
+    turnId: 'turn_receipt',
+    requestId: 'request-receipt',
+    text: 'hello',
+    externalUrl
+  })
+
+  assert.equal(result.ok, true)
+  const receipt = JSON.parse(JSON.stringify(harness.storageState['effect-receipt:request-receipt']))
+  assert.deepEqual(receipt, {
+    requestId: 'request-receipt',
+    conversationId: 'conv_receipt',
+    turnId: 'turn_receipt',
+    userMessageId: 'user-turn_receipt',
+    externalUrl
+  })
+  const lookup = await harness.request('conversation_effect_receipt', { requestId: 'request-receipt' })
+  assert.equal(lookup.ok, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(lookup.result)), { found: true, receipt })
+})
+
+test('duplicate request identity is deduplicated at the Extension before a second browser mutation', async () => {
+  const externalUrl = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000097'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_dedupe': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+  const params = {
+    conversationId: 'conv_dedupe',
+    turnId: 'turn_dedupe',
+    requestId: 'request-dedupe',
+    text: 'hello',
+    externalUrl
+  }
+
+  const first = await harness.request('conversation_send', params)
+  assert.equal(first.ok, true)
+  const prepareCount = harness.sentToTabs.filter(entry => entry.message.type === 'conversation_prepare').length
+  const submitCount = harness.sentToTabs.filter(entry => entry.message.type === 'conversation_submit').length
+
+  const duplicate = await harness.request('conversation_send', params)
+  assert.equal(duplicate.ok, true)
+  assert.equal(duplicate.result.userMessageId, 'user-turn_dedupe')
+  assert.equal(harness.sentToTabs.filter(entry => entry.message.type === 'conversation_prepare').length, prepareCount)
+  assert.equal(harness.sentToTabs.filter(entry => entry.message.type === 'conversation_submit').length, submitCount)
+
+  const conflict = await harness.request('conversation_send', { ...params, turnId: 'turn_other' })
+  assert.equal(conflict.ok, false)
+  assert.match(conflict.error, /receipt.*conflict|identity.*conflict/i)
+  assert.equal(harness.sentToTabs.filter(entry => entry.message.type === 'conversation_submit').length, submitCount)
+})
+
+test('lost native acceptance after browser effect keeps receipt and never synthesizes a definite rejection', async () => {
+  const externalUrl = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000098'
+  const harness = makeHarness({
+    failAcceptedResponsePostOnce: true,
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_ack_lost': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+
+  await harness.sendNativeMessage({
+    kind: 'request',
+    requestId: 'native-ack-lost',
+    method: 'conversation_send',
+    params: {
+      conversationId: 'conv_ack_lost',
+      turnId: 'turn_ack_lost',
+      requestId: 'effect-ack-lost',
+      text: 'hello',
+      externalUrl
+    }
+  })
+
+  assert.equal(harness.storageState['effect-receipt:effect-ack-lost']?.userMessageId, 'user-turn_ack_lost')
+  assert.equal(harness.nativeMessages.filter(message => message.requestId === 'native-ack-lost').length, 0)
+})
+
 test('pending intent precedes prepare and survives loss of its response', async () => {
   const harness = makeHarness({ prepareTransportFailure: true })
-  const result = await harness.request('conversation_send', { conversationId: 'conv_lost', turnId: 'turn_lost', text: 'hello' })
+  const result = await harness.request('conversation_send', { conversationId: 'conv_lost', turnId: 'turn_lost', requestId: 'request-lost', text: 'hello' })
   assert.equal(result.ok, false)
   assert.equal(result.errorCode, 'DELIVERY_UNCERTAIN')
   const prepare = harness.sentToTabs.find(x => x.message.type === 'conversation_prepare')
   assert.equal(prepare.storageSnapshot['pending:conv_lost'].phase, 'preparing')
+  assert.equal(prepare.storageSnapshot['pending:conv_lost'].requestId, 'request-lost')
   assert.equal(harness.storageState['pending:conv_lost'].turnId, 'turn_lost')
   assert.equal(harness.sentToTabs.filter(x => x.message.type === 'conversation_submit').length, 0)
   const retry = await harness.request('conversation_send', { conversationId: 'conv_lost', turnId: 'turn_retry', text: 'again' })
@@ -1063,13 +1161,19 @@ test('reload remains scheduled when the accepted native response transport is lo
     failAcceptedResponsePostOnce: true
   })
 
-  const response = await harness.request('extension_reload', {
-    requestId: 'reload-lost-ack',
-    expectedInstanceId: 'test-instance',
-    expectedBuildId: 'a'.repeat(64)
+  await harness.sendNativeMessage({
+    kind: 'request',
+    requestId: 'reload-native-lost',
+    method: 'extension_reload',
+    params: {
+      requestId: 'reload-lost-ack',
+      expectedInstanceId: 'test-instance',
+      expectedBuildId: 'a'.repeat(64)
+    }
   })
 
-  assert.equal(response.ok, false, 'the simulated native transport must lose the accepted response')
+  assert.equal(harness.nativeMessages.some(message => message.requestId === 'reload-native-lost'), false,
+    'lost success ACK must not be replaced by a synthetic business rejection')
   assert.equal(harness.runtimeReloadCount, 0)
   harness.runDeferredReload()
   assert.equal(harness.runtimeReloadCount, 1, 'reload scheduling must not depend on successful ACK delivery')

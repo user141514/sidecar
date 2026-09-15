@@ -85,7 +85,10 @@ async function waitAndSubmit(beforeClick = null) {
         const draft = editor
           ? (typeof editor.value === 'string' ? editor.value : (editor.innerText || editor.textContent || ''))
           : ''
-        if (userMessages().length > baselineUserCount) return
+        if (userMessages().length > baselineUserCount) {
+          const userMessageId = userMessages().at(-1)?.getAttribute?.('data-message-id') || ''
+          if (userMessageId) return { userMessageId }
+        }
         await sleep(125)
       }
       throw Object.assign(new Error('ChatGPT submit click produced no observable submission progress'), { deliveryUncertain: true })
@@ -880,10 +883,11 @@ async function handleSubmit(message = {}) {
     assertWriterObservation(observation, prepared.expected)
     if (observation.stamp !== prepared.stamp) throw new Error('stale_intent')
   } : null
-  await waitAndSubmit(guard)
+  const submission = await waitAndSubmit(guard)
   preparedSend = null
   return {
     accepted: true,
+    userMessageId: submission.userMessageId,
     url: location.href
   }
 }
