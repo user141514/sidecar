@@ -29,7 +29,7 @@ function statusFromEvents(events) {
     }
 
     if (event.type === 'delivery_uncertain') {
-      if (status !== 'completed' && status !== 'error') {
+      if (status !== 'completed' && status !== 'need_continue' && status !== 'error') {
         status = 'delivery_uncertain'
         error = event.message ?? 'delivery outcome is unknown'
       }
@@ -37,7 +37,7 @@ function statusFromEvents(events) {
     }
 
     if (event.type === 'generation_started') {
-      if (status === 'completed' || status === 'error') continue
+      if (status === 'completed' || status === 'need_continue' || status === 'error') continue
       if (latestTurnId === null) latestTurnId = event.turnId ?? null
       if (event.turnId === latestTurnId) {
         status = 'generating'
@@ -57,8 +57,19 @@ function statusFromEvents(events) {
       continue
     }
 
-    if (event.type === 'error') {
+    if (event.type === 'need_continue') {
       if (status === 'completed') continue
+      if (latestTurnId === null) latestTurnId = event.turnId ?? null
+      if (event.turnId === latestTurnId) {
+        status = 'need_continue'
+        latestResponse = event.text ?? ''
+        error = null
+      }
+      continue
+    }
+
+    if (event.type === 'error') {
+      if (status === 'completed' || status === 'need_continue') continue
       if (!event.turnId) {
         status = 'error'
         latestResponse = null

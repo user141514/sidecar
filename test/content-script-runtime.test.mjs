@@ -1318,6 +1318,9 @@ test('recovery anchors the current assistant to the last matching user prompt in
   const userNode = {
     innerText: '重复使用当前 prompt',
     textContent: '重复使用当前 prompt',
+    getAttribute(name) {
+      return name === 'data-message-id' ? 'user-reloaded' : null
+    },
     compareDocumentPosition(other) {
       return other === assistantNode ? 4 : 0
     }
@@ -1403,6 +1406,9 @@ test('recovery waits for an assistant node before comparing DOM position', async
   const userNode = {
     innerText: '等待 assistant',
     textContent: '等待 assistant',
+    getAttribute(name) {
+      return name === 'data-message-id' ? 'user-delayed' : null
+    },
     compareDocumentPosition(other) {
       if (other !== assistantNode) {
         throw new TypeError("Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'.")
@@ -1686,12 +1692,16 @@ test('normal completion waits for explicit final-turn evidence instead of a stab
   assert.equal(emitted[0].text, 'FULL RESPONSE')
 })
 
-test('recovery may complete without seeing generation when terminal UI evidence converges for 10 seconds', async () => {
+test('recovery may complete without seeing generation when the exact prompt turn has final-turn evidence and converges for 10 seconds', async () => {
   const emitted = []
   let now = 0
   let poll = 0
+  const promptText = '恢复当前任务'
 
   const turnRoot = {
+    getAttribute(name) {
+      return name === 'data-testid' ? 'conversation-turn-recovery' : null
+    },
     querySelector(selector) {
       return selector.includes('copy-turn-action-button') ? { disabled: false } : null
     }
@@ -1703,6 +1713,16 @@ test('recovery may complete without seeing generation when terminal UI evidence 
       return turnRoot
     }
   }
+  const userNode = {
+    innerText: promptText,
+    textContent: promptText,
+    getAttribute(name) {
+      return name === 'data-message-id' ? 'user-recovery' : null
+    },
+    compareDocumentPosition(other) {
+      return other === assistantNode ? 4 : 0
+    }
+  }
 
   const document = {
     querySelector() {
@@ -1710,6 +1730,7 @@ test('recovery may complete without seeing generation when terminal UI evidence 
     },
     querySelectorAll(selector) {
       if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
+      if (selector === '[data-message-author-role="user"]') return [userNode]
       if (selector === 'button') return []
       if (selector === '[contenteditable="true"]') return []
       return []
@@ -1755,6 +1776,7 @@ test('recovery may complete without seeing generation when terminal UI evidence 
     conversationId: 'conv_project',
     turnId: 'turn_recovery',
     baselineAssistantCount: 0,
+    promptText,
     recovery: true
   })
 
@@ -2097,4 +2119,252 @@ test('active generation refreshes the inactivity watchdog beyond the nominal 20-
   assert.equal(emitted[0].type, 'response_completed')
   assert.equal(emitted[0].text, '长任务最终回答')
   assert.ok(now >= 1_220_000, `active generation was terminated by total runtime at ${now}ms`)
+})
+
+test('composer observation distinguishes generating, draft-ready, idle, interrupted, and error states', () => {
+  let state = 'idle'
+  const editor = {
+    get value() { return state === 'draft' ? 'unsent draft' : '' },
+    getAttribute() { return null }
+  }
+  const buttonForState = () => {
+    const labels = {
+      generating: 'Stop responding',
+      interrupted: 'Continue generating',
+      error: 'Try again'
+    }
+    const label = labels[state]
+    return label ? [{ getAttribute: (name) => name === 'aria-label' ? label : null, textContent: '' }] : []
+  }
+  const document = {
+    querySelector(selector) {
+      if (selector === '#prompt-textarea') return editor
+      if (selector === '[data-testid="stop-button"]') return null
+      if (selector === '[role="alert"]') return null
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === 'button') return buttonForState()
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[role="alert"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/c/composer-state' },
+    chrome: { runtime: { onMessage: { addListener() {} } } },
+    Promise,
+    Object,
+    console,
+    setTimeout,
+    clearTimeout
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  assert.equal(context.__sidecarContentRuntime.getComposerMode(), 'IDLE_EMPTY')
+  state = 'draft'
+  assert.equal(context.__sidecarContentRuntime.getComposerMode(), 'DRAFT_READY')
+  state = 'generating'
+  assert.equal(context.__sidecarContentRuntime.getComposerMode(), 'GENERATING')
+  state = 'interrupted'
+  assert.equal(context.__sidecarContentRuntime.getComposerMode(), 'INTERRUPTED')
+  state = 'error'
+  assert.equal(context.__sidecarContentRuntime.getComposerMode(), 'ERROR')
+})
+
+test('monitor recovers a missed generating phase from the anchored current assistant body plus final-turn evidence', async () => {
+  const emitted = []
+  let now = 0
+  const promptText = 'continue exact task'
+  const editor = { value: '', getAttribute() { return null } }
+  const bodyRoot = {
+    innerText: '完整正文',
+    textContent: '完整正文',
+    querySelector(selector) {
+      return selector.includes('p') ? { textContent: '完整正文' } : null
+    },
+    matches() { return false }
+  }
+  const turnRoot = {
+    getAttribute(name) { return name === 'data-testid' ? 'conversation-turn-8' : null },
+    querySelector(selector) {
+      return selector.includes('copy-turn-action-button') ? { disabled: false } : null
+    }
+  }
+  const assistantNode = {
+    innerText: 'Assistant heading\n完整正文',
+    textContent: 'Assistant heading\n完整正文',
+    querySelector(selector) {
+      return /markdown|prose|message-content/.test(selector) ? bodyRoot : null
+    },
+    closest() { return turnRoot },
+    getAttribute(name) { return name === 'data-message-id' ? 'assistant-8' : null }
+  }
+  const userTurnRoot = {
+    getAttribute(name) { return name === 'data-testid' ? 'conversation-turn-7' : null }
+  }
+  const userNode = {
+    innerText: promptText,
+    textContent: promptText,
+    closest() { return userTurnRoot },
+    getAttribute(name) { return name === 'data-message-id' ? 'user-7' : null },
+    compareDocumentPosition(other) { return other === assistantNode ? 4 : 0 }
+  }
+  const document = {
+    querySelector(selector) {
+      if (selector === '#prompt-textarea') return editor
+      if (selector === '[data-testid="stop-button"]') return null
+      if (selector === '[role="alert"]') return null
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
+      if (selector === '[data-message-author-role="user"]') return [userNode]
+      if (selector === 'button' || selector === '[contenteditable="true"]' || selector === '[role="alert"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-missed-generation' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test-missed-generation' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date { static now() { return now } },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.__sidecarContentRuntime.monitorTurn({
+    conversationId: 'conv_project',
+    turnId: 'turn_missed_generation',
+    baselineAssistantCount: 99,
+    promptText
+  })
+
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].type, 'response_completed')
+  assert.equal(emitted[0].text, '完整正文')
+  assert.ok(now >= 10_000, `completion skipped the convergence window at ${now}ms`)
+})
+
+test('generation exit with only assistant shell title emits need_continue instead of response_completed', async () => {
+  const emitted = []
+  let now = 0
+  let poll = 0
+  const promptText = 'finish the task'
+  const editor = { value: '', getAttribute() { return null } }
+  const stopButton = {
+    getAttribute(name) { return name === 'aria-label' ? 'Stop responding' : null },
+    textContent: ''
+  }
+  const turnRoot = {
+    getAttribute(name) { return name === 'data-testid' ? 'conversation-turn-10' : null },
+    querySelector(selector) {
+      return selector.includes('copy-turn-action-button') ? { disabled: false } : null
+    }
+  }
+  const headingNode = { innerText: 'Only a title', textContent: 'Only a title' }
+  const bodyRoot = {
+    innerText: 'Only a title',
+    textContent: 'Only a title',
+    querySelector(selector) {
+      if (selector.startsWith('h1,')) return headingNode
+      return null
+    }
+  }
+  const assistantNode = {
+    innerText: 'Only a title',
+    textContent: 'Only a title',
+    querySelector(selector) {
+      return /markdown|prose|message-content/.test(selector) ? bodyRoot : null
+    },
+    closest() { return turnRoot },
+    getAttribute(name) { return name === 'data-message-id' ? 'assistant-10' : null }
+  }
+  const userNode = {
+    innerText: promptText,
+    textContent: promptText,
+    closest() { return { getAttribute: (name) => name === 'data-testid' ? 'conversation-turn-9' : null } },
+    getAttribute(name) { return name === 'data-message-id' ? 'user-9' : null },
+    compareDocumentPosition(other) { return other === assistantNode ? 4 : 0 }
+  }
+  const document = {
+    querySelector(selector) {
+      if (selector === '#prompt-textarea') return editor
+      if (selector === '[data-testid="stop-button"]') return poll <= 2 ? stopButton : null
+      if (selector === '[role="alert"]') return null
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
+      if (selector === '[data-message-author-role="user"]') return [userNode]
+      if (selector === 'button') return []
+      if (selector === '[contenteditable="true"]' || selector === '[role="alert"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/g/g-p-test-agent/c/thread-title-only' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:test-title-only' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date { static now() { return now } },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      poll += 1
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.__sidecarContentRuntime.monitorTurn({
+    conversationId: 'conv_project',
+    turnId: 'turn_title_only',
+    baselineAssistantCount: 0,
+    promptText
+  })
+
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].type, 'need_continue')
+  assert.equal(emitted[0].reason, 'assistant_body_incomplete')
 })

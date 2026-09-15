@@ -984,6 +984,53 @@ test('conversation snapshot reads only the exact already-bound conversation tab'
   )
 })
 
+test('need_continue stays in the durable terminal outbox until native acknowledgement', async () => {
+  const externalUrl = 'https://chatgpt.com/c/need-continue-123'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_existing': { windowId: 10, tabId: 30, url: externalUrl },
+      'pending:conv_existing': {
+        conversationId: 'conv_existing',
+        turnId: 'turn_need_continue',
+        tabId: 30,
+        baselineAssistantCount: 0,
+        startedAt: 1
+      }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 30, windowId: 10, url: externalUrl }]
+  })
+
+  harness.setFailNativeEventPosts(true)
+  const receipt = await harness.emitRuntimeMessage({
+    kind: 'conversation_event',
+    event: {
+      type: 'need_continue',
+      conversationId: 'conv_existing',
+      turnId: 'turn_need_continue',
+      text: 'partial shell',
+      reason: 'assistant_body_incomplete',
+      externalUrl
+    }
+  }, { tab: { id: 30, windowId: 10, url: externalUrl } })
+
+  const eventId = 'terminal:conv_existing:turn_need_continue:need_continue'
+  const outboxKey = `outbox:${eventId}`
+  assert.equal(receipt?.durable, true)
+  assert.equal(receipt?.eventId, eventId)
+  assert.equal(harness.storageState['pending:conv_existing'], undefined)
+  assert.equal(harness.storageState[outboxKey]?.event?.reason, 'assistant_body_incomplete')
+
+  await harness.reconnectNative()
+  const replayed = harness.nativeMessages.find((message) => message.kind === 'event' && message.eventId === eventId)
+  assert.equal(replayed?.event?.type, 'need_continue')
+  assert.notEqual(harness.storageState[outboxKey], undefined)
+
+  await harness.sendNativeMessage({ kind: 'event_ack', eventId })
+  assert.equal(harness.storageState[outboxKey], undefined)
+})
+
 test('reload remains scheduled when the accepted native response transport is lost', async () => {
   const harness = makeHarness({
     deferReloadTimer: true,

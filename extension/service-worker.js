@@ -967,7 +967,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.kind !== 'conversation_event' || !message.event) return
 
   const event = message.event
-  const isTerminal = event.type === 'response_completed' || event.type === 'error'
+  const isTerminal = event.type === 'response_completed' || event.type === 'need_continue' || event.type === 'error'
   if (isTerminal) {
     void extensionLifecycle.runMutation(async () => {
       const eventId = terminalEventId(event)

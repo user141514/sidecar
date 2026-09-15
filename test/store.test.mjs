@@ -114,6 +114,53 @@ test('ConversationStore persists a default ChatGPT Project URL across sidecar re
   }
 })
 
+test('ConversationStore reconstructs need_continue as a recoverable terminal turn state', async () => {
+  const { ConversationStore } = await loadStoreModule()
+  assert.equal(typeof ConversationStore, 'function')
+  if (typeof ConversationStore !== 'function') return
+
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-store-'))
+  try {
+    const store = new ConversationStore(root)
+    const created = await store.create({ backend: 'chatgpt-web', externalUrl: 'https://chatgpt.com/' })
+    await store.append(created.id, { type: 'prompt_sent', turnId: 'turn_need', text: 'finish it' })
+    await store.append(created.id, { type: 'generation_started', turnId: 'turn_need' })
+    await store.append(created.id, {
+      type: 'need_continue',
+      turnId: 'turn_need',
+      text: 'partial shell',
+      reason: 'assistant_body_incomplete',
+      externalUrl: 'https://chatgpt.com/c/need'
+    })
+
+    const state = await store.read(created.id)
+    assert.equal(state.status, 'need_continue')
+    assert.equal(state.latestTurnId, 'turn_need')
+    assert.equal(state.latestResponse, 'partial shell')
+    assert.equal(state.error, null)
+    assert.equal(state.externalUrl, 'https://chatgpt.com/c/need')
+
+    await store.append(created.id, {
+      type: 'response_completed',
+      turnId: 'turn_need',
+      text: 'eventual complete answer',
+      externalUrl: 'https://chatgpt.com/c/need'
+    })
+    await store.append(created.id, {
+      type: 'need_continue',
+      turnId: 'turn_need',
+      text: 'late incomplete observation',
+      reason: 'assistant_body_incomplete',
+      externalUrl: 'https://chatgpt.com/c/need'
+    })
+    const finalState = await store.read(created.id)
+    assert.equal(finalState.status, 'completed')
+    assert.equal(finalState.latestResponse, 'eventual complete answer')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('ConversationStore records errors as durable terminal state', async () => {
   const { ConversationStore } = await loadStoreModule()
   assert.equal(typeof ConversationStore, 'function')

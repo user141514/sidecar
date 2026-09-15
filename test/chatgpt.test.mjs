@@ -458,6 +458,34 @@ test('terminal extension events are durably recorded once before acknowledgement
   assert.deepEqual(bridge.ackedEvents, [event.eventId, event.eventId])
 })
 
+test('need_continue extension events are durably recorded before acknowledgement', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  const host = new ChatGptConversationHost({ bridge, store })
+  const created = await host.create()
+  const event = {
+    eventId: 'terminal:conv_test:turn_need:need_continue',
+    type: 'need_continue',
+    conversationId: created.id,
+    turnId: 'turn_need',
+    text: 'partial shell',
+    reason: 'assistant_body_incomplete',
+    externalUrl: 'https://chatgpt.com/c/test'
+  }
+
+  bridge.emit('event', event)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  const recorded = store.events.find((item) => item.type === 'need_continue' && item.turnId === 'turn_need')
+  assert.equal(recorded?.text, 'partial shell')
+  assert.equal(recorded?.reason, 'assistant_body_incomplete')
+  assert.deepEqual(bridge.ackedEvents, [event.eventId])
+})
+
 test('extension-backed host creates a dedicated window, returns after send, and persists later completion events', async () => {
   const { ChatGptConversationHost } = await loadChatGptModule()
   assert.equal(typeof ChatGptConversationHost, 'function')

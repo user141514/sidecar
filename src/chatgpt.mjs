@@ -297,6 +297,18 @@ export class ChatGptConversationHost {
       return true
     }
 
+    if (event.type === 'need_continue') {
+      await this.store.append(conversationId, {
+        eventId: event.eventId,
+        type: 'need_continue',
+        turnId: event.turnId,
+        text: event.text ?? '',
+        reason: event.reason ?? 'assistant_body_incomplete',
+        externalUrl: event.externalUrl
+      })
+      return true
+    }
+
     if (event.type === 'error') {
       await this.store.append(conversationId, {
         eventId: event.eventId,

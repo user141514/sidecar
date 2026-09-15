@@ -7,6 +7,8 @@ const contentBuildId = globalThis.__sidecarBuildId ?? 'unversioned'
 globalThis.__sidecarContentRuntime = {
   buildId: contentBuildId,
   monitorTurn,
+  getComposerMode,
+  readTurnObservation,
   dispose() {
     contentDisposed = true
     chrome.runtime.onMessage.removeListener?.(onSidecarMessage)
@@ -549,22 +551,85 @@ function userMessages() {
   return [...document.querySelectorAll('[data-message-author-role="user"]')]
 }
 
-function assistantObservation({ baselineAssistantCount, recovery, promptText }) {
-  const messages = assistantMessages()
-  const last = messages.at(-1)
-  if (!recovery || typeof promptText !== 'string' || !promptText.trim()) {
-    return { present: messages.length > baselineAssistantCount, last }
-  }
-  if (!last) return { present: false, last }
+function nodeText(node) {
+  return (node?.innerText || node?.textContent || '').trim()
+}
 
-  const users = userMessages()
-  const lastUser = users.at(-1)
-  const lastUserText = (lastUser?.innerText || lastUser?.textContent || '').trim()
-  const relation = lastUser?.compareDocumentPosition?.(last)
-  const followsPrompt = typeof relation === 'number' && (relation & 4) !== 0
+function turnKey(node) {
+  const turn = node?.closest?.('[data-testid^="conversation-turn-"]')
+  return turn?.getAttribute?.('data-testid') || node?.getAttribute?.('data-message-id') || null
+}
+
+function bodySnapshot(message) {
+  const shellText = nodeText(message)
+  if (!message) return { bodyText: '', bodyComplete: false, shellText }
+
+  // Test doubles from older fixtures do not model element traversal. Real DOM
+  // nodes always do; preserve those fixtures without weakening the browser path.
+  if (typeof message.querySelector !== 'function') {
+    return { bodyText: shellText, bodyComplete: Boolean(shellText), shellText }
+  }
+
+  const root = message.querySelector(
+    '[data-message-content], [data-testid="assistant-message-content"], .markdown, [class*="markdown"], [class*="prose"]'
+  )
+  if (!root) return { bodyText: '', bodyComplete: false, shellText }
+
+  const bodyText = nodeText(root)
+  if (!bodyText) return { bodyText: '', bodyComplete: false, shellText }
+  if (typeof root.querySelector !== 'function') {
+    return { bodyText, bodyComplete: true, shellText }
+  }
+
+  const substantive = root.querySelector(
+    'p, li, pre, code, table, blockquote, dl, dd, dt, [data-message-content-leaf]'
+  )
+  const heading = root.querySelector('h1, h2, h3, h4, h5, h6')
   return {
-    present: Boolean(last && lastUserText === promptText.trim() && followsPrompt),
-    last
+    bodyText,
+    bodyComplete: Boolean(substantive) || !heading,
+    shellText
+  }
+}
+
+function readTurnObservation({ baselineAssistantCount = 0, promptText = '' } = {}) {
+  const assistants = assistantMessages()
+  const users = userMessages()
+  const normalizedPrompt = typeof promptText === 'string' ? promptText.trim() : ''
+  let anchor = null
+  let last = assistants.at(-1) ?? null
+
+  if (normalizedPrompt) {
+    anchor = [...users].reverse().find((user) => nodeText(user) === normalizedPrompt) ?? null
+    if (!anchor) last = null
+    else {
+      const following = assistants.filter((assistant) => {
+        const relation = anchor?.compareDocumentPosition?.(assistant)
+        return typeof relation === 'number' && (relation & 4) !== 0
+      })
+      last = following.at(-1) ?? null
+    }
+  }
+
+  const present = normalizedPrompt
+    ? Boolean(anchor && last)
+    : assistants.length > Number(baselineAssistantCount ?? 0) && Boolean(last)
+  const body = bodySnapshot(present ? last : null)
+  const turn = last?.closest?.('[data-testid^="conversation-turn-"]')
+  const terminalActionAvailable = Boolean(turn?.querySelector?.(
+    '[data-testid="copy-turn-action-button"], [data-testid="feedback-turn-action-button"], button[aria-label*="Copy response" i], button[aria-label*="复制回复"]'
+  ))
+
+  return {
+    url: location.href,
+    userTurnKey: anchor ? turnKey(anchor) : null,
+    assistantTurnKey: present ? turnKey(last) : null,
+    present,
+    bodyText: body.bodyText,
+    bodyComplete: body.bodyComplete,
+    shellText: body.shellText,
+    continuationAvailable: getComposerMode() === 'INTERRUPTED',
+    terminalActionAvailable
   }
 }
 
@@ -582,12 +647,28 @@ function isGenerating() {
   })
 }
 
-function hasTerminalEvidence(message) {
-  const turn = message?.closest?.('[data-testid^="conversation-turn-"]')
-  if (!turn?.querySelector) return false
-  return Boolean(turn.querySelector(
-    '[data-testid="copy-turn-action-button"], [data-testid="feedback-turn-action-button"], button[aria-label*="Copy response" i], button[aria-label*="复制回复"]'
-  ))
+function getComposerMode() {
+  const buttons = [...document.querySelectorAll('button')]
+  const labels = buttons.map((button) => (
+    button.getAttribute('aria-label') || button.textContent || ''
+  ).trim().toLowerCase())
+  const alerts = [...document.querySelectorAll('[role="alert"]')].map(nodeText)
+  const hasError = labels.some((label) =>
+    label.includes('try again') || label === 'retry' || label.includes('重试')
+  ) || alerts.some((text) => /something went wrong|network error|出了点问题|网络错误/i.test(text))
+  if (hasError) return 'ERROR'
+  if (isGenerating()) return 'GENERATING'
+  if (labels.some((label) =>
+    label.includes('continue generating') ||
+    label.includes('continue response') ||
+    label.includes('continue answering') ||
+    label.includes('继续生成') ||
+    label.includes('继续回答')
+  )) return 'INTERRUPTED'
+
+  const editor = findPromptEditor()
+  const draft = (editor?.value || editor?.innerText || editor?.textContent || '').trim()
+  return draft ? 'DRAFT_READY' : 'IDLE_EMPTY'
 }
 
 async function emitTerminalEvent(event) {
@@ -608,7 +689,8 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
     ? Number(startedAt) + MONITOR_TIMEOUT_MS
     : Date.now() + MONITOR_TIMEOUT_MS
   let observedGenerating = false
-  let candidateText = null
+  let generationExited = false
+  let candidateSnapshot = null
   let stableSnapshotSince = null
   let lastSnapshotAt = null
   try {
@@ -616,52 +698,98 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
       await sleep(POLL_INTERVAL_MS)
       if (contentDisposed) return
 
-      if (isGenerating()) {
+      const mode = getComposerMode()
+      if (mode === 'ERROR') {
+        const durable = await emitTerminalEvent({
+          type: 'error',
+          conversationId,
+          turnId,
+          monitorVersion,
+          message: 'ChatGPT composer entered an error state',
+          externalUrl: location.href
+        })
+        if (durable) return
+        continue
+      }
+
+      if (mode === 'GENERATING') {
         observedGenerating = true
+        generationExited = false
         inactivityDeadline = Date.now() + MONITOR_TIMEOUT_MS
-        candidateText = null
+        candidateSnapshot = null
         stableSnapshotSince = null
         lastSnapshotAt = null
         continue
       }
-      if (!observedGenerating && !recovery) continue
+
+      const observation = readTurnObservation({ baselineAssistantCount, promptText })
+      const terminalBoundary = observation.terminalActionAvailable || mode === 'INTERRUPTED'
+      if (observedGenerating) {
+        generationExited = true
+      } else if (
+        typeof promptText === 'string' &&
+        promptText.trim() &&
+        observation.userTurnKey &&
+        observation.present &&
+        terminalBoundary
+      ) {
+        // The monitor may attach after a fast response has already left GENERATING.
+        // Exact user-turn anchoring plus current non-generating composer state is
+        // the recovery proof; text quiescence alone never establishes lifecycle.
+        generationExited = true
+      }
+      if (!generationExited) continue
+      if (!terminalBoundary) {
+        candidateSnapshot = null
+        stableSnapshotSince = null
+        lastSnapshotAt = Date.now()
+        continue
+      }
 
       const now = Date.now()
       if (lastSnapshotAt !== null && now - lastSnapshotAt < SNAPSHOT_INTERVAL_MS) continue
       lastSnapshotAt = now
 
-      const observation = assistantObservation({ baselineAssistantCount, recovery, promptText })
-      const last = observation.last
-      const text = (last?.innerText || last?.textContent || '').trim()
-
-      if (!observation.present || !text) {
-        candidateText = null
-        stableSnapshotSince = null
-        continue
-      }
-      if (!hasTerminalEvidence(last)) {
-        candidateText = null
-        stableSnapshotSince = null
-        continue
-      }
-
-      if (text !== candidateText) {
-        candidateText = text
+      const snapshot = JSON.stringify({
+        mode,
+        userTurnKey: observation.userTurnKey,
+        assistantTurnKey: observation.assistantTurnKey,
+        present: observation.present,
+        bodyText: observation.bodyText,
+        bodyComplete: observation.bodyComplete,
+        shellText: observation.shellText,
+        terminalActionAvailable: observation.terminalActionAvailable
+      })
+      if (snapshot !== candidateSnapshot) {
+        candidateSnapshot = snapshot
         stableSnapshotSince = now
         inactivityDeadline = now + MONITOR_TIMEOUT_MS
         continue
       }
       if (stableSnapshotSince === null || now - stableSnapshotSince < SNAPSHOT_QUIESCENCE_MS) continue
 
-      const durable = await emitTerminalEvent({
-        type: 'response_completed',
-        conversationId,
-        turnId,
-        monitorVersion,
-        text,
-        externalUrl: location.href
-      })
+      const complete = mode !== 'INTERRUPTED' && observation.present && observation.bodyComplete
+      const event = complete
+        ? {
+            type: 'response_completed',
+            conversationId,
+            turnId,
+            monitorVersion,
+            text: observation.bodyText,
+            externalUrl: location.href
+          }
+        : {
+            type: 'need_continue',
+            conversationId,
+            turnId,
+            monitorVersion,
+            text: observation.bodyText || observation.shellText || '',
+            reason: mode === 'INTERRUPTED' ? 'generation_interrupted' : 'assistant_body_incomplete',
+            externalUrl: location.href
+          }
+      const durable = await emitTerminalEvent(event)
       if (durable) return
+      stableSnapshotSince = now
     }
     if (contentDisposed) return
     await emitTerminalEvent({

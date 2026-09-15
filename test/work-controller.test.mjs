@@ -532,6 +532,44 @@ test('WorkController collects completed workers into the ledger and unlocks depe
   assert.equal(dispatched.dispatched, true)
 })
 
+test('WorkController leaves need_continue workers dispatched for an explicit continuation decision', async () => {
+  const { WorkController } = await loadModule()
+  assert.equal(typeof WorkController, 'function')
+  if (typeof WorkController !== 'function') return
+
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    {
+      at: '2026-09-03T08:01:00.000Z',
+      type: 'decision',
+      payload: {
+        action: 'SPLIT',
+        reason: 'work found',
+        frontiers: [{ id: 'f1', task: 'first task', depends_on: [] }]
+      }
+    },
+    {
+      at: '2026-09-03T08:02:00.000Z',
+      type: 'worker_dispatched',
+      payload: { frontierId: 'f1', conversationId: 'conv_1', turnId: 'turn_need' }
+    }
+  ])
+  const host = new FakeHost()
+  host.states.set('conv_1', {
+    id: 'conv_1',
+    status: 'need_continue',
+    latestTurnId: 'turn_need',
+    latestResponse: 'partial shell',
+    error: null
+  })
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+
+  const collected = await controller.collect('work_test')
+  assert.equal(collected.collected, 0)
+  assert.equal(collected.state.frontiers.find((f) => f.id === 'f1').status, 'dispatched')
+  assert.equal(ledger.events.some((event) => event.type === 'worker_result'), false)
+})
+
 test('WorkController does not collect a terminal result from the wrong dispatched turn', async () => {
   const { WorkController } = await loadModule()
   assert.equal(typeof WorkController, 'function')
