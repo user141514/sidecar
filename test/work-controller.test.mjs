@@ -40,6 +40,7 @@ class FakeHost {
     this.created = []
     this.sent = []
     this.states = new Map()
+    this.authoritativeStates = new Map()
     this.terminalListeners = new Map()
     this.admissions = []
     this.admitResult = { admitted: true, admittedAt: FakeLedger.now }
@@ -62,6 +63,24 @@ class FakeHost {
 
   async read(id) {
     return this.states.get(id) ?? { id, status: 'generating', latestResponse: null }
+  }
+
+  async state(id) {
+    if (this.authoritativeStates.has(id)) return this.authoritativeStates.get(id)
+    const legacy = await this.read(id)
+    const completed = legacy.status === 'completed'
+    return {
+      contractVersion: 1,
+      conversationId: id,
+      target: legacy.externalUrl ?? `https://chatgpt.com/c/${id}`,
+      stateVersion: 1,
+      turn: { turnId: legacy.latestTurnId ?? null, userMessageId: completed ? 'user-1' : null, assistantMessageId: completed ? 'assistant-1' : null },
+      progress: completed ? 'terminal' : legacy.status === 'error' ? 'blocked' : 'active',
+      body: completed ? 'substantive' : 'incomplete',
+      delivery: completed ? 'delivered' : 'pending',
+      gate: 'none',
+      writer: { mode: 'managed', epoch: 1 }
+    }
   }
 
   onTerminal(id, listener) {
@@ -532,6 +551,104 @@ test('WorkController collects completed workers into the ledger and unlocks depe
   assert.equal(dispatched.dispatched, true)
 })
 
+test('WorkController does not collect a legacy completed projection when authoritative state is nonterminal', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    {
+      at: '2026-09-03T08:01:00.000Z',
+      type: 'decision',
+      payload: { action: 'SPLIT', reason: 'work found', frontiers: [{ id: 'f1', task: 'first task', depends_on: [] }] }
+    },
+    {
+      at: '2026-09-03T08:02:00.000Z',
+      type: 'worker_dispatched',
+      payload: { frontierId: 'f1', conversationId: 'conv_1', turnId: 'turn_1' }
+    }
+  ])
+  const host = new FakeHost()
+  const target = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000099'
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'legacy false positive', externalUrl: target
+  })
+  host.authoritativeStates.set('conv_1', {
+    contractVersion: 1,
+    conversationId: 'conv_1',
+    target,
+    stateVersion: 7,
+    turn: { turnId: 'turn_1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },
+    progress: 'blocked', body: 'incomplete', delivery: 'delivered', gate: 'none',
+    writer: { mode: 'managed', epoch: 4 }
+  })
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+
+  const collected = await controller.collect('work_test')
+
+  assert.equal(collected.collected, 0)
+  assert.equal(collected.state.frontiers.find((f) => f.id === 'f1').status, 'dispatched')
+  assert.equal(ledger.events.some((event) => event.type === 'worker_result'), false)
+})
+
+test('WorkController refuses legacy completed collection while authoritative human gate is active', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    { at: '2026-09-03T08:01:00.000Z', type: 'decision', payload: { action: 'SPLIT', reason: 'work found', frontiers: [{ id: 'f1', task: 'first task', depends_on: [] }] } },
+    { at: '2026-09-03T08:02:00.000Z', type: 'worker_dispatched', payload: { frontierId: 'f1', conversationId: 'conv_1', turnId: 'turn_1' } }
+  ])
+  const host = new FakeHost()
+  const target = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000100'
+  host.states.set('conv_1', { id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'legacy done', externalUrl: target })
+  host.authoritativeStates.set('conv_1', {
+    contractVersion: 1, conversationId: 'conv_1', target, stateVersion: 3,
+    turn: { turnId: 'turn_1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },
+    progress: 'terminal', body: 'substantive', delivery: 'delivered', gate: 'human_required',
+    writer: { mode: 'managed', epoch: 4 }
+  })
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+  assert.equal((await controller.collect('work_test')).collected, 0)
+  assert.equal(ledger.events.some((event) => event.type === 'worker_result'), false)
+})
+
+test('WorkController refuses legacy completed collection when authoritative turn identity differs', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    { at: '2026-09-03T08:01:00.000Z', type: 'decision', payload: { action: 'SPLIT', reason: 'work found', frontiers: [{ id: 'f1', task: 'first task', depends_on: [] }] } },
+    { at: '2026-09-03T08:02:00.000Z', type: 'worker_dispatched', payload: { frontierId: 'f1', conversationId: 'conv_1', turnId: 'turn_1' } }
+  ])
+  const host = new FakeHost()
+  const target = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000101'
+  host.states.set('conv_1', { id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'legacy done', externalUrl: target })
+  host.authoritativeStates.set('conv_1', {
+    contractVersion: 1, conversationId: 'conv_1', target, stateVersion: 3,
+    turn: { turnId: 'turn_other', userMessageId: 'user-2', assistantMessageId: 'assistant-2' },
+    progress: 'terminal', body: 'substantive', delivery: 'delivered', gate: 'none',
+    writer: { mode: 'managed', epoch: 4 }
+  })
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+  assert.equal((await controller.collect('work_test')).collected, 0)
+  assert.equal(ledger.events.some((event) => event.type === 'worker_result'), false)
+})
+
+test('WorkController fails closed when authoritative state owner is unavailable for a legacy completed projection', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    { at: '2026-09-03T08:01:00.000Z', type: 'decision', payload: { action: 'SPLIT', reason: 'work found', frontiers: [{ id: 'f1', task: 'first task', depends_on: [] }] } },
+    { at: '2026-09-03T08:02:00.000Z', type: 'worker_dispatched', payload: { frontierId: 'f1', conversationId: 'conv_1', turnId: 'turn_1' } }
+  ])
+  const host = new FakeHost()
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'legacy done',
+    externalUrl: 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000102'
+  })
+  host.state = async () => { throw new Error('authoritative state unavailable') }
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+  assert.equal((await controller.collect('work_test')).collected, 0)
+  assert.equal(ledger.events.some((event) => event.type === 'worker_result'), false)
+})
+
 test('WorkController leaves need_continue workers dispatched for an explicit continuation decision', async () => {
   const { WorkController } = await loadModule()
   assert.equal(typeof WorkController, 'function')
@@ -829,6 +946,84 @@ test('collect recovers a crash after allocation using persisted send intent turn
   const collected = await controller.collect('work_test')
   assert.equal(collected.collected, 1)
   assert.equal(collected.state.frontiers[0].status, 'completed')
+})
+
+test('collect gives authoritative state one reconciliation opportunity before collecting a legacy error', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  const target = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000103'
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', depends_on: [] }]
+  })
+  await ledger.append('work_test', 'worker_dispatched', { frontierId: 'f1', conversationId: 'conv_1', phase: 'accepted', turnId: 'turn_1' })
+  host.states.set('conv_1', { id: 'conv_1', status: 'error', latestTurnId: 'turn_1', error: 'stale timeout', externalUrl: target })
+  host.state = async id => {
+    host.states.set(id, { id, status: 'completed', latestTurnId: 'turn_1', latestResponse: 'fresh recovered result', externalUrl: target })
+    return {
+      contractVersion: 1, conversationId: id, target, stateVersion: 2,
+      turn: { turnId: 'turn_1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },
+      progress: 'terminal', body: 'substantive', delivery: 'delivered', gate: 'none',
+      writer: { mode: 'managed', epoch: 4 }
+    }
+  }
+
+  const collected = await controller.collect('work_test')
+
+  assert.equal(collected.collected, 1)
+  assert.equal(collected.state.frontiers[0].status, 'completed')
+  assert.equal(collected.state.frontiers[0].result, 'fresh recovered result')
+  const results = ledger.events.filter(event => event.type === 'worker_result')
+  assert.equal(results.length, 1)
+  assert.equal(results[0].payload.outcome, 'completed')
+})
+
+test('collect keeps a legacy error pending when authoritative reconciliation exposes need_continue', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  const target = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000104'
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', depends_on: [] }]
+  })
+  await ledger.append('work_test', 'worker_dispatched', { frontierId: 'f1', conversationId: 'conv_1', phase: 'accepted', turnId: 'turn_1' })
+  host.states.set('conv_1', { id: 'conv_1', status: 'error', latestTurnId: 'turn_1', error: 'stale timeout', externalUrl: target })
+  host.state = async id => {
+    host.states.set(id, { id, status: 'need_continue', latestTurnId: 'turn_1', latestResponse: 'partial shell', externalUrl: target })
+    return {
+      contractVersion: 1, conversationId: id, target, stateVersion: 2,
+      turn: { turnId: 'turn_1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },
+      progress: 'blocked', body: 'incomplete', delivery: 'delivered', gate: 'none',
+      writer: { mode: 'managed', epoch: 4 }
+    }
+  }
+
+  const collected = await controller.collect('work_test')
+  assert.equal(collected.collected, 0)
+  assert.equal(collected.state.frontiers[0].status, 'dispatched')
+  assert.equal(ledger.events.some(event => event.type === 'worker_result'), false)
+})
+
+test('collect fails closed when authoritative reconciliation is unavailable for a legacy error', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', depends_on: [] }]
+  })
+  await ledger.append('work_test', 'worker_dispatched', { frontierId: 'f1', conversationId: 'conv_1', phase: 'accepted', turnId: 'turn_1' })
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'error', latestTurnId: 'turn_1', error: 'legacy error',
+    externalUrl: 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000105'
+  })
+  host.state = async () => { throw new Error('authoritative owner unavailable') }
+
+  const collected = await controller.collect('work_test')
+  assert.equal(collected.collected, 0)
+  assert.equal(ledger.events.some(event => event.type === 'worker_result'), false)
 })
 
 test('collect repairs a historical error only when the same worker later completes', async () => {

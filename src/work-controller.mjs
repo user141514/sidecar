@@ -491,9 +491,23 @@ export class WorkController {
 
     for (const frontier of before.frontiers) {
       if (!['dispatching', 'dispatched', 'error'].includes(frontier.status) || !frontier.conversationId) continue
-      const conversation = await this.conversationHost.read(frontier.conversationId)
+      let conversation = await this.conversationHost.read(frontier.conversationId)
+      let authoritative = null
+      if (conversation.status === 'completed' || conversation.status === 'error') {
+        if (typeof this.conversationHost.state !== 'function') continue
+        try { authoritative = await this.conversationHost.state(frontier.conversationId) } catch { continue }
+        if (conversation.status === 'error') conversation = await this.conversationHost.read(frontier.conversationId)
+      }
       if (frontier.status === 'error' && conversation.status !== 'completed') continue
       if (conversation.status !== 'completed' && conversation.status !== 'error') continue
+      if (conversation.status === 'completed') {
+        const authoritativeComplete =
+          authoritative?.delivery === 'delivered' &&
+          authoritative?.progress === 'terminal' &&
+          authoritative?.body === 'substantive' &&
+          authoritative?.gate === 'none'
+        if (!authoritativeComplete || authoritative?.turn?.turnId !== conversation.latestTurnId) continue
+      }
       if (frontier.turnId && conversation.latestTurnId !== frontier.turnId &&
           !(frontier.watchdog === true && isWatchdogContinuation(conversation, frontier.turnId))) continue
 
