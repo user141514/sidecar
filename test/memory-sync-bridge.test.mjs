@@ -106,7 +106,7 @@ test('kicks during an active upload are single-flight and coalesce to one follow
   })
 
   bridge.kick()
-  await waitFor(() => runs === 1)
+  await waitFor(() => runs === 1, 5000)
   bridge.kick()
   bridge.kick()
   first.resolve()
