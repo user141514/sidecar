@@ -1,12 +1,41 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { SendMailbox, canonicalTarget } from './send-mailbox.mjs'
+import { parseIntentEnvelope } from './conversation-contract.mjs'
 import { reduceConversationProjection } from './conversation-state.mjs'
 
 const DEFAULT_CHATGPT_URL = 'https://chatgpt.com/'
 
 function turnId() {
   return `turn_${Date.now()}_${randomUUID().slice(0, 8)}`
+}
+
+function versionedIntentMeta(state) {
+  return {
+    currentStateVersion: state.stateVersion,
+    currentWriterEpoch: state.writer.epoch
+  }
+}
+
+function versionedIntentDenial(intent, state) {
+  const meta = versionedIntentMeta(state)
+  if (state.writer.mode !== 'managed') return { accepted: false, reason: 'writer_mode_mismatch', ...meta }
+  if (state.writer.epoch !== intent.expectedWriterEpoch) return { accepted: false, reason: 'writer_epoch_mismatch', ...meta }
+  if (state.stateVersion !== intent.expectedStateVersion) return { accepted: false, reason: 'stale_state', ...meta }
+  if (state.conversationId !== intent.conversationId || canonicalTarget(state.target) !== canonicalTarget(intent.target)) {
+    return { accepted: false, reason: 'stale_state', ...meta }
+  }
+  if (state.turn.userMessageId !== intent.expected.userMessageId || state.turn.assistantMessageId !== intent.expected.assistantMessageId) {
+    return { accepted: false, reason: 'stale_state', ...meta }
+  }
+  if (state.gate === 'human_required') return { accepted: false, reason: 'need_input', ...meta }
+  if (state.delivery === 'uncertain') return { accepted: false, reason: 'state_delivery_uncertain', ...meta }
+  if (state.delivery !== 'delivered') return { accepted: false, reason: 'state_not_continuable', ...meta }
+  const continuable =
+    (state.progress === 'blocked' && ['empty', 'incomplete'].includes(state.body)) ||
+    (state.progress === 'terminal' && state.body === 'substantive')
+  if (!continuable) return { accepted: false, reason: 'state_not_continuable', ...meta }
+  return null
 }
 
 function normalizeProjectHomeUrl(value) {
@@ -164,6 +193,81 @@ export class ChatGptConversationHost {
   }
 
   async proposeContinuation(payload) {
+    if (payload && typeof payload === 'object' && !Array.isArray(payload) &&
+        Object.prototype.hasOwnProperty.call(payload, 'contractVersion')) {
+      return this.#proposeVersionedContinuation(parseIntentEnvelope(payload))
+    }
+    return this.#proposeLegacyContinuation(payload)
+  }
+
+  async #proposeVersionedContinuation(intent) {
+    if (intent.action !== 'continue') return { accepted: false, reason: 'unsupported_action' }
+    const requestId = intent.intentId
+    const mailboxPayload = {
+      contractVersion: 1,
+      action: intent.action,
+      source: intent.source,
+      conversationId: intent.conversationId,
+      expectedStateVersion: intent.expectedStateVersion,
+      expectedWriterEpoch: intent.expectedWriterEpoch,
+      userMessageId: intent.expected.userMessageId,
+      assistantMessageId: intent.expected.assistantMessageId,
+      text: intent.text
+    }
+    return this.mailbox.run(intent.target, requestId, mailboxPayload, async markDispatching => {
+      const initial = await this.stateByTarget(intent.target)
+      if (initial?.found !== true) return { accepted: false, reason: initial?.reason || 'target_unavailable' }
+      const initialDenial = versionedIntentDenial(intent, initial.state)
+      if (initialDenial) return initialDenial
+
+      const admission = await this.admitSend({ source: 'conversation_send', target: intent.target })
+      if (admission?.admitted !== true) {
+        return {
+          accepted: false,
+          reason: 'pacing',
+          retryAfterMs: admission?.retryAfterMs ?? null,
+          ...versionedIntentMeta(initial.state)
+        }
+      }
+
+      const resolved = await this.stateByTarget(intent.target)
+      if (resolved?.found !== true) return { accepted: false, reason: resolved?.reason || 'target_unavailable' }
+      const denial = versionedIntentDenial(intent, resolved.state)
+      if (denial) return denial
+
+      const live = await this.bridge.request('conversation_observe', { externalUrl: intent.target })
+      if (live?.found !== true || canonicalTarget(live.url) !== canonicalTarget(intent.target)) {
+        return { accepted: false, reason: 'target_unavailable', ...versionedIntentMeta(resolved.state) }
+      }
+      if (live.userMessageId !== intent.expected.userMessageId || live.assistantMessageId !== intent.expected.assistantMessageId) {
+        return { accepted: false, reason: 'stale_intent', ...versionedIntentMeta(resolved.state) }
+      }
+      if (live.allowed !== true) {
+        return { accepted: false, reason: live.reason || 'blocked', ...versionedIntentMeta(resolved.state) }
+      }
+
+      const matches = await this.store.findByExternalUrl(intent.target)
+      if (matches.length === 0) return { accepted: false, reason: 'target_unavailable', ...versionedIntentMeta(resolved.state) }
+      if (matches.length > 1) return { accepted: false, reason: 'ambiguous_local_binding', ...versionedIntentMeta(resolved.state) }
+      const conversation = matches[0]
+      if (conversation.id !== intent.conversationId) {
+        return { accepted: false, reason: 'stale_state', ...versionedIntentMeta(resolved.state) }
+      }
+      if (['sending', 'submitted', 'generating', 'delivery_uncertain'].includes(conversation.status)) {
+        return { accepted: false, reason: 'busy', ...versionedIntentMeta(resolved.state) }
+      }
+      return this.#send(conversation.id, intent.text, {
+        expected: intent.expected,
+        existingOnly: true,
+        requestId,
+        markDispatching,
+        intentSource: intent.source,
+        preAdmitted: true
+      })
+    }, intent.conversationId)
+  }
+
+  async #proposeLegacyContinuation(payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
         Object.keys(payload).some(key => !['kind', 'target', 'expected', 'text'].includes(key))) throw new TypeError('invalid intent fields')
     const { kind, target, expected, text } = payload
@@ -203,7 +307,7 @@ export class ChatGptConversationHost {
     }
   }
 
-  async #sendActive(conversationId, text, { app, preAdmitted = false, expected, existingOnly = false, requestId, markDispatching } = {}) {
+  async #sendActive(conversationId, text, { app, preAdmitted = false, expected, existingOnly = false, requestId, markDispatching, intentSource } = {}) {
     const conversation = await this.#loadConversation(conversationId)
     if (!conversation) {
       throw new Error(`Conversation ${conversationId} does not exist in the local ledger`)
@@ -233,7 +337,7 @@ export class ChatGptConversationHost {
       turnId: id,
       text,
       ...(requestId ? { requestId } : {}),
-      ...(expected ? { source: 'watchdog', continuationOf: conversation.latestTurnId ?? null } : {}),
+      ...(expected ? { source: intentSource ?? 'watchdog', continuationOf: conversation.latestTurnId ?? null } : {}),
       ...(app ? { app } : {})
     })
     try {
