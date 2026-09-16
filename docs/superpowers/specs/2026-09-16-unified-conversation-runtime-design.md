@@ -86,6 +86,10 @@ All state and intent payloads carry:
 
 Unknown versions fail closed. Producers and consumers must never silently coerce an unknown version to v1.
 
+### Coordinated component versioning
+
+Development branches use `V<framework>.<component>.<patch>`. The first number is the shared Sidecar↔Watchdog coordination/framework compatibility generation; the second is the individual component version within that framework; the third is that component version's patch. The shared framework number changes only for a coordinated framework/contract generation change, while component minor/patch numbers may advance independently. Branch names include the date as `feat/v<version>-YYYYMMDD-<scope>`. This refactor starts both components at `V1.0.1`.
+
 ## Observation v1
 
 Observation payloads are source-specific facts and are not directly sendable commands.
@@ -102,6 +106,7 @@ The v1 envelope has a fixed top-level shape. Unknown facts use `null` or the `un
   "turnId": "turn_...|null",
   "userMessageId": "...|null",
   "assistantMessageId": "...|null",
+  "assistantText": "...|null",
   "readable": true,
   "generating": "true|false|null",
   "terminal": "true|false|null",
@@ -112,7 +117,7 @@ The v1 envelope has a fixed top-level shape. Unknown facts use `null` or the `un
 }
 ```
 
-Observation producers must not emit the authoritative state version. Unknown or extra top-level fields fail closed in v1.
+`assistantText` is the exact assistant body text associated with `assistantMessageId` when readable; it is evidence payload, not by itself completion proof. Observation producers must not emit the authoritative state version. Unknown or extra top-level fields fail closed in v1. `assistantText` is observation evidence, not intent text: `null` means unavailable/absent, an empty string is valid readable evidence, and v1 bounds non-null text independently at 1,000,000 characters so long valid assistant results do not become UNKNOWN merely because they exceed the prompt-size bound.
 
 ## ConversationState v1
 
@@ -150,7 +155,11 @@ State is deliberately multi-dimensional. Do not collapse unrelated facts into on
 - `gate=human_required`: sticky automation veto until explicit human provenance clears it.
 - `delivery=uncertain`: send outcome cannot be proven; it is not equivalent to failed.
 
-`stateVersion` is monotonic per logical conversation and changes whenever any authoritative state dimension changes.
+`stateVersion` is monotonic per logical conversation and changes whenever any authoritative state dimension changes. Reduction/persistence is serialized per logical conversation so two concurrent observations cannot produce different authoritative meanings with the same state version.
+
+### Authoritative state read boundary
+
+Managed consumers read state through Sidecar's localhost-only `POST /internal/conversation-state` endpoint with the strict body `{ "target": "<exact ChatGPT conversation URL>" }`. The endpoint rejects browser `Origin`, does not appear as an MCP/model-facing tool, resolves exactly one local conversation binding, and delegates to the same authoritative reducer. Missing or ambiguous bindings fail closed rather than selecting a conversation heuristically.
 
 ## IntentEnvelope v1
 
@@ -208,6 +217,9 @@ Rules required by current failures:
 4. A missing/unreadable live observation reduces to `unknown`, never `terminal` or retryable failure.
 5. Terminal/body evidence must be bound to the exact current user/assistant identities.
 6. Reducer output is durably reflected in Sidecar state before policy/dispatch consumes it.
+7. A newer user turn after the expected user identity makes that observation unreadable for the old turn; later assistant output cannot be rebound backward.
+8. `Continue generating` / interrupted generation is nonterminal even when the partial body is substantive.
+9. `human_required` is a sticky control-plane veto and is never cleared merely because a browser observation reports no gate on a later poll.
 
 ## Watchdog migration
 
@@ -218,6 +230,8 @@ Target managed loop:
 `read authoritative state -> policy -> publish IntentEnvelope -> wait for new state`
 
 Watchdog may keep local dedupe bookkeeping, but local `Phase` cannot overrule Sidecar state.
+
+During migration, the legacy `conversation_read()` completed-state live snapshot path remains only as a backward-compatibility read surface. It is not an authoritative policy or dispatch input. Watchdog, Sidebar policy, and the versioned dispatcher must consume `ConversationStateV1` through the authoritative state owner boundary; the legacy fallback is removed only after those consumers have migrated and acceptance tests pass.
 
 ## Sidebar/browser migration
 

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { SendMailbox, canonicalTarget } from './send-mailbox.mjs'
+import { reduceConversationState } from './conversation-state.mjs'
 
 const DEFAULT_CHATGPT_URL = 'https://chatgpt.com/'
 
@@ -22,13 +23,15 @@ function normalizeProjectHomeUrl(value) {
 }
 
 export class ChatGptConversationHost {
-  constructor({ bridge, store, sendAdmission = null, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+  constructor({ bridge, store, sendAdmission = null, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), writerMode = 'managed', writerEpoch = 0 }) {
     this.bridge = bridge
     this.store = store
     this.sendAdmission = sendAdmission
     this.sleep = sleep
+    this.writer = { mode: writerMode, epoch: writerEpoch }
     this.mailbox = new SendMailbox({ rootDir: store.rootDir ? join(store.rootDir, '.send-mailbox') : null })
     this.activeSends = new Set()
+    this.stateQueues = new Map()
     this.terminalListeners = new Map()
     bridge.on('event', (event) => {
       void this.#handleExtensionEvent(event)
@@ -276,10 +279,125 @@ export class ChatGptConversationHost {
     }
   }
 
+  async stateByTarget(target) {
+    let url
+    try { url = new URL(target) } catch { throw new TypeError('exact conversation target is required') }
+    if (url.origin !== 'https://chatgpt.com' || url.username || url.password || url.search || url.hash ||
+        !/\/c\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\/?$/i.test(url.pathname)) {
+      throw new TypeError('exact conversation target is required')
+    }
+    const matches = await this.store.findByExternalUrl(target)
+    if (matches.length === 0) return { found: false, reason: 'target_unavailable' }
+    if (matches.length > 1) return { found: false, reason: 'ambiguous_local_binding' }
+    const state = await this.state(matches[0].id)
+    try {
+      if (canonicalTarget(state.target) !== canonicalTarget(target)) return { found: false, reason: 'target_changed' }
+    } catch {
+      return { found: false, reason: 'target_changed' }
+    }
+    return { found: true, state }
+  }
+
+  state(conversationId) {
+    const previous = this.stateQueues.get(conversationId) ?? Promise.resolve()
+    const run = previous.then(() => this.#state(conversationId))
+    const tail = run.catch(() => {})
+    this.stateQueues.set(conversationId, tail)
+    void tail.then(() => { if (this.stateQueues.get(conversationId) === tail) this.stateQueues.delete(conversationId) })
+    return run
+  }
+
+  async #state(conversationId) {
+    let stored = await this.store.read(conversationId)
+    if (stored.status === 'delivery_uncertain') stored = await this.#reconcileDelivery(stored) ?? stored
+    const turnId = stored.latestTurnId
+    const intent = turnId ? [...(stored.events || [])].reverse().find(event => event.type === 'send_intent' && event.turnId === turnId) : null
+    const previousProjection = [...(stored.events || [])].reverse().find(event => event.type === 'conversation_state' && event.state)?.state ?? null
+    const observations = []
+    let expectedUserMessageId = previousProjection?.turn?.turnId === turnId ? previousProjection.turn.userMessageId : null
+
+    if (intent?.requestId) {
+      try {
+        const lookup = await this.bridge.request('conversation_effect_receipt', { requestId: intent.requestId })
+        const receipt = lookup?.found === true ? lookup.receipt : null
+        if (receipt && receipt.requestId === intent.requestId && receipt.conversationId === stored.id && receipt.turnId === turnId &&
+            typeof receipt.userMessageId === 'string' && receipt.userMessageId) {
+          expectedUserMessageId = receipt.userMessageId
+          observations.push({
+            contractVersion: 1,
+            source: 'receipt',
+            conversationId: stored.id,
+            target: typeof receipt.externalUrl === 'string' && receipt.externalUrl ? receipt.externalUrl : stored.externalUrl,
+            observedAt: new Date().toISOString(),
+            turnId,
+            userMessageId: receipt.userMessageId,
+            assistantMessageId: null,
+            assistantText: null,
+            readable: true,
+            generating: null,
+            terminal: null,
+            body: 'unknown',
+            humanGate: null,
+            delivery: 'delivered',
+            requestId: intent.requestId
+          })
+        }
+      } catch {}
+    }
+
+    if (!expectedUserMessageId && turnId) {
+      const accepted = [...(stored.events || [])].reverse().find(event => event.turnId === turnId && typeof event.effectUserMessageId === 'string' && event.effectUserMessageId)
+      expectedUserMessageId = accepted?.effectUserMessageId ?? null
+    }
+
+    let browserObservation = null
+    if (turnId && expectedUserMessageId) {
+      try {
+        browserObservation = await this.bridge.request('conversation_state_observe', {
+          conversationId: stored.id,
+          externalUrl: stored.externalUrl,
+          turnId,
+          expectedUserMessageId
+        })
+        if (browserObservation && typeof browserObservation === 'object') observations.push(browserObservation)
+      } catch {}
+    }
+
+    const state = reduceConversationState({ ledger: stored, observations, writer: this.writer })
+    const latestProjection = [...(stored.events || [])].reverse().find(event => event.type === 'conversation_state' && event.state)?.state ?? null
+    if (!latestProjection || state.stateVersion > latestProjection.stateVersion) {
+      await this.store.append(stored.id, { type: 'conversation_state', state })
+    }
+
+    const delivered = state.delivery === 'delivered'
+    const alreadyCompleted = stored.events.some(event => event.turnId === turnId && event.type === 'response_completed')
+    const alreadyBlocked = stored.events.some(event => event.turnId === turnId && event.type === 'need_continue')
+    if (delivered && state.gate === 'human_required' && !alreadyCompleted && !alreadyBlocked && typeof browserObservation?.assistantText === 'string') {
+      await this.store.append(stored.id, {
+        type: 'need_continue', turnId, text: browserObservation.assistantText,
+        reason: 'human_required', externalUrl: state.target, reconciled: true
+      })
+    } else if (delivered && state.progress === 'terminal' && state.body === 'substantive' && !alreadyCompleted && typeof browserObservation?.assistantText === 'string') {
+      const event = {
+        type: 'response_completed', turnId, text: browserObservation.assistantText,
+        externalUrl: state.target, reconciled: true
+      }
+      await this.store.append(stored.id, event)
+      await this.#notifyTerminal(stored.id, event)
+    } else if (delivered && state.progress === 'blocked' && state.body !== 'substantive' && !alreadyBlocked && typeof browserObservation?.assistantText === 'string') {
+      await this.store.append(stored.id, {
+        type: 'need_continue', turnId, text: browserObservation.assistantText,
+        reason: 'assistant_body_incomplete', externalUrl: state.target, reconciled: true
+      })
+    }
+    return state
+  }
+
   async read(conversationId) {
     let stored = await this.store.read(conversationId)
-    if (stored.status === 'delivery_uncertain') {
-      stored = await this.#reconcileDelivery(stored) ?? stored
+    if (!this.activeSends.has(conversationId) && ['sending', 'submitted', 'generating', 'delivery_uncertain'].includes(stored.status)) {
+      await this.state(conversationId)
+      stored = await this.store.read(conversationId)
     }
     if (stored.status !== 'completed' || this.activeSends.has(conversationId) || typeof stored.externalUrl !== 'string' || !stored.externalUrl) return stored
 

@@ -13,7 +13,7 @@ const ALLOCATIONS = new Set(['NEW', 'REUSE'])
 
 const OBSERVATION_KEYS = [
   'contractVersion', 'source', 'conversationId', 'target', 'observedAt', 'turnId',
-  'userMessageId', 'assistantMessageId', 'readable', 'generating', 'terminal', 'body',
+  'userMessageId', 'assistantMessageId', 'assistantText', 'readable', 'generating', 'terminal', 'body',
   'humanGate', 'delivery', 'requestId'
 ]
 const STATE_KEYS = ['contractVersion', 'conversationId', 'target', 'stateVersion', 'turn', 'progress', 'body', 'delivery', 'gate', 'writer']
@@ -58,6 +58,12 @@ function requiredString(value, label, maxLength = 16_384) {
 function nullableString(value, label, maxLength = 16_384) {
   if (value === null) return null
   return requiredString(value, label, maxLength)
+}
+
+function nullableText(value, label, maxLength) {
+  if (value === null) return null
+  if (typeof value !== 'string' || value.length > maxLength) throw new TypeError(`${label} must be a string within its length bound`)
+  return value
 }
 
 function nullableBoolean(value, label) {
@@ -132,6 +138,7 @@ export function parseObservation(value) {
   nullableString(value.turnId, 'turnId', 256)
   nullableString(value.userMessageId, 'userMessageId', 256)
   nullableString(value.assistantMessageId, 'assistantMessageId', 256)
+  nullableText(value.assistantText, 'assistantText', 1_000_000)
   if (typeof value.readable !== 'boolean') throw new TypeError('readable must be boolean')
   nullableBoolean(value.generating, 'generating')
   nullableBoolean(value.terminal, 'terminal')

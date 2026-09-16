@@ -537,6 +537,28 @@ export function createSidecarServer({ conversationHost, workLedger = null, workC
         writeJson(res, 200, await conversationHost.proposeContinuation(await readJson(req)))
         return
       }
+      if (req.method === 'POST' && url.pathname === '/internal/conversation-state') {
+        if (!isLoopback(req.socket.remoteAddress) || req.headers.origin) {
+          writeJson(res, 403, { error: 'localhost_non_browser_only' })
+          return
+        }
+        if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
+          writeJson(res, 415, { error: 'json_required' })
+          return
+        }
+        if (typeof conversationHost?.stateByTarget !== 'function') {
+          writeJson(res, 503, { error: 'state_owner_unavailable' })
+          return
+        }
+        const payload = await readJson(req)
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 1 ||
+            typeof payload.target !== 'string' || !payload.target.trim()) {
+          writeJson(res, 400, { error: 'exact_target_required' })
+          return
+        }
+        writeJson(res, 200, await conversationHost.stateByTarget(payload.target))
+        return
+      }
       if (req.method === 'POST' && url.pathname === '/internal/send-admission') {
         if (!isLoopback(req.socket.remoteAddress)) {
           writeJson(res, 403, { error: 'localhost_only' })

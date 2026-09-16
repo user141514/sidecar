@@ -148,6 +148,22 @@ class FakeHost {
   async read(id) {
     return { id, status: 'completed', latestResponse: 'done' }
   }
+
+  async stateByTarget(target) {
+    this.stateTarget = target
+    return {
+      found: true,
+      state: {
+        contractVersion: 1,
+        conversationId: 'conv_1',
+        target,
+        stateVersion: 3,
+        turn: { turnId: 'turn_1', userMessageId: 'user_1', assistantMessageId: 'assistant_1' },
+        progress: 'blocked', body: 'incomplete', delivery: 'delivered', gate: 'none',
+        writer: { mode: 'managed', epoch: 0 }
+      }
+    }
+  }
 }
 
 async function rpc(baseUrl, body) {
@@ -171,6 +187,36 @@ test('health reports the active Runtime Home release identity when provided', as
     const response = await fetch(`http://127.0.0.1:${address.port}/healthz`)
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), { ok: true, runtimeRelease })
+  } finally {
+    await app.close()
+  }
+})
+
+test('localhost authoritative conversation-state endpoint is read-only and not model-facing', async () => {
+  const { createSidecarServer } = await loadServerModule()
+  const host = new FakeHost()
+  const app = createSidecarServer({ conversationHost: host })
+  const address = await app.listen({ host: '127.0.0.1', port: 0 })
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  const target = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000077'
+  try {
+    const response = await fetch(`${baseUrl}/internal/conversation-state`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target })
+    })
+    assert.equal(response.status, 200)
+    const payload = await response.json()
+    assert.equal(payload.found, true)
+    assert.equal(payload.state.target, target)
+    assert.equal(payload.state.stateVersion, 3)
+    assert.equal(host.stateTarget, target)
+
+    const browserOrigin = await fetch(`${baseUrl}/internal/conversation-state`, {
+      method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://evil.example' }, body: JSON.stringify({ target })
+    })
+    assert.equal(browserOrigin.status, 403)
+
+    const listed = await rpc(baseUrl, { jsonrpc: '2.0', id: 8, method: 'tools/list', params: {} })
+    assert.equal(listed.body.result.tools.some((tool) => tool.name === 'conversation_state'), false)
   } finally {
     await app.close()
   }

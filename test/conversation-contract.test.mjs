@@ -76,6 +76,20 @@ test('open_child NEW and REUSE have unambiguous allocation semantics', () => {
   assert.throws(() => parseIntentEnvelope(continueWithAllocation), /allocation|continue/i)
 })
 
+test('observation assistant text allows empty evidence and has a response-sized bound independent of intent text', () => {
+  const empty = copy(fixture.observation)
+  empty.assistantMessageId = null
+  empty.assistantText = ''
+  empty.body = 'empty'
+  assert.equal(parseObservation(empty).assistantText, '')
+
+  const longBody = copy(fixture.observation)
+  longBody.assistantText = 'x'.repeat(20_000)
+  assert.equal(parseObservation(longBody).assistantText.length, 20_000)
+  longBody.assistantText = 'x'.repeat(1_000_001)
+  assert.throws(() => parseObservation(longBody), /assistantText|string|length/i)
+})
+
 test('unknown conversation state remains explicitly unknown', () => {
   const unknown = copy(fixture.state)
   unknown.stateVersion++

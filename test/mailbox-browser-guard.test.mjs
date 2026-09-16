@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
-function fixture({ normalizeWrites = false } = {}) {
+function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, interrupted = false } = {}) {
   let listener, clicks = 0, pending = false, active = false, gate = false, submitted = false
   class Editor {
     _value = ''
@@ -15,9 +15,19 @@ function fixture({ normalizeWrites = false } = {}) {
   }
   const editor = new Editor()
   const turn = { getAttribute() { return 'conversation-turn-2' }, querySelector(s) { return s.includes('turn-action') ? {} : null } }
-  const assistant = { innerText: 'complete body', getAttribute(n) { return n === 'data-message-id' ? 'a1' : null }, closest() { return turn }, compareDocumentPosition(n) { return pending && n === user ? 4 : 0 } }
+  const assistant = { innerText: bodyMode === 'incomplete' ? 'Only heading' : 'complete body', getAttribute(n) { return n === 'data-message-id' ? 'a1' : null }, closest() { return turn }, compareDocumentPosition(n) { return pending && n === user ? 4 : 0 } }
+  if (bodyMode) {
+    const root = { innerText: assistant.innerText, querySelector(s) {
+      if (bodyMode === 'substantive' && /p, li, pre, code/.test(s)) return {}
+      if (bodyMode === 'incomplete' && /h1, h2, h3/.test(s)) return {}
+      return null
+    } }
+    assistant.querySelector = s => /data-message-content|assistant-message-content|markdown|prose/.test(s) ? root : null
+  }
   const user = { innerText: 'task', getAttribute(n) { return n === 'data-message-id' ? (pending ? 'u2' : 'u1') : null }, compareDocumentPosition() { return pending ? 0 : 4 }, querySelector() { return null } }
   const submittedUser = { innerText: 'submitted command', getAttribute(n) { return n === 'data-message-id' ? 'u-submit' : null }, querySelector() { return null } }
+  const laterUser = { innerText: 'later task', getAttribute(n) { return n === 'data-message-id' ? 'u-later' : null }, compareDocumentPosition() { return 4 }, querySelector() { return null } }
+  const laterAssistant = { innerText: 'later answer', getAttribute(n) { return n === 'data-message-id' ? 'a-later' : null }, closest() { return turn }, compareDocumentPosition() { return 0 } }
   const button = { disabled: false, getAttribute() { return null }, click() { clicks++; editor.value = ''; submitted = true } }
   const document = {
     querySelector(s) {
@@ -28,8 +38,15 @@ function fixture({ normalizeWrites = false } = {}) {
       return null
     },
     querySelectorAll(s) {
-      if (s === '[data-message-author-role="assistant"]') return [assistant]
-      if (s === '[data-message-author-role="user"]') return submitted ? [user, submittedUser] : [user]
+      if (s === '[data-message-author-role="assistant"]') return laterTurn ? [assistant, laterAssistant] : [assistant]
+      if (s === '[data-message-author-role="user"]') {
+        const base = submitted ? [user, submittedUser] : [user]
+        return laterTurn ? [...base, laterUser] : base
+      }
+      if (s === 'button') return interrupted ? [{
+        textContent: '',
+        getAttribute(name) { return name === 'aria-label' ? 'Continue generating' : null }
+      }] : []
       return []
     }
   }
@@ -37,6 +54,49 @@ function fixture({ normalizeWrites = false } = {}) {
   vm.runInContext(source, context)
   return { editor, set pending(v) { pending = v }, set active(v) { active = v }, set gate(v) { gate = v }, get clicks() { return clicks }, call: message => new Promise(resolve => { let replied = false; const asynchronous = listener(message, {}, value => { replied = true; resolve(value) }); if (!replied && asynchronous !== true) resolve({ missing: true }) }) }
 }
+
+test('state observation anchors exact user identity and reuses body/terminal evidence', async () => {
+  const complete = fixture({ bodyMode: 'substantive' })
+  const state = await complete.call({ type: 'conversation_state_observe', expectedUserMessageId: 'u1' })
+  assert.equal(state.readable, true)
+  assert.equal(state.userMessageId, 'u1')
+  assert.equal(state.assistantMessageId, 'a1')
+  assert.equal(state.assistantText, 'complete body')
+  assert.equal(state.generating, false)
+  assert.equal(state.terminal, true)
+  assert.equal(state.body, 'substantive')
+  assert.equal(state.humanGate, false)
+
+  const shellOnly = fixture({ bodyMode: 'incomplete' })
+  assert.equal((await shellOnly.call({ type: 'conversation_state_observe', expectedUserMessageId: 'u1' })).body, 'incomplete')
+})
+
+test('state observation fails closed when exact user identity is absent', async () => {
+  const f = fixture({ bodyMode: 'substantive' })
+  const state = await f.call({ type: 'conversation_state_observe', expectedUserMessageId: 'missing-user' })
+  assert.equal(state.readable, false)
+  assert.equal(state.userMessageId, null)
+  assert.equal(state.assistantMessageId, null)
+  assert.equal(state.terminal, null)
+})
+
+test('state observation fails closed when a newer user turn supersedes the expected turn', async () => {
+  const f = fixture({ bodyMode: 'substantive', laterTurn: true })
+  const state = await f.call({ type: 'conversation_state_observe', expectedUserMessageId: 'u1' })
+  assert.equal(state.readable, false)
+  assert.equal(state.userMessageId, 'u1')
+  assert.equal(state.assistantMessageId, null)
+  assert.equal(state.terminal, null)
+})
+
+test('interrupted substantive response is not terminal state evidence', async () => {
+  const f = fixture({ bodyMode: 'substantive', interrupted: true })
+  const state = await f.call({ type: 'conversation_state_observe', expectedUserMessageId: 'u1' })
+  assert.equal(state.readable, true)
+  assert.equal(state.generating, false)
+  assert.equal(state.body, 'substantive')
+  assert.equal(state.terminal, false)
+})
 
 test('writer observation detects a newer user before new assistant or Stop exists', async () => {
   const f = fixture(); f.pending = true

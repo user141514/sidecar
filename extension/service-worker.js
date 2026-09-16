@@ -957,6 +957,49 @@ async function readConversationSnapshot(params) {
   }
 }
 
+function unreadableStateObservation(conversationId, target, turnId) {
+  return {
+    contractVersion: 1, source: 'browser', conversationId, target,
+    observedAt: new Date().toISOString(), turnId,
+    userMessageId: null, assistantMessageId: null, assistantText: null,
+    readable: false, generating: null, terminal: null, body: 'unknown', humanGate: null,
+    delivery: 'unknown', requestId: null
+  }
+}
+
+async function readConversationStateObservation(params) {
+  const conversationId = params?.conversationId
+  const turnId = params?.turnId
+  const expectedUserMessageId = params?.expectedUserMessageId
+  if (typeof conversationId !== 'string' || !conversationId) throw new Error('conversation_state_observe requires conversationId')
+  if (typeof turnId !== 'string' || !turnId) throw new Error('conversation_state_observe requires turnId')
+  if (typeof expectedUserMessageId !== 'string' || !expectedUserMessageId) throw new Error('conversation_state_observe requires expectedUserMessageId')
+  const stored = await loadConversation(conversationId)
+  const expectedUrl = chooseConversationUrl(params?.externalUrl, stored?.url)
+  if (!stored || !stableConversationUrl(expectedUrl)) return unreadableStateObservation(conversationId, expectedUrl || CHATGPT_URL, turnId)
+  let tab = await findRegisteredLiveTab(stored, expectedUrl)
+  if (!tab && Number.isInteger(stored.windowId)) tab = await findMatchingConversationTab(stored.windowId, expectedUrl)
+  if (!tab || !Number.isInteger(tab.id)) return unreadableStateObservation(conversationId, expectedUrl, turnId)
+  const snapshot = await boundedMessage(tab.id, { type: 'conversation_state_observe', expectedUserMessageId }, 2000)
+  const actualUrl = stableConversationUrl(snapshot?.url)
+  if (!actualUrl || pageIdentity(actualUrl) !== pageIdentity(expectedUrl) || snapshot?.ready !== true || snapshot?.readable !== true || snapshot?.userMessageId !== expectedUserMessageId) {
+    return unreadableStateObservation(conversationId, actualUrl || expectedUrl, turnId)
+  }
+  return {
+    contractVersion: 1, source: 'browser', conversationId, target: actualUrl,
+    observedAt: new Date().toISOString(), turnId,
+    userMessageId: snapshot.userMessageId,
+    assistantMessageId: typeof snapshot.assistantMessageId === 'string' && snapshot.assistantMessageId ? snapshot.assistantMessageId : null,
+    assistantText: typeof snapshot.assistantText === 'string' ? snapshot.assistantText : '',
+    readable: true,
+    generating: typeof snapshot.generating === 'boolean' ? snapshot.generating : null,
+    terminal: typeof snapshot.terminal === 'boolean' ? snapshot.terminal : null,
+    body: ['unknown', 'empty', 'incomplete', 'substantive'].includes(snapshot.body) ? snapshot.body : 'unknown',
+    humanGate: typeof snapshot.humanGate === 'boolean' ? snapshot.humanGate : null,
+    delivery: 'unknown', requestId: null
+  }
+}
+
 async function reconcileClosedPreSubmitTurns() {
   // Run once before accepting sends. A missing tab cannot continue prepare,
   // and these durable phases prove the worker never issued submit.
@@ -1007,6 +1050,7 @@ async function executeRequest(message) {
     return { ...snapshot, found: true }
   }
   if (message.method === 'conversation_snapshot') return readConversationSnapshot(message.params ?? {})
+  if (message.method === 'conversation_state_observe') return readConversationStateObservation(message.params ?? {})
   if (message.method === 'conversation_effect_receipt') {
     const requestId = message.params?.requestId
     if (typeof requestId !== 'string' || !requestId || requestId.length > 256) throw new TypeError('valid requestId required')

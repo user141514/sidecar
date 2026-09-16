@@ -175,6 +175,21 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
           return { ready: true, url: tab.url, composerPresent: tab.composerPresent === true }
         }
+        if (message.type === 'conversation_state_observe') {
+          const readable = tab.stateReadable !== false && tab.userMessageId === message.expectedUserMessageId
+          return {
+            ready: true,
+            url: tab.url,
+            readable,
+            userMessageId: readable ? tab.userMessageId : null,
+            assistantMessageId: readable ? (tab.assistantMessageId ?? null) : null,
+            assistantText: readable ? (tab.assistantText ?? '') : null,
+            generating: readable ? tab.generating === true : null,
+            terminal: readable ? tab.terminal === true : null,
+            body: readable ? (tab.body ?? 'unknown') : 'unknown',
+            humanGate: readable ? tab.humanGate === true : null
+          }
+        }
         if (message.type === 'conversation_snapshot') {
           return {
             ready: true,
@@ -1074,6 +1089,53 @@ test('replayed durable terminal event clears the matching ghost pending turn', a
   assert.equal(response?.eventId, eventId)
   assert.equal(harness.storageState['pending:conv_existing'], undefined)
   assert.notEqual(harness.storageState[`outbox:${eventId}`], undefined)
+})
+
+test('conversation state observation wraps exact bound-tab facts in v1 envelope', async () => {
+  const externalUrl = 'https://chatgpt.com/g/g-p-project/c/exact-state'
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 }, 'conversation:conv_state': { windowId: 10, tabId: 30, url: externalUrl } },
+    windows: [{ id: 10 }],
+    tabs: [
+      { id: 30, windowId: 10, url: externalUrl, userMessageId: 'user-1', assistantMessageId: 'assistant-1', assistantText: 'FULL RESPONSE', generating: false, terminal: true, body: 'substantive', humanGate: false },
+      { id: 31, windowId: 10, url: 'https://chatgpt.com/c/other', userMessageId: 'user-1', assistantText: 'WRONG' }
+    ]
+  })
+  const response = await harness.request('conversation_state_observe', {
+    conversationId: 'conv_state', externalUrl, turnId: 'turn-1', expectedUserMessageId: 'user-1'
+  })
+  assert.equal(response.ok, true)
+  assert.equal(response.result.contractVersion, 1)
+  assert.equal(response.result.source, 'browser')
+  assert.equal(response.result.conversationId, 'conv_state')
+  assert.equal(response.result.target, externalUrl)
+  assert.equal(response.result.turnId, 'turn-1')
+  assert.equal(response.result.userMessageId, 'user-1')
+  assert.equal(response.result.assistantMessageId, 'assistant-1')
+  assert.equal(response.result.assistantText, 'FULL RESPONSE')
+  assert.equal(response.result.terminal, true)
+  assert.equal(response.result.body, 'substantive')
+  assert.equal(response.result.delivery, 'unknown')
+  assert.equal(response.result.requestId, null)
+  assert.ok(Number.isFinite(Date.parse(response.result.observedAt)))
+  assert.deepEqual(harness.sentToTabs.filter(({ message }) => message.type === 'conversation_state_observe').map(({ tabId }) => tabId), [30])
+})
+
+test('conversation state observation fails closed when expected user identity is absent', async () => {
+  const externalUrl = 'https://chatgpt.com/c/exact-state-missing'
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 }, 'conversation:conv_state': { windowId: 10, tabId: 30, url: externalUrl } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 30, windowId: 10, url: externalUrl, userMessageId: 'different-user', assistantText: 'WRONG' }]
+  })
+  const response = await harness.request('conversation_state_observe', {
+    conversationId: 'conv_state', externalUrl, turnId: 'turn-1', expectedUserMessageId: 'user-1'
+  })
+  assert.equal(response.ok, true)
+  assert.equal(response.result.readable, false)
+  assert.equal(response.result.userMessageId, null)
+  assert.equal(response.result.terminal, null)
+  assert.equal(response.result.body, 'unknown')
 })
 
 test('conversation snapshot reads only the exact already-bound conversation tab', async () => {

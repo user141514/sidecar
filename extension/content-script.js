@@ -643,6 +643,68 @@ function readTurnObservation({ baselineAssistantCount = 0, promptText = '' } = {
   }
 }
 
+function readConversationStateObservation(expectedUserMessageId) {
+  const users = userMessages()
+  const assistants = assistantMessages()
+  const anchor = typeof expectedUserMessageId === 'string' && expectedUserMessageId
+    ? users.find(user => user?.getAttribute?.('data-message-id') === expectedUserMessageId) ?? null
+    : null
+  if (!anchor) {
+    return {
+      ready: true, url: location.href, readable: false,
+      userMessageId: null, assistantMessageId: null, assistantText: null,
+      generating: null, terminal: null, body: 'unknown', humanGate: null
+    }
+  }
+
+  const newerUser = users.some(user => user !== anchor && (() => {
+    const relation = anchor?.compareDocumentPosition?.(user)
+    return typeof relation === 'number' && (relation & 4) !== 0
+  })())
+  if (newerUser) {
+    return {
+      ready: true, url: location.href, readable: false,
+      userMessageId: anchor.getAttribute?.('data-message-id') || null,
+      assistantMessageId: null, assistantText: null,
+      generating: null, terminal: null, body: 'unknown', humanGate: null
+    }
+  }
+
+  const following = assistants.filter(assistant => {
+    const relation = anchor?.compareDocumentPosition?.(assistant)
+    return typeof relation === 'number' && (relation & 4) !== 0
+  })
+  const assistant = following.at(-1) ?? null
+  const body = bodySnapshot(assistant)
+  const turn = assistant?.closest?.('[data-testid^="conversation-turn-"]')
+  const finalActionAvailable = Boolean(turn?.querySelector?.(
+    '[data-testid="copy-turn-action-button"], [data-testid="feedback-turn-action-button"], button[aria-label*="Copy response" i], button[aria-label*="复制回复"]'
+  ))
+  const mode = getComposerMode()
+  const generating = mode === 'GENERATING'
+  const assistantText = assistant ? (body.bodyText || '') : ''
+  const humanGate = Boolean(document.querySelector('[data-testid="tool-approval-card"]')) ||
+    /(?:^|\n)\[SUPERVISOR_STATE\s*:\s*NEED_INPUT\]\s*$/.test(assistantText)
+  const bodyState = !assistant
+    ? 'empty'
+    : body.bodyComplete
+      ? 'substantive'
+      : (body.bodyText || body.shellText) ? 'incomplete' : 'empty'
+
+  return {
+    ready: true,
+    url: location.href,
+    readable: true,
+    userMessageId: anchor.getAttribute?.('data-message-id') || null,
+    assistantMessageId: assistant?.getAttribute?.('data-message-id') || null,
+    assistantText,
+    generating,
+    terminal: generating || mode === 'INTERRUPTED' ? false : finalActionAvailable,
+    body: bodyState,
+    humanGate
+  }
+}
+
 function isGenerating() {
   if (document.querySelector('[data-testid="stop-button"]')) return true
   return [...document.querySelectorAll('button')].some((button) => {
@@ -932,6 +994,11 @@ function onSidecarMessage(message, _sender, sendResponse) {
 
   if (message?.type === 'conversation_observe') {
     sendResponse(writerObservation())
+    return
+  }
+
+  if (message?.type === 'conversation_state_observe') {
+    sendResponse(readConversationStateObservation(message.expectedUserMessageId))
     return
   }
 
