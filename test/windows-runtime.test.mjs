@@ -74,7 +74,9 @@ test('Windows batch launcher starts the shared server and preserves Native Messa
         })
         child.once('error', reject)
       }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out waiting for launcher startup: ${stderr}`)), 2_000))
+      // Hosted Windows runners can spend several seconds in cmd/shell startup before Node emits readiness.
+      // This is a harness watchdog, not a launcher latency SLA; readiness is still proven by serviceMarker.
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out waiting for launcher startup: ${stderr}`)), 10_000))
     ])
 
     child.stdin.write(encodeNativeMessage({ kind: 'bridge_ready', extensionVersion: 'test' }))
