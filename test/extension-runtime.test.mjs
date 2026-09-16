@@ -615,6 +615,54 @@ test('conversation_create prefers an existing same-Project conversation as the h
   assert.equal(response.result.url, projectUrl)
 })
 
+test('conversation_create is idempotent for the same logical conversation attachment', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/c/thread-existing'
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: seedThreadUrl }]
+  })
+  const request = { conversationId: 'conv_idempotent_create', url: projectUrl }
+
+  const first = await harness.request('conversation_create', request)
+  assert.equal(first.ok, true)
+  const createdAfterFirst = harness.createdTabs.length
+  const second = await harness.request('conversation_create', request)
+
+  assert.equal(second.ok, true)
+  assert.equal(second.result.tabId, first.result.tabId)
+  assert.equal(second.result.windowId, first.result.windowId)
+  assert.equal(second.result.url, first.result.url)
+  assert.equal(harness.createdTabs.length, createdAfterFirst)
+})
+
+test('conversation_create replay reopens its materialized exact thread instead of allocating a new Project draft', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const threadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-materialized'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_materialized_replay': { windowId: 10, tabId: 999, url: threadUrl }
+    },
+    windows: [{ id: 10 }]
+  })
+
+  const response = await harness.request('conversation_create', {
+    conversationId: 'conv_materialized_replay',
+    url: projectUrl
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.url, threadUrl)
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.createdTabs[0].url, threadUrl)
+  assert.equal(
+    harness.sentToTabs.some(({ message }) => message.type === 'project_open'),
+    false
+  )
+})
+
 test('conversation_create reuses a persisted same-Project conversation when no matching tab is live', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
   const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-persisted'

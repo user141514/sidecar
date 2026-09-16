@@ -561,8 +561,30 @@ async function createProject(params) {
   }
 }
 
+async function reuseAllocatedConversationAttachment(conversationId, requestedUrl) {
+  const stored = await loadConversation(conversationId)
+  if (!stored) return null
+  const expectedUrl = chooseConversationUrl(stored.url, requestedUrl)
+  const liveTab = await findRegisteredLiveTab(stored, expectedUrl)
+  if (liveTab) {
+    const state = {
+      windowId: liveTab.windowId,
+      tabId: liveTab.id,
+      url: chooseConversationUrl(tabPageUrl(liveTab), expectedUrl)
+    }
+    await saveConversation(conversationId, state)
+    return state
+  }
+  if (stableConversationUrl(stored.url)) {
+    return (await resolveConversationAttachment(conversationId, stored.url)).state
+  }
+  return null
+}
+
 async function createConversation(params) {
   const url = params.url || CHATGPT_URL
+  const existing = await reuseAllocatedConversationAttachment(params.conversationId, url)
+  if (existing) return existing
   const projectUrl = projectHomeUrl(url)
   const projectSeedUrl = projectUrl ? await findProjectConversationSeedUrl(projectUrl) : null
   const initialUrl = projectUrl ? (projectSeedUrl || CHATGPT_URL) : url
