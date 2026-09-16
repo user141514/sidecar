@@ -161,6 +161,56 @@ test('ConversationStore reconstructs need_continue as a recoverable terminal tur
   }
 })
 
+test('ConversationStore allocates one deterministic logical child per NEW intent across restart', async () => {
+  const { ConversationStore } = await loadStoreModule()
+  assert.equal(typeof ConversationStore, 'function')
+  if (typeof ConversationStore !== 'function') return
+
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-allocation-'))
+  try {
+    const request = {
+      backend: 'chatgpt-web-extension',
+      externalUrl: 'https://chatgpt.com/g/g-p-project123-agent/project',
+      intentId: 'intent-new-stable-1'
+    }
+    const firstStore = new ConversationStore(root)
+    assert.equal(typeof firstStore.allocate, 'function')
+    const first = await firstStore.allocate(request)
+    const duplicate = await firstStore.allocate(request)
+    const restarted = await new ConversationStore(root).allocate(request)
+
+    assert.equal(first.id, duplicate.id)
+    assert.equal(first.id, restarted.id)
+    assert.equal(first.allocationIntentId, request.intentId)
+    assert.match(first.id, /^conv_[a-f0-9]{64}$/)
+
+    const raw = await readFile(join(root, first.id, 'events.jsonl'), 'utf8')
+    const events = raw.trim().split('\n').map(line => JSON.parse(line))
+    assert.equal(events.length, 1)
+    assert.equal(events[0].type, 'conversation_created')
+    assert.equal(events[0].allocationIntentId, request.intentId)
+
+    const other = await firstStore.allocate({ ...request, intentId: 'intent-new-stable-2' })
+    assert.notEqual(other.id, first.id)
+
+    const concurrentRequest = { ...request, intentId: 'intent-new-concurrent' }
+    const [left, right] = await Promise.all([
+      new ConversationStore(root).allocate(concurrentRequest),
+      new ConversationStore(root).allocate(concurrentRequest)
+    ])
+    assert.equal(left.id, right.id)
+    const concurrentRaw = await readFile(join(root, left.id, 'events.jsonl'), 'utf8')
+    assert.equal(concurrentRaw.trim().split('\n').length, 1)
+
+    await assert.rejects(
+      firstStore.allocate({ ...request, externalUrl: 'https://chatgpt.com/g/g-p-other/project' }),
+      /allocation identity conflict/i
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('ConversationStore records errors as durable terminal state', async () => {
   const { ConversationStore } = await loadStoreModule()
   assert.equal(typeof ConversationStore, 'function')

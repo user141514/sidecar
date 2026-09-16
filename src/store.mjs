@@ -1,6 +1,6 @@
 import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { canonicalTarget } from './send-mailbox.mjs'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
 function now() {
@@ -132,15 +132,64 @@ export class ConversationStore {
     return meta
   }
 
+  async allocate({ backend, externalUrl, intentId }) {
+    if (typeof backend !== 'string' || !backend.trim()) throw new TypeError('allocation backend is required')
+    if (typeof externalUrl !== 'string' || !externalUrl.trim()) throw new TypeError('allocation externalUrl is required')
+    if (typeof intentId !== 'string' || !intentId.trim() || intentId.length > 256) throw new TypeError('allocation intentId is invalid')
+    const id = `conv_${createHash('sha256').update(`conversation-allocation:v1:${intentId}`).digest('hex')}`
+    return this.enqueueWrite(id, async () => {
+      const dir = this.conversationDir(id)
+      await mkdir(dir, { recursive: true })
+      const metaPath = join(dir, 'meta.json')
+      const eventsPath = join(dir, 'events.jsonl')
+      const validate = (meta) => {
+        if (!meta || meta.id !== id || meta.backend !== backend || meta.externalUrl !== externalUrl || meta.allocationIntentId !== intentId) {
+          throw new Error('allocation identity conflict')
+        }
+        return meta
+      }
+      try {
+        return validate(JSON.parse(await readFile(metaPath, 'utf8')))
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+
+      const createdAt = now()
+      const creation = { at: createdAt, type: 'conversation_created', externalUrl, backend, allocationIntentId: intentId }
+      try {
+        await writeFile(eventsPath, `${JSON.stringify(creation)}\n`, { encoding: 'utf8', flag: 'wx' })
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error
+        const first = (await readFile(eventsPath, 'utf8')).split('\n').filter(Boolean)[0]
+        const existing = first ? JSON.parse(first) : null
+        if (!existing || existing.type !== 'conversation_created' || existing.externalUrl !== externalUrl ||
+            existing.backend !== backend || existing.allocationIntentId !== intentId) throw new Error('allocation identity conflict')
+      }
+
+      const meta = { id, backend, externalUrl, status: 'idle', createdAt, allocationIntentId: intentId }
+      try {
+        await writeFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+        return meta
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error
+        return validate(JSON.parse(await readFile(metaPath, 'utf8')))
+      }
+    })
+  }
+
+  enqueueWrite(id, operation) {
+    const previous = this.appendQueues.get(id) ?? Promise.resolve()
+    const write = previous.then(operation)
+    this.appendQueues.set(id, write.catch(() => {}))
+    return write
+  }
+
   async append(id, event) {
     const record = { at: now(), ...event }
-    const previous = this.appendQueues.get(id) ?? Promise.resolve()
-    const write = previous.then(async () => {
+    return this.enqueueWrite(id, async () => {
       await appendFile(join(this.conversationDir(id), 'events.jsonl'), `${JSON.stringify(record)}\n`, 'utf8')
       return record
     })
-    this.appendQueues.set(id, write.catch(() => {}))
-    return write
   }
 
   async findByExternalUrl(url) {
