@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
-function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, interrupted = false } = {}) {
+function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, interrupted = false, finalized = true } = {}) {
   let listener, clicks = 0, pending = false, active = false, gate = false, submitted = false
   class Editor {
     _value = ''
@@ -14,7 +14,7 @@ function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, 
     getAttribute() { return null }
   }
   const editor = new Editor()
-  const turn = { getAttribute() { return 'conversation-turn-2' }, querySelector(s) { return s.includes('turn-action') ? {} : null } }
+  const turn = { getAttribute() { return 'conversation-turn-2' }, querySelector(s) { return finalized && s.includes('turn-action') ? {} : null } }
   const assistant = { innerText: bodyMode === 'incomplete' ? 'Only heading' : 'complete body', getAttribute(n) { return n === 'data-message-id' ? 'a1' : null }, closest() { return turn }, compareDocumentPosition(n) { return pending && n === user ? 4 : 0 } }
   if (bodyMode) {
     const root = { innerText: assistant.innerText, querySelector(s) {
@@ -96,6 +96,37 @@ test('interrupted substantive response is not terminal state evidence', async ()
   assert.equal(state.generating, false)
   assert.equal(state.body, 'substantive')
   assert.equal(state.terminal, false)
+})
+
+test('legacy writer guard still requires local terminal evidence', async () => {
+  const f = fixture({ finalized: false })
+  const prepared = await f.call({
+    type: 'conversation_prepare', guarded: true, turnId: 't-legacy', text: 'continue',
+    expected: { userMessageId: 'u1', assistantMessageId: 'a1' }
+  })
+  assert.equal(prepared.prepared, false)
+  assert.equal(f.clicks, 0)
+})
+
+test('authoritative writer guard delegates lifecycle finality to Sidecar but preserves effect safety checks', async () => {
+  const f = fixture({ finalized: false })
+  const prepared = await f.call({
+    type: 'conversation_prepare', guarded: true, authoritativeState: true,
+    turnId: 't-v1', text: 'continue', expected: { userMessageId: 'u1', assistantMessageId: 'a1' }
+  })
+  assert.equal(prepared.prepared, true)
+  assert.equal((await f.call({ type: 'conversation_submit', guarded: true, authoritativeState: true, turnId: 't-v1' })).accepted, true)
+  assert.equal(f.clicks, 1)
+
+  for (const field of ['active', 'gate', 'pending']) {
+    const g = fixture({ finalized: false }); g[field] = true
+    const denied = await g.call({
+      type: 'conversation_prepare', guarded: true, authoritativeState: true,
+      turnId: `t-${field}`, text: 'continue', expected: { userMessageId: 'u1', assistantMessageId: 'a1' }
+    })
+    assert.equal(denied.prepared, false)
+    assert.equal(g.clicks, 0)
+  }
 })
 
 test('writer observation detects a newer user before new assistant or Stop exists', async () => {

@@ -43,6 +43,7 @@ test('watchdog proposal is routed through one durable host send and duplicate re
   assert.equal(sends.length, 1)
   assert.deepEqual(sends[0].params.expected, expected)
   assert.equal(sends[0].params.existingOnly, true)
+  assert.equal(sends[0].params.authoritativeState, undefined)
 })
 
 test('watchdog retries reconcile a durable browser effect receipt instead of resending', async t => {

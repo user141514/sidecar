@@ -713,6 +713,7 @@ async function performSend(params, operation) {
     turnId: params.turnId,
     guarded: true,
     ...(params.expected ? { expected: params.expected } : {}),
+    ...(params.authoritativeState === true ? { authoritativeState: true } : {}),
     text: params.text,
     ...(params.app ? { app: params.app } : {})
   }, 60_000, async () => {
@@ -754,7 +755,8 @@ async function performSend(params, operation) {
     type: 'conversation_submit',
     conversationId: params.conversationId,
     turnId: params.turnId,
-    guarded: true
+    guarded: true,
+    ...(params.authoritativeState === true ? { authoritativeState: true } : {})
   }, 15_000) } catch (error) { throw deliveryUncertain(error) }
   if (submitted?.deliveryUncertain === true) throw deliveryUncertain(submitted.error || 'Submit outcome unknown')
   if (submitted?.accepted !== true) {

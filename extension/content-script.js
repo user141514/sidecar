@@ -888,7 +888,7 @@ function composerDraft(editor = findPromptEditor()) {
   return typeof editor?.value === 'string' ? editor.value : (editor?.innerText || editor?.textContent || '')
 }
 
-function writerObservation(ownedDraft = null) {
+function writerObservation(ownedDraft = null, requireTerminalEvidence = true) {
   const users = userMessages(), assistants = assistantMessages()
   const user = users.at(-1), assistant = assistants.at(-1)
   const userMessageId = user?.getAttribute?.('data-message-id') || ''
@@ -904,7 +904,7 @@ function writerObservation(ownedDraft = null) {
   const reason = userPending ? 'user_turn_pending' : busy ? 'assistant_active' : needsInput ? 'need_input' :
     !editor || editor.getAttribute?.('aria-disabled') === 'true' ? 'composer_unavailable' :
     (ownedDraft === null ? Boolean(draft.trim()) : draft.replace(/\r\n/g, '\n') !== ownedDraft.replace(/\r\n/g, '\n')) ? 'composer_changed' :
-    assistant && !finalized ? 'terminal_evidence_missing' : null
+    requireTerminalEvidence && assistant && !finalized ? 'terminal_evidence_missing' : null
   return { ready: true, url: location.href, allowed: reason === null, reason, userMessageId, assistantMessageId,
     stamp: JSON.stringify([location.href, users.length, assistants.length, userMessageId, assistantMessageId, userMessageText(user), text]) }
 }
@@ -922,13 +922,14 @@ async function handlePrepare(message) {
     await selectAppForMessage(message.app)
     editor = await waitForPromptEditor()
   }
-  const observation = message.guarded === true ? writerObservation() : null
+  const authoritativeState = message.authoritativeState === true
+  const observation = message.guarded === true ? writerObservation(null, !authoritativeState) : null
   if (observation) assertWriterObservation(observation, message.expected)
   setPromptText(editor, message.text)
   if (observation) {
     const ownedDraft = composerDraft(editor)
     if (!ownedDraft.trim()) throw new Error('composer_changed')
-    preparedSend = { turnId: message.turnId, text: ownedDraft, stamp: observation.stamp, expected: message.expected }
+    preparedSend = { turnId: message.turnId, text: ownedDraft, stamp: observation.stamp, expected: message.expected, authoritativeState }
   }
   return {
     prepared: true,
@@ -941,7 +942,7 @@ async function handleSubmit(message = {}) {
   const prepared = preparedSend
   const guard = message.guarded === true ? () => {
     if (!prepared || prepared.turnId !== message.turnId) throw new Error('prepared_intent_missing')
-    const observation = writerObservation(prepared.text)
+    const observation = writerObservation(prepared.text, prepared.authoritativeState !== true)
     assertWriterObservation(observation, prepared.expected)
     if (observation.stamp !== prepared.stamp) throw new Error('stale_intent')
   } : null

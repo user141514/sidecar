@@ -224,6 +224,7 @@ test('v1 valid continuation uses intentId as durable effect identity and dedupli
   assert.equal(sends[0].params.requestId, payload.intentId)
   assert.deepEqual(sends[0].params.expected, expected)
   assert.equal(sends[0].params.existingOnly, true)
+  assert.equal(sends[0].params.authoritativeState, true)
 })
 
 test('v1 explicit REUSE creates a new turn in the exact existing child without allocating another conversation', async t => {
@@ -242,6 +243,7 @@ test('v1 explicit REUSE creates a new turn in the exact existing child without a
   assert.equal(bridge.calls.some(call => call.method === 'conversation_create'), false)
   assert.equal(sends[0].params.conversationId, conversation.id)
   assert.equal(sends[0].params.existingOnly, true)
+  assert.equal(sends[0].params.authoritativeState, true)
   assert.equal(sends[0].params.requestId, payload.intentId)
 
   const stored = await store.read(conversation.id)

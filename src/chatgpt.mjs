@@ -285,7 +285,8 @@ export class ChatGptConversationHost {
         requestId,
         markDispatching,
         intentSource: intent.source,
-        preAdmitted: true
+        preAdmitted: true,
+        authoritativeState: true
       })
     }, intent.conversationId)
   }
@@ -399,7 +400,7 @@ export class ChatGptConversationHost {
     }
   }
 
-  async #sendActive(conversationId, text, { app, preAdmitted = false, expected, existingOnly = false, requestId, markDispatching, intentSource } = {}) {
+  async #sendActive(conversationId, text, { app, preAdmitted = false, expected, existingOnly = false, requestId, markDispatching, intentSource, authoritativeState = false } = {}) {
     const conversation = await this.#loadConversation(conversationId)
     if (!conversation) {
       throw new Error(`Conversation ${conversationId} does not exist in the local ledger`)
@@ -443,6 +444,7 @@ export class ChatGptConversationHost {
         ...(app ? { app } : {}),
         ...(expected ? { expected } : {}),
         ...(existingOnly ? { existingOnly: true } : {}),
+        ...(authoritativeState ? { authoritativeState: true } : {}),
         externalUrl: conversation.externalUrl || DEFAULT_CHATGPT_URL
       })
       if (!result || typeof result.accepted !== 'boolean') throw Object.assign(new Error('invalid browser submission receipt; delivery uncertain'), { code: 'DELIVERY_UNCERTAIN' })

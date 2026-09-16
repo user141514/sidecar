@@ -776,6 +776,33 @@ test('send forwards a per-message app selection to the content-script prepare st
   assert.equal(prepared?.message.app, 'DevSpace')
 })
 
+test('send forwards authoritative state ownership to prepare and submit without changing legacy default', async () => {
+  const externalUrl = 'https://chatgpt.com/c/authoritative-guard'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_authoritative': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+
+  const response = await harness.request('conversation_send', {
+    conversationId: 'conv_authoritative',
+    turnId: 'turn_authoritative',
+    text: 'continue',
+    expected: { userMessageId: 'u1', assistantMessageId: 'a1' },
+    authoritativeState: true,
+    externalUrl
+  })
+
+  assert.equal(response.ok, true)
+  const prepare = harness.sentToTabs.find(({ message }) => message.type === 'conversation_prepare')
+  const submit = harness.sentToTabs.find(({ message }) => message.type === 'conversation_submit')
+  assert.equal(prepare?.message.authoritativeState, true)
+  assert.equal(submit?.message.authoritativeState, true)
+})
+
 test('send persists pending state before the irreversible submit click', async () => {
   const externalUrl = 'https://chatgpt.com/c/prepared-before-submit'
   const harness = makeHarness({
