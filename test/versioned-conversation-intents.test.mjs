@@ -312,6 +312,26 @@ test('v1 NEW binds payload identity before pacing so the same intentId cannot ch
   assert.equal(bridge.calls.some(call => ['conversation_create', 'conversation_send'].includes(call.method)), false)
 })
 
+test('legacy NEW allocation already bound by send identity rejects changed payload before browser effect', async t => {
+  const { store, bridge, host } = await setupNew(t)
+  const payload = newIntent({ intentId: 'intent-v1-new-legacy-bound', text: 'TASK_B' })
+  const legacy = await store.allocate({
+    backend: 'chatgpt-web-extension',
+    externalUrl: managedProjectUrl,
+    intentId: payload.intentId
+  })
+  await store.append(legacy.id, {
+    type: 'send_intent',
+    turnId: 'turn-legacy-bound',
+    requestId: payload.intentId,
+    text: 'TASK_A',
+    source: 'human'
+  })
+
+  await assert.rejects(host.proposeContinuation(payload), /request identity conflict/i)
+  assert.equal(bridge.calls.some(call => ['conversation_create', 'conversation_send'].includes(call.method)), false)
+})
+
 test('v1 NEW replays and restarts to the same logical child with one browser allocation and one send', async t => {
   const { store, bridge, admission, host } = await setupNew(t)
   const payload = newIntent()
