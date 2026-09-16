@@ -90,7 +90,7 @@ Unknown versions fail closed. Producers and consumers must never silently coerce
 
 Observation payloads are source-specific facts and are not directly sendable commands.
 
-Minimum common envelope:
+The v1 envelope has a fixed top-level shape. Unknown facts use `null` or the `unknown` enum value; producers do not add source-specific top-level fields.
 
 ```json
 {
@@ -99,12 +99,20 @@ Minimum common envelope:
   "conversationId": "conv_...",
   "target": "https://chatgpt.com/.../c/<uuid>",
   "observedAt": "ISO-8601",
+  "turnId": "turn_...|null",
   "userMessageId": "...|null",
-  "assistantMessageId": "...|null"
+  "assistantMessageId": "...|null",
+  "readable": true,
+  "generating": "true|false|null",
+  "terminal": "true|false|null",
+  "body": "unknown|empty|incomplete|substantive",
+  "humanGate": "true|false|null",
+  "delivery": "unknown|none|pending|delivered|uncertain",
+  "requestId": "...|null"
 }
 ```
 
-Source-specific fields may describe generation activity, terminal evidence, body completeness, human gates, delivery receipts, or read failures. Observation producers must not emit the authoritative state version.
+Observation producers must not emit the authoritative state version. Unknown or extra top-level fields fail closed in v1.
 
 ## ConversationState v1
 

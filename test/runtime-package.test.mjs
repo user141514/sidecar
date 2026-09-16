@@ -28,6 +28,7 @@ test('full runtime artifact contains scheduler and memory while remaining indepe
     'src/memory-pool.mjs',
     'src/memory-sync-bridge.mjs',
     'src/chatgpt.mjs',
+    'src/conversation-contract.mjs',
     'extension/manifest.json',
     'install/platform-link.mjs',
     'skills/chatgpt-subagents/SKILL.md'
