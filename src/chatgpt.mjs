@@ -17,6 +17,16 @@ function versionedIntentMeta(state) {
   }
 }
 
+function newAllocationIntentDigest(intent) {
+  return createHash('sha256').update(JSON.stringify([
+    intent.contractVersion,
+    intent.source,
+    intent.action,
+    intent.allocation,
+    intent.text
+  ])).digest('hex')
+}
+
 function versionedIntentDenial(intent, state) {
   const meta = versionedIntentMeta(state)
   if (state.writer.mode !== 'managed') return { accepted: false, reason: 'writer_mode_mismatch', ...meta }
@@ -299,11 +309,20 @@ export class ChatGptConversationHost {
     }
     if (!this.managedProjectUrl) return { accepted: false, reason: 'managed_project_unresolved' }
 
-    const allocated = await this.store.allocate({
-      backend: 'chatgpt-web-extension',
-      externalUrl: this.managedProjectUrl,
-      intentId: intent.intentId
-    })
+    let allocated
+    try {
+      allocated = await this.store.allocate({
+        backend: 'chatgpt-web-extension',
+        externalUrl: this.managedProjectUrl,
+        intentId: intent.intentId,
+        intentDigest: newAllocationIntentDigest(intent)
+      })
+    } catch (error) {
+      if (/allocation identity conflict/i.test(error instanceof Error ? error.message : String(error))) {
+        return { accepted: false, reason: 'request_identity_conflict' }
+      }
+      throw error
+    }
     const current = await this.store.read(allocated.id)
     const prior = (current.events || []).find(event => event.type === 'send_intent' && event.requestId === intent.intentId)
     if (prior) {
@@ -498,6 +517,52 @@ export class ChatGptConversationHost {
       return { found: false, reason: 'target_changed' }
     }
     return { found: true, state }
+  }
+
+  async ackHumanGate(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+        Object.keys(payload).some(key => !['conversationId', 'target', 'expectedStateVersion', 'expectedWriterEpoch', 'expected'].includes(key))) {
+      throw new TypeError('invalid human gate acknowledgement fields')
+    }
+    const { conversationId, target, expectedStateVersion, expectedWriterEpoch, expected } = payload
+    if (typeof conversationId !== 'string' || !conversationId) throw new TypeError('conversationId is required')
+    if (!Number.isSafeInteger(expectedStateVersion) || expectedStateVersion < 0) throw new TypeError('expectedStateVersion is required')
+    if (!Number.isSafeInteger(expectedWriterEpoch) || expectedWriterEpoch < 0) throw new TypeError('expectedWriterEpoch is required')
+    if (!expected || typeof expected !== 'object' || Array.isArray(expected) ||
+        Object.keys(expected).some(key => !['userMessageId', 'assistantMessageId'].includes(key)) ||
+        !['userMessageId', 'assistantMessageId'].every(key => typeof expected[key] === 'string' && expected[key])) {
+      throw new TypeError('exact user and assistant message IDs are required')
+    }
+
+    const resolved = await this.stateByTarget(target)
+    if (resolved?.found !== true) return { accepted: false, reason: resolved?.reason || 'target_unavailable' }
+    const state = resolved.state
+    const meta = versionedIntentMeta(state)
+    if (state.writer.mode !== 'managed') return { accepted: false, reason: 'writer_mode_mismatch', ...meta }
+    if (state.writer.epoch !== expectedWriterEpoch) return { accepted: false, reason: 'writer_epoch_mismatch', ...meta }
+    if (state.stateVersion !== expectedStateVersion) return { accepted: false, reason: 'stale_state', ...meta }
+    if (state.conversationId !== conversationId || canonicalTarget(state.target) !== canonicalTarget(target) ||
+        state.turn.userMessageId !== expected.userMessageId || state.turn.assistantMessageId !== expected.assistantMessageId) {
+      return { accepted: false, reason: 'stale_state', ...meta }
+    }
+    if (state.gate !== 'human_required') return { accepted: false, reason: 'gate_not_required', ...meta }
+
+    const conversation = await this.store.read(conversationId)
+    const alreadyCleared = (conversation.events || []).some(event =>
+      event.type === 'human_gate_cleared' && event.turnId === state.turn.turnId &&
+      event.userMessageId === state.turn.userMessageId && event.assistantMessageId === state.turn.assistantMessageId &&
+      event.writerEpoch === state.writer.epoch
+    )
+    if (!alreadyCleared) {
+      await this.store.append(conversationId, {
+        type: 'human_gate_cleared',
+        turnId: state.turn.turnId,
+        userMessageId: state.turn.userMessageId,
+        assistantMessageId: state.turn.assistantMessageId,
+        writerEpoch: state.writer.epoch
+      })
+    }
+    return { accepted: true, state: await this.state(conversationId) }
   }
 
   state(conversationId) {

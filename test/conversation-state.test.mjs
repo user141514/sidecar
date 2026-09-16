@@ -100,6 +100,30 @@ test('human-required gate is sticky until explicit control-plane provenance clea
   assert.equal(state.gate, 'human_required')
 })
 
+test('exact human gate acknowledgement clears only that turn and old browser marker cannot relatch it', () => {
+  const previous = { contractVersion: 1, conversationId: id, target, stateVersion: 4,
+    turn: { turnId: 'turn-1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },
+    progress: 'terminal', body: 'substantive', delivery: 'delivered', gate: 'human_required', writer }
+  const l = ledger('generating', [
+    { at: '2026-09-16T02:00:50.000Z', type: 'conversation_state', state: previous },
+    { at: '2026-09-16T02:00:55.000Z', type: 'human_gate_cleared', turnId: 'turn-1', userMessageId: 'user-1', assistantMessageId: 'assistant-1', writerEpoch: 7 }
+  ])
+  const state = reduce(l, [obs('browser', { body: 'substantive', assistantText: 'Need approval\n[SUPERVISOR_STATE: NEED_INPUT]', humanGate: true })])
+  assert.deepEqual([state.gate, state.stateVersion], ['none', 5])
+})
+
+test('human gate acknowledgement for another turn cannot clear the current gate', () => {
+  const previous = { contractVersion: 1, conversationId: id, target, stateVersion: 4,
+    turn: { turnId: 'turn-1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },
+    progress: 'terminal', body: 'substantive', delivery: 'delivered', gate: 'human_required', writer }
+  const l = ledger('generating', [
+    { at: '2026-09-16T02:00:50.000Z', type: 'conversation_state', state: previous },
+    { at: '2026-09-16T02:00:55.000Z', type: 'human_gate_cleared', turnId: 'turn-old', userMessageId: 'user-old', assistantMessageId: 'assistant-old', writerEpoch: 7 }
+  ])
+  const state = reduce(l, [obs('browser', { body: 'substantive', assistantText: 'done', humanGate: false })])
+  assert.equal(state.gate, 'human_required')
+})
+
 test('stateVersion is stable for same semantics and increments on change', () => {
   const previous = { contractVersion: 1, conversationId: id, target, stateVersion: 4,
     turn: { turnId: 'turn-1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },

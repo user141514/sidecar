@@ -49,7 +49,10 @@ function baseDelivery(ledger, turnId) {
 function durable(ledger, turnId) {
   if (!turnId) return ['idle', 'unknown']
   if (ledger.status === 'completed') return ['terminal', 'substantive']
-  if (ledger.status === 'need_continue') return ['blocked', 'incomplete']
+  if (ledger.status === 'need_continue') {
+    const event = revFind(ledger.events, item => item.type === 'need_continue' && item.turnId === turnId)
+    return event?.reason === 'human_required' ? ['terminal', 'substantive'] : ['blocked', 'incomplete']
+  }
   if (ledger.status === 'error') return ['blocked', 'unknown']
   return ['unknown', 'unknown']
 }
@@ -81,7 +84,16 @@ export function reduceConversationProjection({ ledger, observations = [], writer
     if (prior.delivery === 'delivered' || (prior.delivery === 'uncertain' && delivery !== 'delivered')) delivery = prior.delivery
     else if (prior.delivery === 'pending' && delivery === 'none') delivery = 'pending'
   }
-  let gate = prior?.gate ?? 'none'
+  const humanGateClear = turnId ? revFind(ledger.events, event =>
+    event.type === 'human_gate_cleared' &&
+    event.turnId === turnId &&
+    event.writerEpoch === writer.epoch &&
+    prior?.turn.turnId === turnId &&
+    event.userMessageId === prior.turn.userMessageId &&
+    event.assistantMessageId === prior.turn.assistantMessageId
+  ) : null
+  const humanGateCleared = Boolean(humanGateClear)
+  let gate = humanGateCleared ? 'none' : (prior?.gate ?? 'none')
   let userMessageId = prior?.turn.turnId === turnId ? prior.turn.userMessageId : null
   let assistantMessageId = prior?.turn.turnId === turnId ? prior.turn.assistantMessageId : null
   let target = ledger.externalUrl
@@ -101,7 +113,7 @@ export function reduceConversationProjection({ ledger, observations = [], writer
     target = browser.target
     userMessageId = browser.userMessageId ?? userMessageId
     assistantMessageId = browser.assistantMessageId ?? assistantMessageId
-    if (browser.humanGate === true) gate = 'human_required'
+    if (browser.humanGate === true && !humanGateCleared) gate = 'human_required'
     body = browser.body
     if (browser.generating === true) progress = 'active'
     else if (browser.generating === false && browser.terminal === true && body === 'substantive') progress = 'terminal'

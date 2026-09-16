@@ -294,6 +294,24 @@ test('v1 NEW pacing denial allocates no browser tab and no prompt effect', async
   assert.equal(bridge.calls.some(call => ['conversation_create', 'conversation_send'].includes(call.method)), false)
 })
 
+test('v1 NEW binds payload identity before pacing so the same intentId cannot change task semantics', async t => {
+  const { host, bridge, admission } = await setupNew(t, { admitted: false })
+  const first = await host.proposeContinuation(newIntent({
+    intentId: 'intent-v1-new-bound-before-pacing',
+    text: 'TASK_A'
+  }))
+  assert.equal(first.reason, 'pacing')
+
+  const changed = await host.proposeContinuation(newIntent({
+    intentId: 'intent-v1-new-bound-before-pacing',
+    text: 'TASK_B'
+  }))
+  assert.equal(changed.accepted, false)
+  assert.equal(changed.reason, 'request_identity_conflict')
+  assert.equal(admission.calls, 1)
+  assert.equal(bridge.calls.some(call => ['conversation_create', 'conversation_send'].includes(call.method)), false)
+})
+
 test('v1 NEW replays and restarts to the same logical child with one browser allocation and one send', async t => {
   const { store, bridge, admission, host } = await setupNew(t)
   const payload = newIntent()

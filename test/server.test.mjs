@@ -164,6 +164,11 @@ class FakeHost {
       }
     }
   }
+
+  async ackHumanGate(payload) {
+    this.humanGateAck = payload
+    return { accepted: true, state: { gate: 'none', stateVersion: payload.expectedStateVersion + 1 } }
+  }
 }
 
 async function rpc(baseUrl, body) {
@@ -217,6 +222,39 @@ test('localhost authoritative conversation-state endpoint is read-only and not m
 
     const listed = await rpc(baseUrl, { jsonrpc: '2.0', id: 8, method: 'tools/list', params: {} })
     assert.equal(listed.body.result.tools.some((tool) => tool.name === 'conversation_state'), false)
+  } finally {
+    await app.close()
+  }
+})
+
+test('localhost human-gate acknowledgement endpoint is control-plane only and rejects browser Origin', async () => {
+  const { createSidecarServer } = await loadServerModule()
+  const host = new FakeHost()
+  const app = createSidecarServer({ conversationHost: host })
+  const address = await app.listen({ host: '127.0.0.1', port: 0 })
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  const payload = {
+    conversationId: 'conv_1',
+    target: 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000077',
+    expectedStateVersion: 3,
+    expectedWriterEpoch: 0,
+    expected: { userMessageId: 'user_1', assistantMessageId: 'assistant_1' }
+  }
+  try {
+    const response = await fetch(`${baseUrl}/internal/human-gate-ack`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload)
+    })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { accepted: true, state: { gate: 'none', stateVersion: 4 } })
+    assert.deepEqual(host.humanGateAck, payload)
+
+    const browserOrigin = await fetch(`${baseUrl}/internal/human-gate-ack`, {
+      method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://evil.example' }, body: JSON.stringify(payload)
+    })
+    assert.equal(browserOrigin.status, 403)
+
+    const listed = await rpc(baseUrl, { jsonrpc: '2.0', id: 91, method: 'tools/list', params: {} })
+    assert.equal(listed.body.result.tools.some((tool) => tool.name === 'human_gate_ack'), false)
   } finally {
     await app.close()
   }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
-function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, interrupted = false, finalized = true } = {}) {
+function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, interrupted = false, finalized = true, needsInputText = false } = {}) {
   let listener, clicks = 0, pending = false, active = false, gate = false, submitted = false
   class Editor {
     _value = ''
@@ -15,7 +15,8 @@ function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, 
   }
   const editor = new Editor()
   const turn = { getAttribute() { return 'conversation-turn-2' }, querySelector(s) { return finalized && s.includes('turn-action') ? {} : null } }
-  const assistant = { innerText: bodyMode === 'incomplete' ? 'Only heading' : 'complete body', getAttribute(n) { return n === 'data-message-id' ? 'a1' : null }, closest() { return turn }, compareDocumentPosition(n) { return pending && n === user ? 4 : 0 } }
+  const assistantText = needsInputText ? 'Need approval\n[SUPERVISOR_STATE: NEED_INPUT]' : bodyMode === 'incomplete' ? 'Only heading' : 'complete body'
+  const assistant = { innerText: assistantText, getAttribute(n) { return n === 'data-message-id' ? 'a1' : null }, closest() { return turn }, compareDocumentPosition(n) { return pending && n === user ? 4 : 0 } }
   if (bodyMode) {
     const root = { innerText: assistant.innerText, querySelector(s) {
       if (bodyMode === 'substantive' && /p, li, pre, code/.test(s)) return {}
@@ -121,6 +122,30 @@ test('authoritative writer observation delegates lifecycle finality but preserve
     const denied = await g.call({ type: 'conversation_observe', authoritativeState: true })
     assert.equal(denied.allowed, false)
   }
+})
+
+test('acknowledged textual human gate follows Sidecar authority while live browser approval gate still blocks', async () => {
+  const legacy = fixture({ needsInputText: true })
+  const legacyPrepared = await legacy.call({
+    type: 'conversation_prepare', guarded: true,
+    turnId: 't-human-legacy', text: 'continue', expected: { userMessageId: 'u1', assistantMessageId: 'a1' }
+  })
+  assert.equal(legacyPrepared.prepared, false)
+
+  const authoritative = fixture({ needsInputText: true })
+  const acknowledged = await authoritative.call({
+    type: 'conversation_prepare', guarded: true, authoritativeState: true,
+    turnId: 't-human-ack', text: 'continue', expected: { userMessageId: 'u1', assistantMessageId: 'a1' }
+  })
+  assert.equal(acknowledged.prepared, true)
+
+  const liveApproval = fixture({ needsInputText: true })
+  liveApproval.gate = true
+  const denied = await liveApproval.call({
+    type: 'conversation_prepare', guarded: true, authoritativeState: true,
+    turnId: 't-live-approval', text: 'continue', expected: { userMessageId: 'u1', assistantMessageId: 'a1' }
+  })
+  assert.equal(denied.prepared, false)
 })
 
 test('authoritative writer guard delegates lifecycle finality to Sidecar but preserves effect safety checks', async () => {

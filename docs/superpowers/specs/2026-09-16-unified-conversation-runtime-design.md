@@ -184,7 +184,7 @@ Managed consumers read state through Sidecar's localhost-only `POST /internal/co
 
 ### Intent invariants
 
-1. `intentId` is stable across retries of the same logical request.
+1. `intentId` is stable across retries of the same logical request and binds one immutable logical payload. For `NEW`, this binding is durably established at logical-child allocation before pacing or browser allocation, so a retry cannot change source/action/allocation/text under the same intent identity.
 2. `expectedStateVersion` and `expectedWriterEpoch` are mandatory for state-changing actions against an existing conversation.
 3. A stale state version or writer epoch is rejected before pacing or browser mutation.
 4. `action=open_child` requires `allocation=NEW|REUSE`; other actions require `allocation=null`.
@@ -203,7 +203,7 @@ Control-plane data is not ordinary message content:
 - extension lifecycle/reload admission
 - global pacing reservation
 
-A mode or epoch change invalidates intents issued against the old writer epoch. In the Runtime Home deployment, each new Sidecar writer server incarnation claims the next durable epoch from `data/writer-authority.json` **and holds the corresponding process-lifetime lease until that server closes or dies**. A second live writer cannot advance the epoch; a replacement may fence an orphan only after proving the recorded owner PID is dead. Before listening on the managed HTTP endpoint, the new writer must durably claim the same epoch at the Extension Effect Sink. Every Sidecar browser-mutation command carries that epoch, and the Extension revalidates it at effect execution. The Extension epoch claim is a barrier: it waits for already-running writer commands to drain, prevents later commands from entering until the claim is durable, and then rejects stale-epoch commands before browser mutation. The epoch is not a release number, wall-clock guess, or constant default. Source-only/test hosts without a stable data root may use explicit epoch `0`, but production Runtime Home must not. Legacy direct mode cannot share managed writer authority for the same browser session.
+A mode or epoch change invalidates intents issued against the old writer epoch. In the Runtime Home deployment, each new Sidecar writer server incarnation claims the next durable epoch from `data/writer-authority.json` **and holds the corresponding process-lifetime lease until that server closes or dies**. A second live writer cannot advance the epoch; a replacement may fence an orphan only after proving the recorded owner PID is dead. Before listening on the managed HTTP endpoint, the new writer must durably claim the same epoch at the Extension Effect Sink. Every Sidecar browser-mutation command carries that epoch, and the Extension revalidates it at effect execution. A managed command that carries a writer epoch while the Extension has no durable writer authority fails closed; absence of authority is not permission to mutate. Legacy commands without an epoch are compatible only before any managed writer authority has been claimed, and once managed authority exists they are rejected. The Extension epoch claim is a barrier: it waits for already-running writer commands to drain, prevents later commands from entering until the claim is durable, and then rejects stale-epoch commands before browser mutation. The epoch is not a release number, wall-clock guess, or constant default. Source-only/test hosts without a stable data root may use explicit epoch `0`, but production Runtime Home must not. Legacy direct mode cannot share managed writer authority for the same browser session.
 
 ## Reducer rules
 
@@ -219,7 +219,7 @@ Rules required by current failures:
 6. Reducer output is durably reflected in Sidecar state before policy/dispatch consumes it.
 7. A newer user turn after the expected user identity makes that observation unreadable for the old turn; later assistant output cannot be rebound backward.
 8. `Continue generating` / interrupted generation is nonterminal even when the partial body is substantive.
-9. `human_required` is a sticky control-plane veto and is never cleared merely because a browser observation reports no gate on a later poll.
+9. `human_required` is a sticky control-plane veto and is never cleared merely because a browser observation reports no gate on a later poll. It is cleared only by an exact, non-model-facing human control-plane acknowledgement bound to the current conversation, state version, writer epoch, turn, and user/assistant message identities. A declarative `source=human` intent is not provenance. Once acknowledged, the old textual `NEED_INPUT` marker for that exact turn cannot relatch the gate, while a live browser approval UI remains an effect-safety veto.
 10. A late or repeated `EffectReceipt` is evidence for its exact `(requestId, conversationId, turnId)` only. It cannot acquire state authority for a newer turn or writer epoch, cannot roll back terminal/blocked state, and cannot advance `stateVersion` when authoritative semantics are unchanged.
 
 ## Watchdog migration

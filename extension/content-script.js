@@ -888,7 +888,7 @@ function composerDraft(editor = findPromptEditor()) {
   return typeof editor?.value === 'string' ? editor.value : (editor?.innerText || editor?.textContent || '')
 }
 
-function writerObservation(ownedDraft = null, requireTerminalEvidence = true) {
+function writerObservation(ownedDraft = null, requireTerminalEvidence = true, requireTextHumanGate = true) {
   const users = userMessages(), assistants = assistantMessages()
   const user = users.at(-1), assistant = assistants.at(-1)
   const userMessageId = user?.getAttribute?.('data-message-id') || ''
@@ -899,7 +899,9 @@ function writerObservation(ownedDraft = null, requireTerminalEvidence = true) {
   const editor = findPromptEditor()
   const draft = composerDraft(editor)
   const text = nodeText(assistant)
-  const needsInput = Boolean(document.querySelector('[data-testid="tool-approval-card"]')) || /(?:^|\n)\[SUPERVISOR_STATE\s*:\s*NEED_INPUT\]\s*$/.test(text)
+  const liveApprovalGate = Boolean(document.querySelector('[data-testid="tool-approval-card"]'))
+  const textualHumanGate = /(?:^|\n)\[SUPERVISOR_STATE\s*:\s*NEED_INPUT\]\s*$/.test(text)
+  const needsInput = liveApprovalGate || (requireTextHumanGate && textualHumanGate)
   const busy = isGenerating() || turn?.getAttribute?.('aria-busy') === 'true' || Boolean(turn?.querySelector?.('[aria-busy="true"]'))
   const reason = userPending ? 'user_turn_pending' : busy ? 'assistant_active' : needsInput ? 'need_input' :
     !editor || editor.getAttribute?.('aria-disabled') === 'true' ? 'composer_unavailable' :
@@ -923,7 +925,7 @@ async function handlePrepare(message) {
     editor = await waitForPromptEditor()
   }
   const authoritativeState = message.authoritativeState === true
-  const observation = message.guarded === true ? writerObservation(null, !authoritativeState) : null
+  const observation = message.guarded === true ? writerObservation(null, !authoritativeState, !authoritativeState) : null
   if (observation) assertWriterObservation(observation, message.expected)
   setPromptText(editor, message.text)
   if (observation) {
@@ -942,7 +944,7 @@ async function handleSubmit(message = {}) {
   const prepared = preparedSend
   const guard = message.guarded === true ? () => {
     if (!prepared || prepared.turnId !== message.turnId) throw new Error('prepared_intent_missing')
-    const observation = writerObservation(prepared.text, prepared.authoritativeState !== true)
+    const observation = writerObservation(prepared.text, prepared.authoritativeState !== true, prepared.authoritativeState !== true)
     assertWriterObservation(observation, prepared.expected)
     if (observation.stamp !== prepared.stamp) throw new Error('stale_intent')
   } : null
@@ -994,7 +996,7 @@ function onSidecarMessage(message, _sender, sendResponse) {
   }
 
   if (message?.type === 'conversation_observe') {
-    sendResponse(writerObservation(null, message.authoritativeState !== true))
+    sendResponse(writerObservation(null, message.authoritativeState !== true, message.authoritativeState !== true))
     return
   }
 

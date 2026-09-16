@@ -803,6 +803,34 @@ test('send forwards authoritative state ownership to prepare and submit without 
   assert.equal(submit?.message.authoritativeState, true)
 })
 
+test('managed writer command fails closed when Extension authority is missing while untouched legacy remains compatible', async () => {
+  const externalUrl = 'https://chatgpt.com/c/writer-authority-missing'
+  const make = conversationId => makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      [`conversation:${conversationId}`]: { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+
+  const managed = make('conv_managed_missing')
+  const denied = await managed.request('conversation_send', {
+    conversationId: 'conv_managed_missing', turnId: 'turn_managed_missing', text: 'must not send',
+    writerEpoch: 2, externalUrl
+  })
+  assert.equal(denied.ok, false)
+  assert.match(denied.error, /writer authority|writer epoch/i)
+  assert.equal(managed.sentToTabs.some(({ message }) => message.type === 'conversation_prepare'), false)
+
+  const legacy = make('conv_legacy_unclaimed')
+  const accepted = await legacy.request('conversation_send', {
+    conversationId: 'conv_legacy_unclaimed', turnId: 'turn_legacy_unclaimed', text: 'legacy send', externalUrl
+  })
+  assert.equal(accepted.ok, true)
+  assert.equal(legacy.sentToTabs.filter(({ message }) => message.type === 'conversation_prepare').length, 1)
+})
+
 test('writer epoch claim fences stale browser commands at the Extension sink', async () => {
   const externalUrl = 'https://chatgpt.com/c/writer-epoch-fence'
   const harness = makeHarness({
@@ -825,6 +853,14 @@ test('writer epoch claim fences stale browser commands at the Extension sink', a
   })
   assert.equal(stale.ok, false)
   assert.match(stale.error, /writer epoch/i)
+  assert.equal(harness.sentToTabs.some(({ message }) => message.type === 'conversation_prepare'), false)
+
+  const legacyAfterClaim = await harness.request('conversation_send', {
+    conversationId: 'conv_epoch', turnId: 'turn_legacy_after_claim', text: 'legacy must not share managed authority',
+    externalUrl
+  })
+  assert.equal(legacyAfterClaim.ok, false)
+  assert.match(legacyAfterClaim.error, /writer epoch/i)
   assert.equal(harness.sentToTabs.some(({ message }) => message.type === 'conversation_prepare'), false)
 
   const fresh = await harness.request('conversation_send', {

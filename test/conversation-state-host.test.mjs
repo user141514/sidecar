@@ -88,6 +88,60 @@ test('human gate vetoes legacy completion even when terminal body is substantive
   assert.equal(stored.events.some(event => event.type === 'need_continue' && event.reason === 'human_required'), true)
 })
 
+test('human gate compatibility event cannot change authoritative semantics on reread', async t => {
+  const { host, conversation } = await fixture(t, browser({
+    body: 'substantive', assistantText: 'Need approval\n[SUPERVISOR_STATE: NEED_INPUT]', humanGate: true
+  }))
+  const first = await host.state(conversation.id)
+  const second = await host.state(conversation.id)
+  assert.deepEqual(
+    [second.stateVersion, second.progress, second.body, second.gate],
+    [first.stateVersion, 'terminal', 'substantive', 'human_required']
+  )
+})
+
+test('exact control-plane human acknowledgement durably clears the current gate', async t => {
+  const { host, store, conversation } = await fixture(t, browser({
+    body: 'substantive', assistantText: 'Need approval\n[SUPERVISOR_STATE: NEED_INPUT]', humanGate: true
+  }))
+  const before = await host.state(conversation.id)
+  assert.equal(before.gate, 'human_required')
+  assert.equal(typeof host.ackHumanGate, 'function')
+  const result = await host.ackHumanGate({
+    conversationId: conversation.id,
+    target,
+    expectedStateVersion: before.stateVersion,
+    expectedWriterEpoch: before.writer.epoch,
+    expected: { userMessageId: before.turn.userMessageId, assistantMessageId: before.turn.assistantMessageId }
+  })
+  assert.equal(result.accepted, true)
+  assert.deepEqual([result.state.gate, result.state.stateVersion], ['none', before.stateVersion + 1])
+  const stored = await store.read(conversation.id)
+  const clears = stored.events.filter(event => event.type === 'human_gate_cleared')
+  assert.equal(clears.length, 1)
+  assert.deepEqual(
+    [clears[0].turnId, clears[0].userMessageId, clears[0].assistantMessageId, clears[0].writerEpoch],
+    ['turn-1', 'user-1', 'assistant-1', 0]
+  )
+})
+
+test('stale human acknowledgement cannot mutate the gate ledger', async t => {
+  const { host, store, conversation } = await fixture(t, browser({
+    body: 'substantive', assistantText: 'Need approval\n[SUPERVISOR_STATE: NEED_INPUT]', humanGate: true
+  }))
+  const before = await host.state(conversation.id)
+  const result = await host.ackHumanGate({
+    conversationId: conversation.id,
+    target,
+    expectedStateVersion: before.stateVersion,
+    expectedWriterEpoch: before.writer.epoch + 1,
+    expected: { userMessageId: before.turn.userMessageId, assistantMessageId: before.turn.assistantMessageId }
+  })
+  assert.equal(result.accepted, false)
+  assert.equal(result.reason, 'writer_epoch_mismatch')
+  assert.equal((await store.read(conversation.id)).events.some(event => event.type === 'human_gate_cleared'), false)
+})
+
 test('unreadable exact browser state projects unknown without fabricating completion', async t => {
   const { host, store, conversation } = await fixture(t, browser({ readable: false, userMessageId: null, assistantMessageId: null, assistantText: null, generating: null, terminal: null, body: 'unknown', humanGate: null }))
   const state = await host.state(conversation.id)

@@ -171,7 +171,8 @@ test('ConversationStore allocates one deterministic logical child per NEW intent
     const request = {
       backend: 'chatgpt-web-extension',
       externalUrl: 'https://chatgpt.com/g/g-p-project123-agent/project',
-      intentId: 'intent-new-stable-1'
+      intentId: 'intent-new-stable-1',
+      intentDigest: 'a'.repeat(64)
     }
     const firstStore = new ConversationStore(root)
     assert.equal(typeof firstStore.allocate, 'function')
@@ -182,6 +183,7 @@ test('ConversationStore allocates one deterministic logical child per NEW intent
     assert.equal(first.id, duplicate.id)
     assert.equal(first.id, restarted.id)
     assert.equal(first.allocationIntentId, request.intentId)
+    assert.equal(first.allocationIntentDigest, request.intentDigest)
     assert.match(first.id, /^conv_[a-f0-9]{64}$/)
 
     const raw = await readFile(join(root, first.id, 'events.jsonl'), 'utf8')
@@ -189,6 +191,12 @@ test('ConversationStore allocates one deterministic logical child per NEW intent
     assert.equal(events.length, 1)
     assert.equal(events[0].type, 'conversation_created')
     assert.equal(events[0].allocationIntentId, request.intentId)
+    assert.equal(events[0].allocationIntentDigest, request.intentDigest)
+
+    await assert.rejects(
+      firstStore.allocate({ ...request, intentDigest: 'b'.repeat(64) }),
+      /allocation identity conflict/i
+    )
 
     const other = await firstStore.allocate({ ...request, intentId: 'intent-new-stable-2' })
     assert.notEqual(other.id, first.id)
@@ -206,6 +214,56 @@ test('ConversationStore allocates one deterministic logical child per NEW intent
       firstStore.allocate({ ...request, externalUrl: 'https://chatgpt.com/g/g-p-other/project' }),
       /allocation identity conflict/i
     )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('legacy NEW allocation without payload digest fails closed before its first send', async () => {
+  const { ConversationStore } = await loadStoreModule()
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-legacy-unbound-'))
+  try {
+    const store = new ConversationStore(root)
+    const legacy = await store.allocate({
+      backend: 'chatgpt-web-extension',
+      externalUrl: 'https://chatgpt.com/g/g-p-project123-agent/project',
+      intentId: 'legacy-unbound-intent'
+    })
+    assert.equal(legacy.allocationIntentDigest, undefined)
+    await assert.rejects(
+      store.allocate({
+        backend: 'chatgpt-web-extension',
+        externalUrl: 'https://chatgpt.com/g/g-p-project123-agent/project',
+        intentId: 'legacy-unbound-intent',
+        intentDigest: 'c'.repeat(64)
+      }),
+      /allocation identity conflict/i
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('legacy NEW allocation already bound by send intent remains replayable during digest upgrade', async () => {
+  const { ConversationStore } = await loadStoreModule()
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-legacy-bound-'))
+  try {
+    const store = new ConversationStore(root)
+    const legacy = await store.allocate({
+      backend: 'chatgpt-web-extension',
+      externalUrl: 'https://chatgpt.com/g/g-p-project123-agent/project',
+      intentId: 'legacy-bound-intent'
+    })
+    await store.append(legacy.id, {
+      type: 'send_intent', turnId: 'turn-legacy', requestId: 'legacy-bound-intent', text: 'original task', source: 'human'
+    })
+    const replay = await new ConversationStore(root).allocate({
+      backend: 'chatgpt-web-extension',
+      externalUrl: 'https://chatgpt.com/g/g-p-project123-agent/project',
+      intentId: 'legacy-bound-intent',
+      intentDigest: 'd'.repeat(64)
+    })
+    assert.equal(replay.id, legacy.id)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

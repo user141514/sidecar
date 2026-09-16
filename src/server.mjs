@@ -560,6 +560,22 @@ export function createSidecarServer({ conversationHost, workLedger = null, workC
         writeJson(res, 200, await conversationHost.stateByTarget(payload.target))
         return
       }
+      if (req.method === 'POST' && url.pathname === '/internal/human-gate-ack') {
+        if (!isLoopback(req.socket.remoteAddress) || req.headers.origin) {
+          writeJson(res, 403, { error: 'localhost_non_browser_only' })
+          return
+        }
+        if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
+          writeJson(res, 415, { error: 'json_required' })
+          return
+        }
+        if (typeof conversationHost?.ackHumanGate !== 'function') {
+          writeJson(res, 503, { error: 'human_gate_owner_unavailable' })
+          return
+        }
+        writeJson(res, 200, await conversationHost.ackHumanGate(await readJson(req)))
+        return
+      }
       if (req.method === 'POST' && url.pathname === '/internal/send-admission') {
         if (!isLoopback(req.socket.remoteAddress)) {
           writeJson(res, 403, { error: 'localhost_only' })

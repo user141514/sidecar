@@ -60,7 +60,10 @@ async function claimWriterEpoch(params = {}) {
 
 async function assertWriterEpoch(params = {}) {
   const current = await loadWriterAuthority()
-  if (!current) return
+  if (!current) {
+    if (Number.isInteger(params.writerEpoch)) throw new Error('Writer authority is missing')
+    return
+  }
   if (!Number.isInteger(params.writerEpoch) || params.writerEpoch !== current.epoch) {
     throw new Error(`Writer epoch mismatch: expected ${current.epoch}`)
   }
