@@ -1069,7 +1069,10 @@ async function executeRequest(message) {
     const matches = (await chrome.tabs.query({})).filter(tab => tabMatchesExpectedUrl(tab, expectedUrl))
     if (matches.length !== 1) return { found: false, reason: 'exact_tab_unavailable' }
     const tab = matches[0]
-    const snapshot = await boundedMessage(tab.id, { type: 'conversation_observe' }, 2000)
+    const snapshot = await boundedMessage(tab.id, {
+      type: 'conversation_observe',
+      ...(message.params?.authoritativeState === true ? { authoritativeState: true } : {})
+    }, 2000)
     if (snapshot?.ready !== true || !tabMatchesExpectedUrl({ url: snapshot.url }, expectedUrl)) return { found: false }
     return { ...snapshot, found: true }
   }

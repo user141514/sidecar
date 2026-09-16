@@ -219,6 +219,10 @@ test('v1 valid continuation uses intentId as durable effect identity and dedupli
   assert.equal(first.accepted, true)
   assert.equal(second.turnId, first.turnId)
 
+  const observes = bridge.calls.filter(call => call.method === 'conversation_observe')
+  assert.equal(observes.length >= 1, true)
+  assert.equal(observes.at(-1).params.authoritativeState, true)
+
   const sends = bridge.calls.filter(call => call.method === 'conversation_send')
   assert.equal(sends.length, 1)
   assert.equal(sends[0].params.requestId, payload.intentId)

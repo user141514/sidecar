@@ -39,6 +39,8 @@ test('watchdog proposal is routed through one durable host send and duplicate re
   const duplicate = await host.proposeContinuation(intent)
   assert.equal(first.accepted, true)
   assert.equal(duplicate.turnId, first.turnId)
+  const observes = bridge.calls.filter(x => x.method === 'conversation_observe')
+  assert.equal(observes.at(-1).params.authoritativeState, undefined)
   const sends = bridge.calls.filter(x => x.method === 'conversation_send')
   assert.equal(sends.length, 1)
   assert.deepEqual(sends[0].params.expected, expected)

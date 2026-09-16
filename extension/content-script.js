@@ -994,7 +994,7 @@ function onSidecarMessage(message, _sender, sendResponse) {
   }
 
   if (message?.type === 'conversation_observe') {
-    sendResponse(writerObservation())
+    sendResponse(writerObservation(null, message.authoritativeState !== true))
     return
   }
 

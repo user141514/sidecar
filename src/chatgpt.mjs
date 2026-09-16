@@ -258,7 +258,7 @@ export class ChatGptConversationHost {
       const denial = versionedIntentDenial(intent, resolved.state)
       if (denial) return denial
 
-      const live = await this.bridge.request('conversation_observe', { externalUrl: intent.target })
+      const live = await this.bridge.request('conversation_observe', { externalUrl: intent.target, authoritativeState: true })
       if (live?.found !== true || canonicalTarget(live.url) !== canonicalTarget(intent.target)) {
         return { accepted: false, reason: 'target_unavailable', ...versionedIntentMeta(resolved.state) }
       }

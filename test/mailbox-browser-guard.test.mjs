@@ -100,12 +100,27 @@ test('interrupted substantive response is not terminal state evidence', async ()
 
 test('legacy writer guard still requires local terminal evidence', async () => {
   const f = fixture({ finalized: false })
+  const observed = await f.call({ type: 'conversation_observe' })
+  assert.equal(observed.allowed, false)
+  assert.equal(observed.reason, 'terminal_evidence_missing')
   const prepared = await f.call({
     type: 'conversation_prepare', guarded: true, turnId: 't-legacy', text: 'continue',
     expected: { userMessageId: 'u1', assistantMessageId: 'a1' }
   })
   assert.equal(prepared.prepared, false)
   assert.equal(f.clicks, 0)
+})
+
+test('authoritative writer observation delegates lifecycle finality but preserves live effect safety', async () => {
+  const f = fixture({ finalized: false })
+  const observed = await f.call({ type: 'conversation_observe', authoritativeState: true })
+  assert.equal(observed.allowed, true)
+
+  for (const field of ['active', 'gate', 'pending']) {
+    const g = fixture({ finalized: false }); g[field] = true
+    const denied = await g.call({ type: 'conversation_observe', authoritativeState: true })
+    assert.equal(denied.allowed, false)
+  }
 })
 
 test('authoritative writer guard delegates lifecycle finality to Sidecar but preserves effect safety checks', async () => {
