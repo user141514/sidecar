@@ -95,6 +95,35 @@ test('unreadable exact browser state projects unknown without fabricating comple
   assert.equal((await store.read(conversation.id)).status, 'generating')
 })
 
+test('compatibility terminal event cannot consume browser text rejected by the authoritative reducer', async t => {
+  const wrong = browser({
+    observedAt: '2026-09-16T03:00:10.000Z',
+    userMessageId: 'user-2',
+    assistantText: 'wrong-turn final',
+    body: 'substantive'
+  })
+  const { host, store, conversation } = await fixture(t, wrong)
+  await store.append(conversation.id, {
+    type: 'conversation_state',
+    state: {
+      contractVersion: 1,
+      conversationId: conversation.id,
+      target,
+      stateVersion: 4,
+      turn: { turnId: 'turn-1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },
+      progress: 'terminal',
+      body: 'substantive',
+      delivery: 'delivered',
+      gate: 'none',
+      writer: { mode: 'managed', epoch: 0 }
+    }
+  })
+  const state = await host.state(conversation.id)
+  assert.deepEqual([state.stateVersion, state.progress, state.turn.userMessageId], [4, 'terminal', 'user-1'])
+  const stored = await store.read(conversation.id)
+  assert.equal(stored.events.some(event => event.type === 'response_completed'), false)
+})
+
 test('stateByTarget resolves exactly one local binding and fails closed on ambiguity or non-exact targets', async t => {
   const { host, store, conversation } = await fixture(t, browser())
   const found = await host.stateByTarget(target)
@@ -116,8 +145,8 @@ test('concurrent state reconciliation serializes one authoritative version seque
     await new Promise(resolve => setTimeout(resolve, 20))
     active -= 1
     return index === 1
-      ? browser({ body: 'incomplete', assistantText: 'partial' })
-      : browser({ body: 'substantive', assistantText: 'FINAL' })
+      ? browser({ observedAt: new Date(Date.now() + 1000).toISOString(), body: 'incomplete', assistantText: 'partial' })
+      : browser({ observedAt: new Date(Date.now() + 2000).toISOString(), body: 'substantive', assistantText: 'FINAL' })
   }
   const { host, store, conversation } = await fixture(t, observation)
   await Promise.all([host.state(conversation.id), host.state(conversation.id)])

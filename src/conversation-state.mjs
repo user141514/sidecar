@@ -19,12 +19,18 @@ function sameTarget(a, b) {
 
 function previous(ledger) {
   const event = revFind(ledger.events, e => e.type === 'conversation_state' && e.state)
-  return event ? parseConversationState(event.state) : null
+  if (!event) return null
+  const recordedAt = Date.parse(event.at)
+  return {
+    state: parseConversationState(event.state),
+    recordedAt: Number.isFinite(recordedAt) ? recordedAt : null
+  }
 }
 
-function latestObservation(ledger, observations, turnId, source) {
+function latestObservation(ledger, observations, turnId, source, watermark = null) {
   return observations.map(parseObservation)
     .filter(o => o.source === source && o.conversationId === ledger.id && o.turnId === turnId && sameTarget(ledger.externalUrl, o.target))
+    .filter(o => watermark === null || Date.parse(o.observedAt) > watermark)
     .sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt)).at(-1) ?? null
 }
 
@@ -53,30 +59,45 @@ function semantic(state) {
   return JSON.stringify(rest)
 }
 
-export function reduceConversationState({ ledger, observations = [], writer }) {
+export function reduceConversationProjection({ ledger, observations = [], writer }) {
   if (!ledger || typeof ledger !== 'object' || !Array.isArray(ledger.events)) throw new TypeError('ledger is required')
   if (typeof ledger.id !== 'string' || !ledger.id || typeof ledger.externalUrl !== 'string' || !ledger.externalUrl) throw new TypeError('ledger identity is required')
   if (!writer || typeof writer !== 'object') throw new TypeError('writer is required')
 
   const turnId = turnOf(ledger)
-  const prior = previous(ledger)
+  const priorProjection = previous(ledger)
+  const prior = priorProjection?.state ?? null
+  const watermark = priorProjection?.recordedAt ?? null
   const intent = turnId ? intentOf(ledger, turnId) : null
-  const browser = turnId ? latestObservation(ledger, observations, turnId, 'browser') : null
-  const receipt = turnId ? latestObservation(ledger, observations, turnId, 'receipt') : null
+  const browser = turnId ? latestObservation(ledger, observations, turnId, 'browser', watermark) : null
+  const receipt = turnId ? latestObservation(ledger, observations, turnId, 'receipt', watermark) : null
   let [progress, body] = durable(ledger, turnId)
   let delivery = baseDelivery(ledger, turnId)
+  if (prior?.turn.turnId === turnId) {
+    if (progress === 'unknown') {
+      progress = prior.progress
+      body = prior.body
+    }
+    if (prior.delivery === 'delivered' || (prior.delivery === 'uncertain' && delivery !== 'delivered')) delivery = prior.delivery
+    else if (prior.delivery === 'pending' && delivery === 'none') delivery = 'pending'
+  }
   let gate = prior?.gate ?? 'none'
   let userMessageId = prior?.turn.turnId === turnId ? prior.turn.userMessageId : null
   let assistantMessageId = prior?.turn.turnId === turnId ? prior.turn.assistantMessageId : null
   let target = ledger.externalUrl
 
-  if (receipt?.requestId === intent?.requestId && receipt.delivery === 'delivered') {
+  const receiptAccepted = Boolean(receipt?.requestId === intent?.requestId && receipt.delivery === 'delivered')
+  if (receiptAccepted) {
     delivery = 'delivered'
     userMessageId = receipt.userMessageId ?? userMessageId
     target = receipt.target
   }
 
-  if (browser?.readable === true) {
+  const browserMatchesKnownIdentity = browser &&
+    (!userMessageId || browser.userMessageId === userMessageId) &&
+    (!assistantMessageId || browser.assistantMessageId === assistantMessageId)
+
+  if (browser?.readable === true && browserMatchesKnownIdentity) {
     target = browser.target
     userMessageId = browser.userMessageId ?? userMessageId
     assistantMessageId = browser.assistantMessageId ?? assistantMessageId
@@ -95,5 +116,13 @@ export function reduceConversationState({ ledger, observations = [], writer }) {
     writer: { mode: writer.mode, epoch: writer.epoch } }
   const stateVersion = prior && semantic({ ...draft, stateVersion: prior.stateVersion }) === semantic(prior)
     ? prior.stateVersion : (prior?.stateVersion ?? 0) + 1
-  return parseConversationState({ ...draft, stateVersion })
+  return {
+    state: parseConversationState({ ...draft, stateVersion }),
+    acceptedBrowserObservation: browser?.readable === true && browserMatchesKnownIdentity ? browser : null,
+    acceptedReceiptObservation: receiptAccepted ? receipt : null
+  }
+}
+
+export function reduceConversationState(input) {
+  return reduceConversationProjection(input).state
 }

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { SendMailbox, canonicalTarget } from './send-mailbox.mjs'
-import { reduceConversationState } from './conversation-state.mjs'
+import { reduceConversationProjection } from './conversation-state.mjs'
 
 const DEFAULT_CHATGPT_URL = 'https://chatgpt.com/'
 
@@ -363,7 +363,9 @@ export class ChatGptConversationHost {
       } catch {}
     }
 
-    const state = reduceConversationState({ ledger: stored, observations, writer: this.writer })
+    const projection = reduceConversationProjection({ ledger: stored, observations, writer: this.writer })
+    const state = projection.state
+    const acceptedBrowserObservation = projection.acceptedBrowserObservation
     const latestProjection = [...(stored.events || [])].reverse().find(event => event.type === 'conversation_state' && event.state)?.state ?? null
     if (!latestProjection || state.stateVersion > latestProjection.stateVersion) {
       await this.store.append(stored.id, { type: 'conversation_state', state })
@@ -372,21 +374,21 @@ export class ChatGptConversationHost {
     const delivered = state.delivery === 'delivered'
     const alreadyCompleted = stored.events.some(event => event.turnId === turnId && event.type === 'response_completed')
     const alreadyBlocked = stored.events.some(event => event.turnId === turnId && event.type === 'need_continue')
-    if (delivered && state.gate === 'human_required' && !alreadyCompleted && !alreadyBlocked && typeof browserObservation?.assistantText === 'string') {
+    if (delivered && state.gate === 'human_required' && !alreadyCompleted && !alreadyBlocked && typeof acceptedBrowserObservation?.assistantText === 'string') {
       await this.store.append(stored.id, {
-        type: 'need_continue', turnId, text: browserObservation.assistantText,
+        type: 'need_continue', turnId, text: acceptedBrowserObservation.assistantText,
         reason: 'human_required', externalUrl: state.target, reconciled: true
       })
-    } else if (delivered && state.progress === 'terminal' && state.body === 'substantive' && !alreadyCompleted && typeof browserObservation?.assistantText === 'string') {
+    } else if (delivered && state.progress === 'terminal' && state.body === 'substantive' && !alreadyCompleted && typeof acceptedBrowserObservation?.assistantText === 'string') {
       const event = {
-        type: 'response_completed', turnId, text: browserObservation.assistantText,
+        type: 'response_completed', turnId, text: acceptedBrowserObservation.assistantText,
         externalUrl: state.target, reconciled: true
       }
       await this.store.append(stored.id, event)
       await this.#notifyTerminal(stored.id, event)
-    } else if (delivered && state.progress === 'blocked' && state.body !== 'substantive' && !alreadyBlocked && typeof browserObservation?.assistantText === 'string') {
+    } else if (delivered && state.progress === 'blocked' && state.body !== 'substantive' && !alreadyBlocked && typeof acceptedBrowserObservation?.assistantText === 'string') {
       await this.store.append(stored.id, {
-        type: 'need_continue', turnId, text: browserObservation.assistantText,
+        type: 'need_continue', turnId, text: acceptedBrowserObservation.assistantText,
         reason: 'assistant_body_incomplete', externalUrl: state.target, reconciled: true
       })
     }
