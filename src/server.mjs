@@ -633,7 +633,7 @@ export function createRuntimeComponents({
 } = {}) {
   const store = new ConversationStore(dataRoot ? join(dataRoot, 'conversations') : legacyConversationRoot)
   const sendAdmission = new SendAdmission({ statePath: dataRoot ? join(dataRoot, 'send-admission.json') : defaultSendAdmissionPath })
-  const conversationHost = new ChatGptConversationHost({ bridge, store, sendAdmission })
+  const conversationHost = new ChatGptConversationHost({ bridge, store, sendAdmission, managedProjectUrl })
   const workLedger = new WorkLedger(dataRoot ? join(dataRoot, 'works') : defaultWorkRoot)
   const watchdog = new WatchdogClient()
   const workController = new WorkController({ ledger: workLedger, conversationHost, managedProjectUrl, watchdog })

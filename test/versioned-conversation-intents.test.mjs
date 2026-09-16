@@ -5,11 +5,13 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ChatGptConversationHost } from '../src/chatgpt.mjs'
-import { createSidecarServer } from '../src/server.mjs'
+import { createRuntimeComponents, createSidecarServer } from '../src/server.mjs'
 import { parseConversationState } from '../src/conversation-contract.mjs'
 import { ConversationStore } from '../src/store.mjs'
 
 const target = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000041'
+const managedProjectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+const newThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/new-thread'
 const expected = { userMessageId: 'user-1', assistantMessageId: 'assistant-1' }
 
 async function setup(t) {
@@ -31,6 +33,54 @@ async function setup(t) {
   const admission = { calls: 0, async admit() { this.calls += 1; return { admitted: true } } }
   const host = new ChatGptConversationHost({ bridge, store, sendAdmission: admission, writerMode: 'managed', writerEpoch: 3 })
   return { store, conversation, bridge, admission, host }
+}
+
+async function setupNew(t, { admitted = true, sendUncertain = false } = {}) {
+  const root = await mkdtemp(join(tmpdir(), 'versioned-new-intents-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new ConversationStore(root)
+  const bridge = new EventEmitter()
+  bridge.calls = []
+  let submitted = null
+  bridge.request = async (method, params) => {
+    bridge.calls.push({ method, params })
+    if (method === 'conversation_create') return { windowId: 10, tabId: 20, url: managedProjectUrl }
+    if (method === 'conversation_send') {
+      submitted = params
+      if (sendUncertain) {
+        const error = new Error('browser acceptance ack lost')
+        error.code = 'DELIVERY_UNCERTAIN'
+        throw error
+      }
+      return { accepted: true, url: newThreadUrl, userMessageId: 'user-new' }
+    }
+    if (method === 'conversation_effect_receipt' && submitted) {
+      return { found: true, receipt: {
+        requestId: submitted.requestId,
+        conversationId: submitted.conversationId,
+        turnId: submitted.turnId,
+        userMessageId: 'user-new',
+        externalUrl: newThreadUrl
+      } }
+    }
+    assert.fail(`unexpected browser effect: ${method}`)
+  }
+  const admission = {
+    calls: 0,
+    async admit() {
+      this.calls += 1
+      return admitted ? { admitted: true } : { admitted: false, retryAfterMs: 1234 }
+    }
+  }
+  const host = new ChatGptConversationHost({
+    bridge,
+    store,
+    sendAdmission: admission,
+    writerMode: 'managed',
+    writerEpoch: 3,
+    managedProjectUrl
+  })
+  return { root, store, bridge, admission, host }
 }
 
 function state(conversationId, over = {}) {
@@ -78,6 +128,23 @@ function reuseIntent(conversationId, over = {}) {
     text: 'start a new bounded task in this child',
     ...over
   })
+}
+
+function newIntent(over = {}) {
+  return {
+    contractVersion: 1,
+    intentId: 'intent-v1-new',
+    source: 'human',
+    conversationId: null,
+    target: null,
+    expectedStateVersion: null,
+    expectedWriterEpoch: null,
+    action: 'open_child',
+    allocation: 'NEW',
+    text: 'create a fresh bounded child',
+    expected: { userMessageId: null, assistantMessageId: null },
+    ...over
+  }
 }
 
 test('v1 stale state and writer epoch reject before any browser effect', async t => {
@@ -203,25 +270,89 @@ test('v1 REUSE requires a fully terminal reusable child and fails closed for unr
   assert.equal(admission.calls, 0)
 })
 
-test('v1 NEW remains unsupported until durable allocation semantics are implemented', async t => {
+test('v1 NEW requires an explicit managed Project and never falls back to root chat', async t => {
   const { host, bridge, admission } = await setup(t)
-  const payload = {
-    contractVersion: 1,
-    intentId: 'intent-v1-new-not-yet',
-    source: 'human',
-    conversationId: null,
-    target: null,
-    expectedStateVersion: null,
-    expectedWriterEpoch: null,
-    action: 'open_child',
-    allocation: 'NEW',
-    text: 'create a fresh bounded child',
-    expected: { userMessageId: null, assistantMessageId: null }
-  }
-  const result = await host.proposeContinuation(payload)
-  assert.deepEqual(result, { accepted: false, reason: 'unsupported_action' })
+  const result = await host.proposeContinuation(newIntent({ intentId: 'intent-v1-new-no-project' }))
+  assert.deepEqual(result, { accepted: false, reason: 'managed_project_unresolved' })
   assert.equal(bridge.calls.some(call => ['conversation_create', 'conversation_send'].includes(call.method)), false)
   assert.equal(admission.calls, 0)
+})
+
+test('v1 NEW pacing denial allocates no browser tab and no prompt effect', async t => {
+  const { host, bridge, admission } = await setupNew(t, { admitted: false })
+  const result = await host.proposeContinuation(newIntent({ intentId: 'intent-v1-new-paced' }))
+  assert.equal(result.accepted, false)
+  assert.equal(result.reason, 'pacing')
+  assert.equal(result.retryAfterMs, 1234)
+  assert.equal(admission.calls, 1)
+  assert.equal(bridge.calls.some(call => ['conversation_create', 'conversation_send'].includes(call.method)), false)
+})
+
+test('v1 NEW replays and restarts to the same logical child with one browser allocation and one send', async t => {
+  const { store, bridge, admission, host } = await setupNew(t)
+  const payload = newIntent()
+
+  const first = await host.proposeContinuation(payload)
+  assert.equal(first.accepted, true)
+  assert.match(first.conversationId, /^conv_[a-f0-9]{64}$/)
+
+  const duplicate = await host.proposeContinuation(payload)
+  assert.equal(duplicate.conversationId, first.conversationId)
+  assert.equal(duplicate.turnId, first.turnId)
+
+  const restarted = new ChatGptConversationHost({
+    bridge,
+    store,
+    sendAdmission: admission,
+    writerMode: 'managed',
+    writerEpoch: 3,
+    managedProjectUrl
+  })
+  const afterRestart = await restarted.proposeContinuation(payload)
+  assert.equal(afterRestart.conversationId, first.conversationId)
+  assert.equal(afterRestart.turnId, first.turnId)
+
+  assert.equal(bridge.calls.filter(call => call.method === 'conversation_create').length, 1)
+  assert.equal(bridge.calls.filter(call => call.method === 'conversation_send').length, 1)
+  assert.equal(admission.calls, 1)
+
+  const stored = await store.read(first.conversationId)
+  const sent = stored.events.find(event => event.type === 'send_intent' && event.turnId === first.turnId)
+  assert.equal(sent.source, 'human')
+  assert.equal(sent.requestId, payload.intentId)
+})
+
+test('v1 NEW reconciles uncertain browser delivery from EffectReceipt without allocating or sending twice', async t => {
+  const { bridge, admission, host } = await setupNew(t, { sendUncertain: true })
+  const payload = newIntent({ intentId: 'intent-v1-new-uncertain' })
+
+  const first = await host.proposeContinuation(payload)
+  assert.equal(first.accepted, false)
+  assert.equal(first.reason, 'delivery_uncertain')
+  assert.match(first.conversationId, /^conv_[a-f0-9]{64}$/)
+  assert.ok(first.turnId)
+
+  const replay = await host.proposeContinuation(payload)
+  assert.equal(replay.accepted, true)
+  assert.equal(replay.conversationId, first.conversationId)
+  assert.equal(replay.turnId, first.turnId)
+
+  assert.equal(bridge.calls.filter(call => call.method === 'conversation_create').length, 1)
+  assert.equal(bridge.calls.filter(call => call.method === 'conversation_send').length, 1)
+  assert.equal(bridge.calls.filter(call => call.method === 'conversation_effect_receipt').length, 1)
+  assert.equal(admission.calls, 1)
+})
+
+test('runtime wiring gives the conversation host the canonical managed Project used by NEW', () => {
+  const bridge = new EventEmitter()
+  bridge.on = bridge.on.bind(bridge)
+  const components = createRuntimeComponents({
+    bridge,
+    dataRoot: null,
+    legacyConversationRoot: join(tmpdir(), 'unused-conversation-root'),
+    managedProjectUrl
+  })
+  assert.equal(components.conversationHost.managedProjectUrl, managedProjectUrl)
 })
 
 test('localhost intent endpoint accepts v1 and rejects future contract versions', async t => {

@@ -58,12 +58,13 @@ function normalizeProjectHomeUrl(value) {
 }
 
 export class ChatGptConversationHost {
-  constructor({ bridge, store, sendAdmission = null, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), writerMode = 'managed', writerEpoch = 0 }) {
+  constructor({ bridge, store, sendAdmission = null, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), writerMode = 'managed', writerEpoch = 0, managedProjectUrl = null }) {
     this.bridge = bridge
     this.store = store
     this.sendAdmission = sendAdmission
     this.sleep = sleep
     this.writer = { mode: writerMode, epoch: writerEpoch }
+    this.managedProjectUrl = managedProjectUrl ? normalizeProjectHomeUrl(managedProjectUrl) : null
     this.mailbox = new SendMailbox({ rootDir: store.rootDir ? join(store.rootDir, '.send-mailbox') : null })
     this.activeSends = new Set()
     this.stateQueues = new Map()
@@ -147,7 +148,21 @@ export class ChatGptConversationHost {
       backend: 'chatgpt-web-extension',
       externalUrl: createUrl
     })
+    return this.#attachConversation(created, createUrl)
+  }
 
+  async #attachConversation(created, createUrl) {
+    const current = await this.store.read(created.id)
+    const attached = [...(current.events || [])].reverse().find(event => event.type === 'browser_attached')
+    if (attached) {
+      return {
+        ...created,
+        phase: 'allocated',
+        threadCreated: false,
+        windowId: attached.windowId,
+        tabId: attached.tabId
+      }
+    }
     try {
       const browser = await this.bridge.request('conversation_create', {
         conversationId: created.id,
@@ -175,7 +190,7 @@ export class ChatGptConversationHost {
     return this.sendAdmission.admit({ source, target })
   }
 
-  async send(conversationId, text, { app, preAdmitted = false, requestId = randomUUID() } = {}) {
+  async send(conversationId, text, { app, preAdmitted = false, requestId = randomUUID(), intentSource } = {}) {
     if (typeof text !== 'string' || !text.trim()) throw new Error('text is required')
     if (app !== undefined && (typeof app !== 'string' || !app.trim())) {
       throw new Error('app must be a non-empty string')
@@ -184,7 +199,7 @@ export class ChatGptConversationHost {
     if (!conversation) throw new Error(`Conversation ${conversationId} does not exist in the local ledger`)
     const prior = (conversation.events || []).find(event => event.type === 'send_intent' && event.requestId === requestId)
     if (prior) {
-      if (prior.text !== text || prior.app !== app) throw new Error('request identity conflict')
+      if (prior.text !== text || prior.app !== app || (intentSource !== undefined && prior.source !== intentSource)) throw new Error('request identity conflict')
       let current = conversation
       let accepted = current.events.some(event => event.turnId === prior.turnId && ['generation_started', 'response_completed', 'need_continue'].includes(event.type))
       if (!accepted) current = await this.#reconcileDelivery(current, requestId) ?? current
@@ -192,8 +207,8 @@ export class ChatGptConversationHost {
       if (accepted) return { conversationId, turnId: prior.turnId, accepted: true, ...(current.status === 'generating' ? { reconciled: true } : {}) }
       throw Object.assign(new Error('prior request delivery uncertain; read and reconcile before retry'), { code: 'DELIVERY_UNCERTAIN', conversationId, turnId: prior.turnId })
     }
-    const result = await this.mailbox.run(conversation.externalUrl, requestId, { source: 'coordinator', conversationId, text, app },
-      markDispatching => this.#send(conversationId, text, { app, preAdmitted, requestId, markDispatching }), conversationId)
+    const result = await this.mailbox.run(conversation.externalUrl, requestId, { source: intentSource ?? 'coordinator', conversationId, text, app },
+      markDispatching => this.#send(conversationId, text, { app, preAdmitted, requestId, markDispatching, intentSource }), conversationId)
     if (result?.deliveryUncertain === true) throw Object.assign(new Error(`delivery uncertain; reconciliation required: ${result.message || 'unknown outcome'}`), { code: 'DELIVERY_UNCERTAIN', conversationId, turnId: result.turnId })
     return result
   }
@@ -207,6 +222,7 @@ export class ChatGptConversationHost {
   }
 
   async #proposeVersionedContinuation(intent) {
+    if (intent.action === 'open_child' && intent.allocation === 'NEW') return this.#proposeVersionedNew(intent)
     const reusable = intent.action === 'open_child' && intent.allocation === 'REUSE'
     if (intent.action !== 'continue' && !reusable) return { accepted: false, reason: 'unsupported_action' }
     const requestId = intent.intentId
@@ -272,6 +288,75 @@ export class ChatGptConversationHost {
         preAdmitted: true
       })
     }, intent.conversationId)
+  }
+
+  async #proposeVersionedNew(intent) {
+    if (this.writer.mode !== 'managed') {
+      return { accepted: false, reason: 'writer_mode_mismatch', currentWriterEpoch: this.writer.epoch }
+    }
+    if (!this.managedProjectUrl) return { accepted: false, reason: 'managed_project_unresolved' }
+
+    const allocated = await this.store.allocate({
+      backend: 'chatgpt-web-extension',
+      externalUrl: this.managedProjectUrl,
+      intentId: intent.intentId
+    })
+    const current = await this.store.read(allocated.id)
+    const prior = (current.events || []).find(event => event.type === 'send_intent' && event.requestId === intent.intentId)
+    if (prior) {
+      try {
+        const replay = await this.send(allocated.id, intent.text, {
+          requestId: intent.intentId,
+          intentSource: intent.source
+        })
+        return { ...replay, allocation: 'NEW' }
+      } catch (error) {
+        if (error?.code === 'DELIVERY_UNCERTAIN') {
+          return {
+            accepted: false,
+            reason: 'delivery_uncertain',
+            conversationId: allocated.id,
+            turnId: error.turnId ?? prior.turnId ?? null
+          }
+        }
+        throw error
+      }
+    }
+
+    const admission = await this.admitSend({ source: 'conversation_send', target: this.managedProjectUrl })
+    if (admission?.admitted !== true) {
+      return {
+        accepted: false,
+        reason: 'pacing',
+        retryAfterMs: admission?.retryAfterMs ?? null,
+        conversationId: allocated.id
+      }
+    }
+
+    try {
+      await this.#attachConversation(allocated, this.managedProjectUrl)
+    } catch {
+      return { accepted: false, reason: 'allocation_unavailable', conversationId: allocated.id }
+    }
+
+    try {
+      const sent = await this.send(allocated.id, intent.text, {
+        preAdmitted: true,
+        requestId: intent.intentId,
+        intentSource: intent.source
+      })
+      return { ...sent, allocation: 'NEW' }
+    } catch (error) {
+      if (error?.code === 'DELIVERY_UNCERTAIN') {
+        return {
+          accepted: false,
+          reason: 'delivery_uncertain',
+          conversationId: allocated.id,
+          turnId: error.turnId ?? null
+        }
+      }
+      throw error
+    }
   }
 
   async #proposeLegacyContinuation(payload) {
@@ -344,7 +429,8 @@ export class ChatGptConversationHost {
       turnId: id,
       text,
       ...(requestId ? { requestId } : {}),
-      ...(expected ? { source: intentSource ?? 'watchdog', continuationOf: conversation.latestTurnId ?? null } : {}),
+      ...(intentSource ? { source: intentSource } : expected ? { source: 'watchdog' } : {}),
+      ...(expected ? { continuationOf: conversation.latestTurnId ?? null } : {}),
       ...(app ? { app } : {})
     })
     try {
