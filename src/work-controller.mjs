@@ -498,6 +498,7 @@ export class WorkController {
   async #collect(workId) {
     const before = await this.state(workId)
     let collected = 0
+    let expectedEventCount = before.eventCount
 
     for (const frontier of before.frontiers) {
       if (!['dispatching', 'dispatched', 'error'].includes(frontier.status) || !frontier.conversationId) continue
@@ -518,6 +519,16 @@ export class WorkController {
           authoritative?.gate === 'none'
         if (!authoritativeComplete || authoritative?.turn?.turnId !== conversation.latestTurnId) continue
       }
+      if (conversation.status === 'error') {
+        const authoritativeErrorCompatible =
+          authoritative?.conversationId === frontier.conversationId &&
+          authoritative?.turn?.turnId === conversation.latestTurnId &&
+          authoritative?.gate === 'none' &&
+          authoritative?.delivery !== 'uncertain' &&
+          authoritative?.progress !== 'active' &&
+          !(authoritative?.progress === 'terminal' && authoritative?.body === 'substantive')
+        if (!authoritativeErrorCompatible) continue
+      }
       if (frontier.turnId && conversation.latestTurnId !== frontier.turnId &&
           !(frontier.watchdog === true && isWatchdogContinuation(conversation, frontier.turnId))) continue
 
@@ -535,15 +546,22 @@ export class WorkController {
       }
 
       const watchdogCompleted = watchdogCompletion?.completed === true
-      await this.ledger.append(workId, 'worker_result', {
-        frontierId: frontier.id,
-        conversationId: frontier.conversationId,
-        worker_kind: WORKER_KIND,
-        backend: WORKER_BACKEND,
-        outcome: watchdogCompleted ? 'completed' : conversation.status,
-        result: watchdogCompleted ? watchdogCompletion.result : (conversation.latestResponse ?? null),
-        error: watchdogCompleted ? null : (conversation.error ?? null)
-      })
+      if (typeof this.ledger.appendIfEventCount !== 'function') throw new Error('work ledger compare-and-append is required for collection')
+      try {
+        await this.ledger.appendIfEventCount(workId, expectedEventCount, 'worker_result', {
+          frontierId: frontier.id,
+          conversationId: frontier.conversationId,
+          worker_kind: WORKER_KIND,
+          backend: WORKER_BACKEND,
+          outcome: watchdogCompleted ? 'completed' : conversation.status,
+          result: watchdogCompleted ? watchdogCompletion.result : (conversation.latestResponse ?? null),
+          error: watchdogCompleted ? null : (conversation.error ?? null)
+        })
+        expectedEventCount += 1
+      } catch (error) {
+        if (error?.code === 'WORK_STALE') break
+        throw error
+      }
       if (watchdogCompleted && conversation.externalUrl) {
         try {
           await this.watchdog.ackCompletion(conversation.externalUrl)

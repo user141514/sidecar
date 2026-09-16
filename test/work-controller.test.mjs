@@ -22,7 +22,9 @@ class FakeLedger {
 
   async appendIfEventCount(_id, expectedCount, type, payload) {
     if (this.events.length !== expectedCount) {
-      throw new Error(`stale work state: expected ${expectedCount}, current ${this.events.length}`)
+      const error = new Error(`stale work state: expected ${expectedCount}, current ${this.events.length}`)
+      error.code = 'WORK_STALE'
+      throw error
     }
     return this.append(_id, type, payload)
   }
@@ -673,6 +675,45 @@ test('concurrent WorkController collect calls append at most one worker_result f
   assert.equal(ledger.events.filter(event => event.type === 'worker_result' && event.payload.frontierId === 'f1').length, 1)
 })
 
+test('collect does not append a second worker_result when another work path wins during reconciliation', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    { at: '2026-09-03T08:01:00.000Z', type: 'decision', payload: { action: 'SPLIT', reason: 'work found', frontiers: [{ id: 'f1', task: 'first task', depends_on: [] }] } },
+    { at: '2026-09-03T08:02:00.000Z', type: 'worker_dispatched', payload: { frontierId: 'f1', conversationId: 'conv_1', turnId: 'turn_1' } }
+  ])
+  const host = new FakeHost()
+  const target = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000109'
+  host.states.set('conv_1', { id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'collector result', externalUrl: target })
+  host.authoritativeStates.set('conv_1', {
+    contractVersion: 1, conversationId: 'conv_1', target, stateVersion: 3,
+    turn: { turnId: 'turn_1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },
+    progress: 'terminal', body: 'substantive', delivery: 'delivered', gate: 'none',
+    writer: { mode: 'managed', epoch: 4 }
+  })
+  let releaseState
+  const stateGate = new Promise(resolve => { releaseState = resolve })
+  const baseState = host.state.bind(host)
+  host.state = async id => {
+    await stateGate
+    return baseState(id)
+  }
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+
+  const pendingCollect = controller.collect('work_test')
+  await new Promise(resolve => setImmediate(resolve))
+  await ledger.append('work_test', 'worker_result', {
+    frontierId: 'f1', conversationId: 'conv_1', outcome: 'error', error: 'external winner'
+  })
+  releaseState()
+  const collected = await pendingCollect
+
+  assert.equal(collected.collected, 0)
+  assert.equal(ledger.events.filter(event => event.type === 'worker_result' && event.payload.frontierId === 'f1').length, 1)
+  assert.equal(collected.state.frontiers[0].status, 'error')
+  assert.equal(collected.state.frontiers[0].error, 'external winner')
+})
+
 test('a blocked collect for one work does not freeze collection of an unrelated work', async () => {
   const { WorkController } = await loadModule()
   const workEvents = new Map()
@@ -689,6 +730,14 @@ test('a blocked collect for one work does not freeze collection of an unrelated 
       const event = { at: new Date(FakeLedger.now).toISOString(), type, payload }
       workEvents.get(id).push(event)
       return event
+    },
+    async appendIfEventCount(id, expectedCount, type, payload) {
+      if (workEvents.get(id).length !== expectedCount) {
+        const error = new Error(`stale work state: expected ${expectedCount}, current ${workEvents.get(id).length}`)
+        error.code = 'WORK_STALE'
+        throw error
+      }
+      return this.append(id, type, payload)
     }
   }
   const host = new FakeHost()
@@ -1074,6 +1123,30 @@ test('collect keeps a legacy error pending when authoritative reconciliation exp
       writer: { mode: 'managed', epoch: 4 }
     }
   }
+
+  const collected = await controller.collect('work_test')
+  assert.equal(collected.collected, 0)
+  assert.equal(collected.state.frontiers[0].status, 'dispatched')
+  assert.equal(ledger.events.some(event => event.type === 'worker_result'), false)
+})
+
+test('collect keeps a legacy error pending when authoritative state says the exact turn is still active', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger()
+  const host = new FakeHost()
+  const target = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000106'
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl })
+  await controller.decide('work_test', {
+    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', depends_on: [] }]
+  })
+  await ledger.append('work_test', 'worker_dispatched', { frontierId: 'f1', conversationId: 'conv_1', phase: 'accepted', turnId: 'turn_1' })
+  host.states.set('conv_1', { id: 'conv_1', status: 'error', latestTurnId: 'turn_1', error: 'stale timeout', externalUrl: target })
+  host.state = async id => ({
+    contractVersion: 1, conversationId: id, target, stateVersion: 2,
+    turn: { turnId: 'turn_1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },
+    progress: 'active', body: 'incomplete', delivery: 'delivered', gate: 'none',
+    writer: { mode: 'managed', epoch: 4 }
+  })
 
   const collected = await controller.collect('work_test')
   assert.equal(collected.collected, 0)
