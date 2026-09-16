@@ -69,6 +69,17 @@ function intent(conversationId, over = {}) {
   }
 }
 
+function reuseIntent(conversationId, over = {}) {
+  return intent(conversationId, {
+    intentId: 'intent-v1-reuse',
+    source: 'human',
+    action: 'open_child',
+    allocation: 'REUSE',
+    text: 'start a new bounded task in this child',
+    ...over
+  })
+}
+
 test('v1 stale state and writer epoch reject before any browser effect', async t => {
   const { host, conversation, bridge, admission } = await setup(t)
   const current = state(conversation.id)
@@ -146,6 +157,71 @@ test('v1 valid continuation uses intentId as durable effect identity and dedupli
   assert.equal(sends[0].params.requestId, payload.intentId)
   assert.deepEqual(sends[0].params.expected, expected)
   assert.equal(sends[0].params.existingOnly, true)
+})
+
+test('v1 explicit REUSE creates a new turn in the exact existing child without allocating another conversation', async t => {
+  const { host, store, conversation, bridge } = await setup(t)
+  const reusable = state(conversation.id, { progress: 'terminal', body: 'substantive' })
+  host.stateByTarget = async () => ({ found: true, state: reusable })
+  const payload = reuseIntent(conversation.id)
+
+  const first = await host.proposeContinuation(payload)
+  const duplicate = await host.proposeContinuation(payload)
+  assert.equal(first.accepted, true)
+  assert.equal(duplicate.turnId, first.turnId)
+
+  const sends = bridge.calls.filter(call => call.method === 'conversation_send')
+  assert.equal(sends.length, 1)
+  assert.equal(bridge.calls.some(call => call.method === 'conversation_create'), false)
+  assert.equal(sends[0].params.conversationId, conversation.id)
+  assert.equal(sends[0].params.existingOnly, true)
+  assert.equal(sends[0].params.requestId, payload.intentId)
+
+  const stored = await store.read(conversation.id)
+  const newIntent = stored.events.find(event => event.type === 'send_intent' && event.turnId === first.turnId)
+  assert.equal(newIntent.source, 'human')
+  assert.equal(newIntent.continuationOf, 'root-turn')
+})
+
+test('v1 REUSE requires a fully terminal reusable child and fails closed for unresolved state', async t => {
+  const { host, conversation, bridge, admission } = await setup(t)
+  const cases = [
+    [state(conversation.id, { progress: 'blocked', body: 'incomplete' }), 'state_not_reusable'],
+    [state(conversation.id, { progress: 'active', body: 'incomplete' }), 'state_not_reusable'],
+    [state(conversation.id, { progress: 'unknown', body: 'unknown' }), 'state_not_reusable'],
+    [state(conversation.id, { gate: 'human_required', progress: 'terminal', body: 'substantive' }), 'need_input'],
+    [state(conversation.id, { delivery: 'uncertain', progress: 'unknown', body: 'unknown' }), 'state_delivery_uncertain']
+  ]
+  let index = 0
+  for (const [current, reason] of cases) {
+    host.stateByTarget = async () => ({ found: true, state: current })
+    const result = await host.proposeContinuation(reuseIntent(conversation.id, { intentId: `intent-v1-reuse-deny-${index++}` }))
+    assert.equal(result.accepted, false)
+    assert.equal(result.reason, reason)
+  }
+  assert.equal(bridge.calls.some(call => call.method === 'conversation_send'), false)
+  assert.equal(admission.calls, 0)
+})
+
+test('v1 NEW remains unsupported until durable allocation semantics are implemented', async t => {
+  const { host, bridge, admission } = await setup(t)
+  const payload = {
+    contractVersion: 1,
+    intentId: 'intent-v1-new-not-yet',
+    source: 'human',
+    conversationId: null,
+    target: null,
+    expectedStateVersion: null,
+    expectedWriterEpoch: null,
+    action: 'open_child',
+    allocation: 'NEW',
+    text: 'create a fresh bounded child',
+    expected: { userMessageId: null, assistantMessageId: null }
+  }
+  const result = await host.proposeContinuation(payload)
+  assert.deepEqual(result, { accepted: false, reason: 'unsupported_action' })
+  assert.equal(bridge.calls.some(call => ['conversation_create', 'conversation_send'].includes(call.method)), false)
+  assert.equal(admission.calls, 0)
 })
 
 test('localhost intent endpoint accepts v1 and rejects future contract versions', async t => {

@@ -30,6 +30,12 @@ function versionedIntentDenial(intent, state) {
   }
   if (state.gate === 'human_required') return { accepted: false, reason: 'need_input', ...meta }
   if (state.delivery === 'uncertain') return { accepted: false, reason: 'state_delivery_uncertain', ...meta }
+  if (intent.action === 'open_child' && intent.allocation === 'REUSE') {
+    if (state.delivery !== 'delivered' || state.progress !== 'terminal' || state.body !== 'substantive') {
+      return { accepted: false, reason: 'state_not_reusable', ...meta }
+    }
+    return null
+  }
   if (state.delivery !== 'delivered') return { accepted: false, reason: 'state_not_continuable', ...meta }
   const continuable =
     (state.progress === 'blocked' && ['empty', 'incomplete'].includes(state.body)) ||
@@ -201,7 +207,8 @@ export class ChatGptConversationHost {
   }
 
   async #proposeVersionedContinuation(intent) {
-    if (intent.action !== 'continue') return { accepted: false, reason: 'unsupported_action' }
+    const reusable = intent.action === 'open_child' && intent.allocation === 'REUSE'
+    if (intent.action !== 'continue' && !reusable) return { accepted: false, reason: 'unsupported_action' }
     const requestId = intent.intentId
     const mailboxPayload = {
       contractVersion: 1,
