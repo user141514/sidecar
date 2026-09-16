@@ -284,6 +284,7 @@ No meaningful wait may occur between final state validation and browser command 
 - `generating` ledger + stopped incomplete DOM converges to `blocked` once, durably, without sending.
 - `generating` ledger + exact valid terminal body converges to `terminal` once, durably, without sending.
 - Sidebar, Watchdog, and Coordinator cannot independently mutate the browser.
+- `WorkController.collect()` may use legacy conversation reads for result/error payloads, but it may record a worker as `completed` only when authoritative `ConversationState` for the exact latest turn is `terminal + substantive + delivered + gate=none`; unavailable or contradictory state fails closed.
 - One producer being blocked/unknown does not globally freeze unrelated conversations.
 - NEW and REUSE are user/policy intent fields, never transport heuristics.
 

@@ -64,6 +64,29 @@ class FakeHost {
     return this.states.get(id) ?? { id, status: 'generating', latestResponse: null }
   }
 
+  async state(id) {
+    const current = await this.read(id)
+    const completed = current.status === 'completed'
+    const needContinue = current.status === 'need_continue'
+    const generating = current.status === 'generating'
+    return {
+      contractVersion: 1,
+      conversationId: id,
+      target: current.externalUrl ?? 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000099',
+      stateVersion: 1,
+      turn: {
+        turnId: current.latestTurnId ?? null,
+        userMessageId: current.latestTurnId ? 'user-current' : null,
+        assistantMessageId: current.latestTurnId ? 'assistant-current' : null
+      },
+      progress: completed ? 'terminal' : needContinue ? 'blocked' : generating ? 'active' : 'unknown',
+      body: completed ? 'substantive' : needContinue ? 'incomplete' : 'unknown',
+      delivery: completed || needContinue || generating ? 'delivered' : 'unknown',
+      gate: 'none',
+      writer: { mode: 'managed', epoch: 1 }
+    }
+  }
+
   onTerminal(id, listener) {
     this.terminalListeners.set(id, listener)
     return () => this.terminalListeners.delete(id)
@@ -530,6 +553,46 @@ test('WorkController collects completed workers into the ledger and unlocks depe
 
   const dispatched = await controller.dispatch('work_test', 'f2')
   assert.equal(dispatched.dispatched, true)
+})
+
+test('WorkController does not collect legacy completed reads when authoritative state is blocked and incomplete', async () => {
+  const { WorkController } = await loadModule()
+  assert.equal(typeof WorkController, 'function')
+  if (typeof WorkController !== 'function') return
+
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    {
+      at: '2026-09-03T08:01:00.000Z',
+      type: 'decision',
+      payload: { action: 'SPLIT', reason: 'work found', frontiers: [{ id: 'f1', task: 'first task', depends_on: [] }] }
+    },
+    {
+      at: '2026-09-03T08:02:00.000Z',
+      type: 'worker_dispatched',
+      payload: { frontierId: 'f1', conversationId: 'conv_1', turnId: 'turn_1' }
+    }
+  ])
+  const host = new FakeHost()
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'legacy completed text', error: null
+  })
+  host.state = async () => ({
+    contractVersion: 1,
+    conversationId: 'conv_1',
+    target: 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000099',
+    stateVersion: 7,
+    turn: { turnId: 'turn_1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },
+    progress: 'blocked', body: 'incomplete', delivery: 'delivered', gate: 'none',
+    writer: { mode: 'managed', epoch: 3 }
+  })
+
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+  const collected = await controller.collect('work_test')
+
+  assert.equal(collected.collected, 0)
+  assert.equal(collected.state.frontiers.find((f) => f.id === 'f1').status, 'dispatched')
+  assert.equal(ledger.events.some((event) => event.type === 'worker_result'), false)
 })
 
 test('WorkController leaves need_continue workers dispatched for an explicit continuation decision', async () => {
