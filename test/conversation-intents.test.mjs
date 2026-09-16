@@ -144,7 +144,22 @@ test('collector follows only explicit watchdog continuation ancestry', async t =
     await ledger.append(work.id, 'decision', { action: 'SPLIT', reason: 'test', frontiers: [{ id: 'f1', task: 'one', watchdog: true, depends_on: [] }] })
     await ledger.append(work.id, 'worker_dispatched', { frontierId: 'f1', conversationId: 'conv_test', turnId: 'root' })
     const conversation = { status: 'completed', latestTurnId: 'child', externalUrl: target, latestResponse: 'done', events: [{ type: 'send_intent', source, turnId: 'child', continuationOf: 'root' }] }
-    const controller = new WorkController({ ledger, conversationHost: { read: async () => conversation }, watchdog: { completion: async () => ({ completed: true, result: 'done' }), ackCompletion: async () => true } })
+    const controller = new WorkController({
+      ledger,
+      conversationHost: {
+        read: async () => conversation,
+        state: async () => ({
+          contractVersion: 1,
+          conversationId: 'conv_test',
+          target,
+          stateVersion: 1,
+          turn: { turnId: 'child', userMessageId: 'user-child', assistantMessageId: 'assistant-child' },
+          progress: 'terminal', body: 'substantive', delivery: 'delivered', gate: 'none',
+          writer: { mode: 'managed', epoch: 1 }
+        })
+      },
+      watchdog: { completion: async () => ({ completed: true, result: 'done' }), ackCompletion: async () => true }
+    })
     assert.equal((await controller.collect(work.id)).collected, source === 'watchdog' ? 1 : 0)
   }
 })
