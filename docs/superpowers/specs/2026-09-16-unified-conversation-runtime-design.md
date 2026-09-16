@@ -203,7 +203,7 @@ Control-plane data is not ordinary message content:
 - extension lifecycle/reload admission
 - global pacing reservation
 
-A mode or epoch change invalidates intents issued against the old writer epoch. Legacy direct mode cannot share managed writer authority for the same browser session.
+A mode or epoch change invalidates intents issued against the old writer epoch. In the Runtime Home deployment, each new Sidecar writer server incarnation claims the next durable epoch from `data/writer-authority.json` before serving managed intents; the epoch is not a release number, wall-clock guess, or constant default. Source-only/test hosts without a stable data root may use explicit epoch `0`, but production Runtime Home must not. Legacy direct mode cannot share managed writer authority for the same browser session.
 
 ## Reducer rules
 

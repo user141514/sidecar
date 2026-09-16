@@ -24,6 +24,7 @@ test('full runtime artifact contains scheduler and memory while remaining indepe
     'src/work-controller.mjs',
     'src/watchdog-client.mjs',
     'src/send-admission.mjs',
+    'src/writer-authority.mjs',
     'src/work-cli.mjs',
     'src/memory-pool.mjs',
     'src/memory-sync-bridge.mjs',

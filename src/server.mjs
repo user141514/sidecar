@@ -13,6 +13,7 @@ import { WatchdogClient } from './watchdog-client.mjs'
 import { MemoryPool } from './memory-pool.mjs'
 import { MemorySyncBridge } from './memory-sync-bridge.mjs'
 import { SendAdmission } from './send-admission.mjs'
+import { claimWriterEpoch } from './writer-authority.mjs'
 
 const TOOLS = [
   ...EXTENSION_TOOLS,
@@ -623,17 +624,23 @@ const defaultMemoryRoot = fileURLToPath(new URL('../data/memory/', import.meta.u
 const defaultSendAdmissionPath = fileURLToPath(new URL('../data/send-admission.json', import.meta.url))
 const defaultMymemRepo = resolve(fileURLToPath(new URL('../', import.meta.url)), '..', 'mymem')
 
+export async function runtimeWriterEpoch(dataRoot, claim = claimWriterEpoch) {
+  if (!dataRoot) return 0
+  return claim(join(dataRoot, 'writer-authority.json'))
+}
+
 export function createRuntimeComponents({
   bridge,
   dataRoot = null,
   legacyConversationRoot = process.env.SIDECAR_DATA_DIR ?? defaultConversationRoot,
   managedProjectUrl = process.env.SIDECAR_MANAGED_PROJECT_URL ?? null,
   mymemRepo = process.env.SIDECAR_MYMEM_REPO ?? defaultMymemRepo,
-  memorySyncBridge: providedMemorySyncBridge = null
+  memorySyncBridge: providedMemorySyncBridge = null,
+  writerEpoch = 0
 } = {}) {
   const store = new ConversationStore(dataRoot ? join(dataRoot, 'conversations') : legacyConversationRoot)
   const sendAdmission = new SendAdmission({ statePath: dataRoot ? join(dataRoot, 'send-admission.json') : defaultSendAdmissionPath })
-  const conversationHost = new ChatGptConversationHost({ bridge, store, sendAdmission, managedProjectUrl })
+  const conversationHost = new ChatGptConversationHost({ bridge, store, sendAdmission, managedProjectUrl, writerEpoch })
   const workLedger = new WorkLedger(dataRoot ? join(dataRoot, 'works') : defaultWorkRoot)
   const watchdog = new WatchdogClient()
   const workController = new WorkController({ ledger: workLedger, conversationHost, managedProjectUrl, watchdog })
@@ -652,7 +659,9 @@ async function startDefault() {
   const bridge = new ExtensionBridge({ channel })
   bridge.on('error', (error) => console.error(error instanceof Error ? error.stack : String(error)))
 
-  const components = createRuntimeComponents({ bridge, dataRoot: process.env.SIDECAR_DATA_ROOT ?? null })
+  const dataRoot = process.env.SIDECAR_DATA_ROOT ?? null
+  const writerEpoch = await runtimeWriterEpoch(dataRoot)
+  const components = createRuntimeComponents({ bridge, dataRoot, writerEpoch })
   const app = createSidecarServer({
     ...components,
     runtimeRelease: process.env.SIDECAR_RUNTIME_RELEASE ?? null

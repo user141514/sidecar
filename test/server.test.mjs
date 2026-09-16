@@ -652,6 +652,18 @@ test('runtime wiring kicks memory sync at startup and after durable MemoryPool p
   }
 })
 
+test('runtime writer epoch is claimed only from the stable data root', async () => {
+  const { runtimeWriterEpoch } = await loadServerModule()
+  assert.equal(typeof runtimeWriterEpoch, 'function')
+  const calls = []
+  const claim = async path => { calls.push(path); return 12 }
+  assert.equal(await runtimeWriterEpoch(null, claim), 0)
+  assert.deepEqual(calls, [])
+  const dataRoot = join('C:\\runtime-home', 'data')
+  assert.equal(await runtimeWriterEpoch(dataRoot, claim), 12)
+  assert.deepEqual(calls, [join(dataRoot, 'writer-authority.json')])
+})
+
 test('runtime components place conversations, works, and memory under one stable data root', async () => {
   const { createRuntimeComponents } = await loadServerModule()
   assert.equal(typeof createRuntimeComponents, 'function')
@@ -660,12 +672,13 @@ test('runtime components place conversations, works, and memory under one stable
   const dataRoot = join('C:\\runtime-home', 'data')
   const bridge = new EventEmitter()
   const memorySyncBridge = { kick() {} }
-  const components = createRuntimeComponents({ bridge, dataRoot, memorySyncBridge })
+  const components = createRuntimeComponents({ bridge, dataRoot, memorySyncBridge, writerEpoch: 7 })
 
   assert.equal(components.store.rootDir, join(dataRoot, 'conversations'))
   assert.equal(components.workLedger.rootDir, join(dataRoot, 'works'))
   assert.equal(components.memoryPool.rootDir, join(dataRoot, 'memory'))
   assert.equal(components.memorySyncBridge, memorySyncBridge)
+  assert.deepEqual(components.conversationHost.writer, { mode: 'managed', epoch: 7 })
   assert.equal(components.workController.ledger, components.workLedger)
   assert.equal(components.workController.conversationHost, components.conversationHost)
 })
