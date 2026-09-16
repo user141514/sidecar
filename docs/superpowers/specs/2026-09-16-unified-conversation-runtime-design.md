@@ -203,7 +203,7 @@ Control-plane data is not ordinary message content:
 - extension lifecycle/reload admission
 - global pacing reservation
 
-A mode or epoch change invalidates intents issued against the old writer epoch. In the Runtime Home deployment, each new Sidecar writer server incarnation claims the next durable epoch from `data/writer-authority.json` before serving managed intents; the epoch is not a release number, wall-clock guess, or constant default. Source-only/test hosts without a stable data root may use explicit epoch `0`, but production Runtime Home must not. Legacy direct mode cannot share managed writer authority for the same browser session.
+A mode or epoch change invalidates intents issued against the old writer epoch. In the Runtime Home deployment, each new Sidecar writer server incarnation claims the next durable epoch from `data/writer-authority.json` **and holds the corresponding process-lifetime lease until that server closes or dies**. A second live writer cannot advance the epoch; a replacement may fence an orphan only after proving the recorded owner PID is dead. Before listening on the managed HTTP endpoint, the new writer must durably claim the same epoch at the Extension Effect Sink. Every Sidecar browser-mutation command carries that epoch, and the Extension revalidates it at effect execution. The Extension epoch claim is a barrier: it waits for already-running writer commands to drain, prevents later commands from entering until the claim is durable, and then rejects stale-epoch commands before browser mutation. The epoch is not a release number, wall-clock guess, or constant default. Source-only/test hosts without a stable data root may use explicit epoch `0`, but production Runtime Home must not. Legacy direct mode cannot share managed writer authority for the same browser session.
 
 ## Reducer rules
 
@@ -220,6 +220,7 @@ Rules required by current failures:
 7. A newer user turn after the expected user identity makes that observation unreadable for the old turn; later assistant output cannot be rebound backward.
 8. `Continue generating` / interrupted generation is nonterminal even when the partial body is substantive.
 9. `human_required` is a sticky control-plane veto and is never cleared merely because a browser observation reports no gate on a later poll.
+10. A late or repeated `EffectReceipt` is evidence for its exact `(requestId, conversationId, turnId)` only. It cannot acquire state authority for a newer turn or writer epoch, cannot roll back terminal/blocked state, and cannot advance `stateVersion` when authoritative semantics are unchanged.
 
 ## Watchdog migration
 

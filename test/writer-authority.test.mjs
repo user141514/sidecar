@@ -21,6 +21,35 @@ test('writer epoch is durable and strictly increases across writer incarnations'
   assert.deepEqual({ version: state.version, epoch: state.epoch }, { version: 1, epoch: 2 })
 })
 
+test('claimed writer lease stays live until explicit release', async t => {
+  assert.equal(typeof mod.claimWriterLease, 'function')
+  const { statePath } = await fixture(t)
+  const lease = await mod.claimWriterLease(statePath, {
+    pid: 1001,
+    ownerId: 'lease-one',
+    processAlive: pid => pid === 1001
+  })
+  assert.equal(lease.epoch, 1)
+  await assert.rejects(
+    mod.claimWriterLease(statePath, {
+      pid: 1002,
+      ownerId: 'lease-two',
+      processAlive: pid => pid === 1001
+    }),
+    error => error?.code === 'WRITER_AUTHORITY_BUSY'
+  )
+  assert.equal(JSON.parse(await readFile(statePath, 'utf8')).epoch, 1)
+
+  await lease.release()
+  const next = await mod.claimWriterLease(statePath, {
+    pid: 1002,
+    ownerId: 'lease-two',
+    processAlive: () => false
+  })
+  assert.equal(next.epoch, 2)
+  await next.release()
+})
+
 test('live writer authority lock is never stolen', async t => {
   const { root, statePath } = await fixture(t)
   await writeFile(statePath, `${JSON.stringify({ version: 1, epoch: 4 })}\n`)

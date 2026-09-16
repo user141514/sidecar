@@ -13,13 +13,83 @@ const STORAGE_PREFIX = 'conversation:'
 const PENDING_PREFIX = 'pending:'
 const OUTBOX_PREFIX = 'outbox:'
 const EFFECT_RECEIPT_PREFIX = 'effect-receipt:'
+const WRITER_AUTHORITY_KEY = 'writer:authority'
 const WINDOW0_KEY = 'window0'
 
 let nativePort = null
 let reconnectTimer = null
+let activeWriterCommands = 0
+let pendingWriterClaims = 0
+let writerClaimTail = Promise.resolve()
+const writerDrainWaiters = []
 const sendOwners = new Set()
 const tabOwners = new Map()
 const activeSends = new Map()
+
+function finishWriterCommand() {
+  activeWriterCommands -= 1
+  if (activeWriterCommands !== 0) return
+  for (const resolve of writerDrainWaiters.splice(0)) resolve()
+}
+
+function waitForWriterDrain() {
+  if (activeWriterCommands === 0) return Promise.resolve()
+  return new Promise(resolve => writerDrainWaiters.push(resolve))
+}
+
+async function loadWriterAuthority() {
+  const stored = await chrome.storage.local.get(WRITER_AUTHORITY_KEY)
+  const authority = stored[WRITER_AUTHORITY_KEY] ?? null
+  if (authority === null) return null
+  if (authority?.version !== 1 || !Number.isInteger(authority.epoch) || authority.epoch <= 0) {
+    throw new Error('Invalid durable writer authority')
+  }
+  return authority
+}
+
+async function claimWriterEpoch(params = {}) {
+  const epoch = params.writerEpoch
+  if (!Number.isInteger(epoch) || epoch <= 0) throw new Error('Valid writer epoch required')
+  const current = await loadWriterAuthority()
+  if (current && epoch < current.epoch) throw new Error('Writer epoch is stale')
+  if (!current || epoch > current.epoch) {
+    await chrome.storage.local.set({ [WRITER_AUTHORITY_KEY]: { version: 1, epoch } })
+  }
+  return { accepted: true, currentWriterEpoch: epoch }
+}
+
+async function assertWriterEpoch(params = {}) {
+  const current = await loadWriterAuthority()
+  if (!current) return
+  if (!Number.isInteger(params.writerEpoch) || params.writerEpoch !== current.epoch) {
+    throw new Error(`Writer epoch mismatch: expected ${current.epoch}`)
+  }
+}
+
+async function runWriterMutation(params, action) {
+  while (pendingWriterClaims > 0) {
+    const barrier = writerClaimTail
+    await barrier.catch(() => {})
+  }
+  activeWriterCommands += 1
+  try {
+    await assertWriterEpoch(params)
+    return await extensionLifecycle.runMutation(action)
+  } finally {
+    finishWriterCommand()
+  }
+}
+
+function runWriterClaim(params) {
+  pendingWriterClaims += 1
+  const previous = writerClaimTail
+  const run = previous.catch(() => {}).then(async () => {
+    await waitForWriterDrain()
+    return extensionLifecycle.runMutation(() => claimWriterEpoch(params))
+  })
+  writerClaimTail = run
+  return run.finally(() => { pendingWriterClaims -= 1 })
+}
 
 function deliveryUncertain(error) {
   return Object.assign(new Error(error instanceof Error ? error.message : String(error)), { code: 'DELIVERY_UNCERTAIN' })
@@ -1048,6 +1118,7 @@ async function executeRequest(message) {
   await recoveryReady
   if (message.method === 'extension_status') {
     const stored = await chrome.storage.local.get(null)
+    const writerAuthority = await loadWriterAuthority()
     const bindings = Object.entries(stored).filter(([key]) => key.startsWith(STORAGE_PREFIX))
     const tabs = await chrome.tabs.query({})
     const managedTabs = tabs.filter(tab => bindings.some(([, binding]) => binding?.tabId === tab.id))
@@ -1056,13 +1127,16 @@ async function executeRequest(message) {
       try { tab.page = await boundedMessage(tab.tabId, { type: 'sidecar_ping' }, 2000) }
       catch (error) { tab.pageError = error instanceof Error ? error.message : String(error) }
     }))
-    return { ...await extensionLifecycle.status(), operations: [...activeSends.values()], managedTabs }
+    return { ...await extensionLifecycle.status(), writerEpoch: writerAuthority?.epoch ?? null, operations: [...activeSends.values()], managedTabs }
   }
   if (message.method === 'extension_reload') return extensionLifecycle.requestReload(message.params)
-  if (message.method === 'webgpt_shift_test') return webGptShiftTest(message.params ?? {})
+  if (message.method === 'writer_epoch_claim') {
+    return runWriterClaim(message.params ?? {})
+  }
+  if (message.method === 'webgpt_shift_test') return runWriterMutation(message.params ?? {}, () => webGptShiftTest(message.params ?? {}))
   if (message.method === 'project_find') return findProject(message.params ?? {})
-  if (message.method === 'project_create') return extensionLifecycle.runMutation(() => createProject(message.params ?? {}))
-  if (message.method === 'conversation_create') return extensionLifecycle.runMutation(() => createConversation(message.params ?? {}))
+  if (message.method === 'project_create') return runWriterMutation(message.params ?? {}, () => createProject(message.params ?? {}))
+  if (message.method === 'conversation_create') return runWriterMutation(message.params ?? {}, () => createConversation(message.params ?? {}))
   if (message.method === 'conversation_observe') {
     const expectedUrl = message.params?.externalUrl
     if (!stableConversationUrl(expectedUrl)) throw new Error('exact conversation URL required')
@@ -1084,7 +1158,9 @@ async function executeRequest(message) {
     const receipt = await loadEffectReceipt(requestId)
     return receipt ? { found: true, receipt } : { found: false }
   }
-  if (message.method === 'conversation_send') return extensionLifecycle.runMutation(() => sendConversation(message.params ?? {}))
+  if (message.method === 'conversation_send') {
+    return runWriterMutation(message.params ?? {}, () => sendConversation(message.params ?? {}))
+  }
   throw new Error(`Unknown native request method: ${message.method}`)
 }
 

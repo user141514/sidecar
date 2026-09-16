@@ -94,7 +94,7 @@ async function persist(statePath, state) {
   await rename(temporary, statePath)
 }
 
-export async function claimWriterEpoch(statePath, {
+export async function claimWriterLease(statePath, {
   pid = process.pid,
   ownerId = randomUUID(),
   processAlive = defaultProcessAlive
@@ -107,13 +107,33 @@ export async function claimWriterEpoch(statePath, {
   await mkdir(dirname(statePath), { recursive: true })
   const lock = `${statePath}.lock`
   await acquire(lock, { pid, ownerId, processAlive })
+  let epoch
   try {
     const state = await readState(statePath)
     if (state.epoch >= Number.MAX_SAFE_INTEGER) throw new Error('writer authority epoch exhausted')
-    const epoch = state.epoch + 1
+    epoch = state.epoch + 1
     await persist(statePath, { version: 1, epoch })
-    return epoch
-  } finally {
+  } catch (error) {
     await release(lock, ownerId)
+    throw error
+  }
+
+  let released = false
+  return Object.freeze({
+    epoch,
+    async release() {
+      if (released) return
+      released = true
+      await release(lock, ownerId)
+    }
+  })
+}
+
+export async function claimWriterEpoch(statePath, options = {}) {
+  const lease = await claimWriterLease(statePath, options)
+  try {
+    return lease.epoch
+  } finally {
+    await lease.release()
   }
 }

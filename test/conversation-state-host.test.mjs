@@ -136,6 +136,62 @@ test('stateByTarget resolves exactly one local binding and fails closed on ambig
   await assert.rejects(host.stateByTarget('https://chatgpt.com/'), /exact conversation target/i)
 })
 
+test('late receipt from an older turn cannot alter the current authoritative turn', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'conversation-late-receipt-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new ConversationStore(root)
+  const conversation = await store.create({ backend: 'test', externalUrl: target })
+  await store.append(conversation.id, { type: 'send_intent', turnId: 'turn-old', requestId: 'request-old', text: 'old' })
+  await store.append(conversation.id, { type: 'send_intent', turnId: 'turn-new', requestId: 'request-new', text: 'new' })
+  await store.append(conversation.id, { type: 'response_completed', turnId: 'turn-new', text: 'NEW RESULT', externalUrl: target })
+
+  const bridge = new EventEmitter()
+  bridge.request = async method => {
+    if (method === 'conversation_effect_receipt') return { found: true, receipt: {
+      requestId: 'request-old', conversationId: conversation.id, turnId: 'turn-old',
+      userMessageId: 'user-old', externalUrl: target
+    } }
+    throw new Error(`unexpected ${method}`)
+  }
+  const host = new ChatGptConversationHost({ bridge, store, writerEpoch: 2 })
+  const first = await host.state(conversation.id)
+  const second = await host.state(conversation.id)
+  assert.equal(first.turn.turnId, 'turn-new')
+  assert.equal(first.turn.userMessageId, null)
+  assert.equal(first.progress, 'terminal')
+  assert.equal(first.writer.epoch, 2)
+  assert.equal(second.stateVersion, first.stateVersion)
+})
+
+test('repeated receipt after writer epoch advance cannot re-advance or roll back state', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'conversation-receipt-epoch-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new ConversationStore(root)
+  const conversation = await store.create({ backend: 'test', externalUrl: target })
+  await store.append(conversation.id, { type: 'send_intent', turnId: 'turn-1', requestId: 'request-1', text: 'audit' })
+  await store.append(conversation.id, { type: 'generation_started', turnId: 'turn-1', externalUrl: target })
+
+  const bridge = new EventEmitter()
+  bridge.request = async (method) => {
+    if (method === 'conversation_effect_receipt') return { found: true, receipt: {
+      requestId: 'request-1', conversationId: conversation.id, turnId: 'turn-1',
+      userMessageId: 'user-1', externalUrl: target
+    } }
+    if (method === 'conversation_state_observe') throw new Error('browser unreadable')
+    throw new Error(`unexpected ${method}`)
+  }
+
+  const firstHost = new ChatGptConversationHost({ bridge, store, writerEpoch: 1 })
+  const epochOne = await firstHost.state(conversation.id)
+  assert.deepEqual([epochOne.stateVersion, epochOne.writer.epoch, epochOne.delivery], [1, 1, 'delivered'])
+
+  const secondHost = new ChatGptConversationHost({ bridge, store, writerEpoch: 2 })
+  const epochTwo = await secondHost.state(conversation.id)
+  const repeated = await secondHost.state(conversation.id)
+  assert.deepEqual([epochTwo.stateVersion, epochTwo.writer.epoch, epochTwo.delivery], [2, 2, 'delivered'])
+  assert.deepEqual([repeated.stateVersion, repeated.writer.epoch, repeated.delivery], [2, 2, 'delivered'])
+})
+
 test('concurrent state reconciliation serializes one authoritative version sequence', async t => {
   let active = 0, peak = 0, sequence = 0
   const observation = async () => {

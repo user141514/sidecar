@@ -803,6 +803,112 @@ test('send forwards authoritative state ownership to prepare and submit without 
   assert.equal(submit?.message.authoritativeState, true)
 })
 
+test('writer epoch claim fences stale browser commands at the Extension sink', async () => {
+  const externalUrl = 'https://chatgpt.com/c/writer-epoch-fence'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_epoch': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+
+  const claimed = await harness.request('writer_epoch_claim', { writerEpoch: 2 })
+  assert.equal(claimed.ok, true)
+  assert.equal(JSON.stringify(harness.storageState['writer:authority']), JSON.stringify({ version: 1, epoch: 2 }))
+  assert.equal((await harness.request('extension_status', {})).result.writerEpoch, 2)
+
+  const stale = await harness.request('conversation_send', {
+    conversationId: 'conv_epoch', turnId: 'turn_stale', text: 'must not send',
+    writerEpoch: 1, externalUrl
+  })
+  assert.equal(stale.ok, false)
+  assert.match(stale.error, /writer epoch/i)
+  assert.equal(harness.sentToTabs.some(({ message }) => message.type === 'conversation_prepare'), false)
+
+  const fresh = await harness.request('conversation_send', {
+    conversationId: 'conv_epoch', turnId: 'turn_fresh', text: 'send once',
+    writerEpoch: 2, externalUrl
+  })
+  assert.equal(fresh.ok, true)
+  assert.equal(harness.sentToTabs.filter(({ message }) => message.type === 'conversation_prepare').length, 1)
+})
+
+test('writer epoch claim is serialized behind an older in-flight writer command', async () => {
+  let releasePrepare
+  const prepareGate = new Promise(resolve => { releasePrepare = resolve })
+  const externalUrl = 'https://chatgpt.com/c/writer-epoch-order'
+  const harness = makeHarness({
+    prepareGate,
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_epoch_order': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+
+  assert.equal((await harness.request('writer_epoch_claim', { writerEpoch: 1 })).ok, true)
+
+  const sendPromise = harness.request('conversation_send', {
+    conversationId: 'conv_epoch_order', turnId: 'turn_old', text: 'old command',
+    writerEpoch: 1, externalUrl
+  })
+  for (let attempt = 0; attempt < 8 && !harness.sentToTabs.some(({ message }) => message.type === 'conversation_prepare'); attempt += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal(harness.sentToTabs.some(({ message }) => message.type === 'conversation_prepare'), true)
+
+  let claimResolved = false
+  const claimPromise = harness.request('writer_epoch_claim', { writerEpoch: 2 }).then(result => {
+    claimResolved = true
+    return result
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(claimResolved, false)
+
+  releasePrepare()
+  assert.equal((await sendPromise).ok, true)
+  assert.equal((await claimPromise).ok, true)
+  assert.equal(harness.storageState['writer:authority'].epoch, 2)
+
+  const stale = await harness.request('conversation_send', {
+    conversationId: 'conv_epoch_order', turnId: 'turn_late_old', text: 'late old command',
+    writerEpoch: 1, externalUrl
+  })
+  assert.equal(stale.ok, false)
+})
+
+test('writer epoch fences every Sidecar browser mutation command class', async () => {
+  const externalUrl = 'https://chatgpt.com/c/writer-epoch-all-mutations'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_epoch_all': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+  assert.equal((await harness.request('writer_epoch_claim', { writerEpoch: 2 })).ok, true)
+
+  const requests = [
+    ['webgpt_shift_test', { target: 'High', writerEpoch: 1 }],
+    ['project_create', { name: 'should-not-create', writerEpoch: 1 }],
+    ['conversation_create', { conversationId: 'conv_stale_create', url: 'https://chatgpt.com/', writerEpoch: 1 }],
+    ['conversation_send', { conversationId: 'conv_epoch_all', turnId: 'turn_stale_all', text: 'must not send', externalUrl, writerEpoch: 1 }]
+  ]
+  for (const [method, params] of requests) {
+    const response = await harness.request(method, params)
+    assert.equal(response.ok, false, `${method} must reject stale writer epoch`)
+    assert.match(response.error, /writer epoch/i)
+  }
+
+  assert.equal(harness.createdWindows.length, 0)
+  assert.equal(harness.createdTabs.length, 0)
+  assert.equal(harness.sentToTabs.some(({ message }) => ['webgpt_shift_test', 'project_create', 'conversation_prepare'].includes(message.type)), false)
+})
+
 test('send persists pending state before the irreversible submit click', async () => {
   const externalUrl = 'https://chatgpt.com/c/prepared-before-submit'
   const harness = makeHarness({

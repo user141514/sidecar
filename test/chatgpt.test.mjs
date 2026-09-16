@@ -132,6 +132,27 @@ test('webgpt shift probe forwards an exact conversation URL to the browser bridg
   assert.equal(bridge.requests[0].params.target_url, targetUrl)
 })
 
+test('host forwards writer epoch to every browser mutation command', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  const host = new ChatGptConversationHost({ bridge, store, writerEpoch: 7 })
+
+  await host.shiftTest('High')
+  await host.createProject('subagents')
+  const created = await host.create({ projectUrl: 'https://chatgpt.com/g/g-p-project123-agent/project' })
+  await host.send(created.id, 'epoch-bound send')
+
+  for (const method of ['webgpt_shift_test', 'project_create', 'conversation_create', 'conversation_send']) {
+    const request = bridge.requests.find(item => item.method === method)
+    assert.ok(request, `missing ${method}`)
+    assert.equal(request.params.writerEpoch, 7, `${method} must carry writerEpoch`)
+  }
+})
+
 test('project_find returns a canonical current-page Project URL without changing the pinned default', async () => {
   const { ChatGptConversationHost } = await loadChatGptModule()
   assert.equal(typeof ChatGptConversationHost, 'function')
@@ -174,7 +195,7 @@ test('project_create returns a created Project URL without changing the pinned d
   })
   assert.deepEqual(bridge.requests[0], {
     method: 'project_create',
-    params: { name: 'subagents' }
+    params: { name: 'subagents', writerEpoch: 0 }
   })
   assert.equal(await store.getDefaultProjectUrl(), null)
 })

@@ -104,7 +104,7 @@ export class ChatGptConversationHost {
     const normalizedName = typeof name === 'string' ? name.trim() : ''
     if (!normalizedName) throw new TypeError('project name is required')
 
-    const result = await this.bridge.request('project_create', { name: normalizedName })
+    const result = await this.bridge.request('project_create', { name: normalizedName, writerEpoch: this.writer.epoch })
     return {
       name: normalizedName,
       projectUrl: normalizeProjectHomeUrl(result.projectUrl),
@@ -137,7 +137,8 @@ export class ChatGptConversationHost {
     if (targetUrl !== null && (typeof targetUrl !== 'string' || !targetUrl.trim())) throw new Error('WebGPT shift target URL is invalid')
     return this.bridge.request('webgpt_shift_test', {
       target: target.trim(),
-      ...(targetUrl ? { target_url: targetUrl.trim() } : {})
+      ...(targetUrl ? { target_url: targetUrl.trim() } : {}),
+      writerEpoch: this.writer.epoch
     })
   }
 
@@ -166,7 +167,8 @@ export class ChatGptConversationHost {
     try {
       const browser = await this.bridge.request('conversation_create', {
         conversationId: created.id,
-        url: createUrl
+        url: createUrl,
+        writerEpoch: this.writer.epoch
       })
       await this.store.append(created.id, {
         type: 'browser_attached',
@@ -441,6 +443,7 @@ export class ChatGptConversationHost {
         turnId: id,
         requestId,
         text,
+        writerEpoch: this.writer.epoch,
         ...(app ? { app } : {}),
         ...(expected ? { expected } : {}),
         ...(existingOnly ? { existingOnly: true } : {}),

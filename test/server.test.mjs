@@ -652,16 +652,49 @@ test('runtime wiring kicks memory sync at startup and after durable MemoryPool p
   }
 })
 
-test('runtime writer epoch is claimed only from the stable data root', async () => {
-  const { runtimeWriterEpoch } = await loadServerModule()
-  assert.equal(typeof runtimeWriterEpoch, 'function')
+test('runtime writer lease is claimed only from the stable data root', async () => {
+  const { runtimeWriterLease } = await loadServerModule()
+  assert.equal(typeof runtimeWriterLease, 'function')
   const calls = []
-  const claim = async path => { calls.push(path); return 12 }
-  assert.equal(await runtimeWriterEpoch(null, claim), 0)
+  const release = async () => {}
+  const claim = async path => { calls.push(path); return { epoch: 12, release } }
+
+  const local = await runtimeWriterLease(null, claim)
+  assert.equal(local.epoch, 0)
+  assert.equal(typeof local.release, 'function')
+  await local.release()
   assert.deepEqual(calls, [])
+
   const dataRoot = join('C:\\runtime-home', 'data')
-  assert.equal(await runtimeWriterEpoch(dataRoot, claim), 12)
+  const durable = await runtimeWriterLease(dataRoot, claim)
+  assert.equal(durable.epoch, 12)
+  assert.equal(durable.release, release)
   assert.deepEqual(calls, [join(dataRoot, 'writer-authority.json')])
+})
+
+test('runtime browser writer epoch claim is explicit and fail-closed', async () => {
+  const { claimExtensionWriterEpoch } = await loadServerModule()
+  assert.equal(typeof claimExtensionWriterEpoch, 'function')
+
+  const calls = []
+  const bridge = {
+    async request(method, params) {
+      calls.push({ method, params })
+      return { accepted: true, currentWriterEpoch: params.writerEpoch }
+    }
+  }
+  assert.deepEqual(await claimExtensionWriterEpoch(bridge, 0), { claimed: false, currentWriterEpoch: 0 })
+  assert.deepEqual(calls, [])
+
+  const claimed = await claimExtensionWriterEpoch(bridge, 5)
+  assert.equal(claimed.accepted, true)
+  assert.equal(claimed.currentWriterEpoch, 5)
+  assert.deepEqual(calls, [{ method: 'writer_epoch_claim', params: { writerEpoch: 5 } }])
+
+  await assert.rejects(
+    claimExtensionWriterEpoch({ request: async () => ({ accepted: true, currentWriterEpoch: 4 }) }, 5),
+    /writer epoch claim/i
+  )
 })
 
 test('runtime components place conversations, works, and memory under one stable data root', async () => {

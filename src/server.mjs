@@ -13,7 +13,7 @@ import { WatchdogClient } from './watchdog-client.mjs'
 import { MemoryPool } from './memory-pool.mjs'
 import { MemorySyncBridge } from './memory-sync-bridge.mjs'
 import { SendAdmission } from './send-admission.mjs'
-import { claimWriterEpoch } from './writer-authority.mjs'
+import { claimWriterLease } from './writer-authority.mjs'
 
 const TOOLS = [
   ...EXTENSION_TOOLS,
@@ -624,9 +624,20 @@ const defaultMemoryRoot = fileURLToPath(new URL('../data/memory/', import.meta.u
 const defaultSendAdmissionPath = fileURLToPath(new URL('../data/send-admission.json', import.meta.url))
 const defaultMymemRepo = resolve(fileURLToPath(new URL('../', import.meta.url)), '..', 'mymem')
 
-export async function runtimeWriterEpoch(dataRoot, claim = claimWriterEpoch) {
-  if (!dataRoot) return 0
+export async function runtimeWriterLease(dataRoot, claim = claimWriterLease) {
+  if (!dataRoot) return { epoch: 0, async release() {} }
   return claim(join(dataRoot, 'writer-authority.json'))
+}
+
+export async function claimExtensionWriterEpoch(bridge, writerEpoch) {
+  if (!Number.isSafeInteger(writerEpoch) || writerEpoch < 0) throw new TypeError('writer epoch must be a non-negative integer')
+  if (writerEpoch === 0) return { claimed: false, currentWriterEpoch: 0 }
+  if (!bridge || typeof bridge.request !== 'function') throw new TypeError('extension bridge is required')
+  const result = await bridge.request('writer_epoch_claim', { writerEpoch })
+  if (result?.accepted !== true || result.currentWriterEpoch !== writerEpoch) {
+    throw new Error('Extension writer epoch claim did not match the Sidecar writer epoch')
+  }
+  return result
 }
 
 export function createRuntimeComponents({
@@ -660,20 +671,35 @@ async function startDefault() {
   bridge.on('error', (error) => console.error(error instanceof Error ? error.stack : String(error)))
 
   const dataRoot = process.env.SIDECAR_DATA_ROOT ?? null
-  const writerEpoch = await runtimeWriterEpoch(dataRoot)
-  const components = createRuntimeComponents({ bridge, dataRoot, writerEpoch })
-  const app = createSidecarServer({
-    ...components,
-    runtimeRelease: process.env.SIDECAR_RUNTIME_RELEASE ?? null
-  })
-  const host = process.env.SIDECAR_HOST ?? '127.0.0.1'
-  const port = Number(process.env.SIDECAR_PORT ?? 7337)
-  const address = await app.listen({ host, port })
-  console.error(JSON.stringify({ ok: true, service: 'conversation-sidecar', host: address.address, port: address.port, mcp: '/mcp' }))
+  const writerLease = await runtimeWriterLease(dataRoot)
+  let app
+  try {
+    await claimExtensionWriterEpoch(bridge, writerLease.epoch)
+    const components = createRuntimeComponents({ bridge, dataRoot, writerEpoch: writerLease.epoch })
+    app = createSidecarServer({
+      ...components,
+      runtimeRelease: process.env.SIDECAR_RUNTIME_RELEASE ?? null
+    })
+    const host = process.env.SIDECAR_HOST ?? '127.0.0.1'
+    const port = Number(process.env.SIDECAR_PORT ?? 7337)
+    const address = await app.listen({ host, port })
+    console.error(JSON.stringify({ ok: true, service: 'conversation-sidecar', host: address.address, port: address.port, mcp: '/mcp' }))
+  } catch (error) {
+    await writerLease.release().catch(() => {})
+    throw error
+  }
 
   channel.once('close', () => {
-    void app.close().finally(() => {
-      process.exitCode = 0
+    void (async () => {
+      try {
+        await app.close()
+      } finally {
+        await writerLease.release()
+        process.exitCode = 0
+      }
+    })().catch((error) => {
+      console.error(error instanceof Error ? error.stack : String(error))
+      process.exitCode = 1
     })
   })
 }
