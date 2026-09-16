@@ -53,7 +53,8 @@ export async function updateExtension(callTool, {
   if (now() >= deadline) throw new Error('Update preflight deadline elapsed; reload was not requested')
   if (!before?.instanceId || !before?.buildId) throw new Error('Installed extension lacks self-update support; manual bootstrap required')
   if (expectedExtensionId && before.extensionId !== expectedExtensionId) throw new Error('Installed extension ID mismatch')
-  if (before.pendingCount || before.outboxCount || before.activeOperations || before.reloading) throw new Error('Extension busy; wait for pending work and outbox delivery')
+  const blockingPendingCount = Number.isInteger(before.blockingPendingCount) ? before.blockingPendingCount : before.pendingCount
+  if (blockingPendingCount || before.outboxCount || before.activeOperations || before.reloading) throw new Error('Extension busy; wait for unsafe pending work and outbox delivery')
   let requestError = null
   try {
     const accepted = await call('extension_reload', { request_id: requestId, expected_instance_id: before.instanceId, expected_build_id: expectedBuildId })

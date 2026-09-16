@@ -1,4 +1,35 @@
 // Shared by the integrated Sidecar and standalone provider. No OS decisions here.
+function isRecoverableSubmittedPending(state, pending) {
+  if (!pending || pending.phase !== 'submitted') return false
+  if (typeof pending.conversationId !== 'string' || !pending.conversationId) return false
+  if (typeof pending.turnId !== 'string' || !pending.turnId) return false
+  if (typeof pending.requestId !== 'string' || !pending.requestId) return false
+  if (!Number.isInteger(pending.tabId)) return false
+
+  const receipt = state[`effect-receipt:${pending.requestId}`]
+  if (!receipt || receipt.requestId !== pending.requestId) return false
+  if (receipt.conversationId !== pending.conversationId || receipt.turnId !== pending.turnId) return false
+  if (typeof receipt.userMessageId !== 'string' || !receipt.userMessageId) return false
+
+  const binding = state[`conversation:${pending.conversationId}`]
+  return Boolean(binding && Number.isInteger(binding.tabId) && typeof binding.url === 'string' && binding.url)
+}
+
+function pendingSummary(state) {
+  let pendingCount = 0
+  let recoverablePendingCount = 0
+  for (const [key, pending] of Object.entries(state)) {
+    if (!key.startsWith('pending:')) continue
+    pendingCount += 1
+    if (isRecoverableSubmittedPending(state, pending)) recoverablePendingCount += 1
+  }
+  return {
+    pendingCount,
+    recoverablePendingCount,
+    blockingPendingCount: pendingCount - recoverablePendingCount
+  }
+}
+
 function createSidecarLifecycle({ chrome, buildId, instanceId, matchesTab, schedule = setTimeout }) {
   const receiptKey = 'reload:receipt'
   let activeOperations = 0
@@ -9,12 +40,13 @@ function createSidecarLifecycle({ chrome, buildId, instanceId, matchesTab, sched
 
   async function status() {
     const state = await chrome.storage.local.get(null)
+    const pending = pendingSummary(state)
     return {
       extensionId: chrome.runtime.id,
       version: chrome.runtime.getManifest().version,
       buildId,
       instanceId,
-      pendingCount: Object.keys(state).filter((key) => key.startsWith('pending:')).length,
+      ...pending,
       outboxCount: Object.keys(state).filter((key) => key.startsWith('outbox:')).length,
       activeOperations,
       reloading: admitted !== null,
@@ -42,7 +74,7 @@ function createSidecarLifecycle({ chrome, buildId, instanceId, matchesTab, sched
     admitted = { requestId, previousInstanceId: instanceId, expectedBuildId }
     admissionPromise = (async () => {
       const before = await status()
-      if (before.pendingCount || before.outboxCount) throw new Error('Extension busy: pending turns or unacknowledged outbox; no force reload')
+      if (before.blockingPendingCount || before.outboxCount) throw new Error('Extension busy: unsafe pending turns or unacknowledged outbox; no force reload')
       await chrome.storage.local.set({ [receiptKey]: admitted })
     })()
     try {
@@ -81,8 +113,9 @@ function createSidecarLifecycle({ chrome, buildId, instanceId, matchesTab, sched
       restoration = { ...restoration, state: 'failed', error: 'Target build mismatch' }
       return
     }
-    if (Object.keys(state).some((key) => key.startsWith('pending:'))) {
-      restoration = { ...restoration, state: 'failed', error: 'Pending turns appeared during reload' }
+    const pending = pendingSummary(state)
+    if (pending.blockingPendingCount) {
+      restoration = { ...restoration, state: 'failed', error: 'Unsafe pending turns appeared during reload' }
       return
     }
     restoration.state = 'restoring'

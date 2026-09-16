@@ -1650,6 +1650,82 @@ test('navigation recovery claims a newer monitor owner and rejects the stale pro
   assert.equal(harness.storageState['pending:conv_existing'], undefined)
 })
 
+test('closed submitted pending can be claimed by a new tab for the exact same conversation', async () => {
+  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-rebind'
+  const harness = makeHarness({
+    storage: {
+      'conversation:conv_existing': { windowId: 10, tabId: 30, url: threadUrl },
+      'pending:conv_existing': {
+        conversationId: 'conv_existing',
+        turnId: 'turn_rebind',
+        requestId: 'request_rebind',
+        tabId: 30,
+        promptText: 'inspect',
+        startedAt: 1,
+        monitorVersion: 1,
+        phase: 'submitted'
+      },
+      'effect-receipt:request_rebind': {
+        conversationId: 'conv_existing',
+        turnId: 'turn_rebind',
+        requestId: 'request_rebind',
+        userMessageId: 'user_rebind',
+        externalUrl: threadUrl
+      }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 31, windowId: 10, url: threadUrl }]
+  })
+
+  const claimed = await harness.emitRuntimeMessage(
+    { kind: 'pending_turn_lookup' },
+    { tab: { id: 31, windowId: 10, url: threadUrl } }
+  )
+
+  assert.equal(claimed?.monitorVersion, 2)
+  assert.equal(claimed?.tabId, 31)
+  assert.equal(harness.storageState['pending:conv_existing'].tabId, 31)
+  assert.equal(harness.storageState['conversation:conv_existing'].tabId, 31)
+})
+
+test('submitted pending cannot be stolen while its original tab is still live', async () => {
+  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-live-owner'
+  const harness = makeHarness({
+    storage: {
+      'conversation:conv_existing': { windowId: 10, tabId: 30, url: threadUrl },
+      'pending:conv_existing': {
+        conversationId: 'conv_existing',
+        turnId: 'turn_live_owner',
+        requestId: 'request_live_owner',
+        tabId: 30,
+        monitorVersion: 1,
+        phase: 'submitted'
+      },
+      'effect-receipt:request_live_owner': {
+        conversationId: 'conv_existing',
+        turnId: 'turn_live_owner',
+        requestId: 'request_live_owner',
+        userMessageId: 'user_live_owner',
+        externalUrl: threadUrl
+      }
+    },
+    windows: [{ id: 10 }],
+    tabs: [
+      { id: 30, windowId: 10, url: threadUrl },
+      { id: 31, windowId: 10, url: threadUrl }
+    ]
+  })
+
+  const claimed = await harness.emitRuntimeMessage(
+    { kind: 'pending_turn_lookup' },
+    { tab: { id: 31, windowId: 10, url: threadUrl } }
+  )
+
+  assert.equal(claimed, null)
+  assert.equal(harness.storageState['pending:conv_existing'].tabId, 30)
+  assert.equal(harness.storageState['pending:conv_existing'].monitorVersion, 1)
+})
+
 test('same-document thread URL transition claims recovery ownership and updates attachment', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-project123-agent/project'
   const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-spa'

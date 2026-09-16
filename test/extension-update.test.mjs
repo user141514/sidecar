@@ -37,7 +37,7 @@ test('idle reload persists receipt before ack and schedules only after response'
   assert.deepEqual(h.trace, ['durable', 'ack', 'reload'])
 })
 
-test('pending work and undelivered terminal events each block reload without changing state', async () => {
+test('unsafe pending work and undelivered terminal events each block reload without changing state', async () => {
   for (const key of ['pending:conv-1', 'outbox:terminal-1']) {
     const h = await harness({ [key]: { turnId: 'busy' } })
     await assert.rejects(h.lifecycle.requestReload(request), /busy/i)
@@ -45,6 +45,85 @@ test('pending work and undelivered terminal events each block reload without cha
     assert.equal(h.storage['reload:receipt'], undefined)
     assert.deepEqual(h.trace, [])
   }
+})
+
+test('submitted pending with a matching durable effect receipt is reload-safe and preserved', async () => {
+  const pending = {
+    conversationId: 'conv-safe',
+    turnId: 'turn-safe',
+    requestId: 'request-safe',
+    phase: 'submitted',
+    tabId: 11,
+    monitorVersion: 2
+  }
+  const receipt = {
+    conversationId: 'conv-safe',
+    turnId: 'turn-safe',
+    requestId: 'request-safe',
+    userMessageId: 'user-safe',
+    externalUrl: 'https://chatgpt.com/c/thread-safe'
+  }
+  const h = await harness({
+    'pending:conv-safe': pending,
+    'effect-receipt:request-safe': receipt,
+    'conversation:conv-safe': { tabId: 11, url: 'https://chatgpt.com/c/thread-safe' }
+  })
+
+  const before = await h.lifecycle.status()
+  assert.equal(before.pendingCount, 1)
+  assert.equal(before.recoverablePendingCount, 1)
+  assert.equal(before.blockingPendingCount, 0)
+
+  const accepted = await h.lifecycle.requestReload(request)
+  assert.equal(accepted.accepted, true)
+  assert.deepEqual(h.storage['pending:conv-safe'], pending)
+})
+
+test('submitted pending without its matching effect receipt still blocks reload', async () => {
+  const h = await harness({
+    'pending:conv-unsafe': {
+      conversationId: 'conv-unsafe',
+      turnId: 'turn-unsafe',
+      requestId: 'request-missing',
+      phase: 'submitted',
+      tabId: 11
+    }
+  })
+
+  await assert.rejects(h.lifecycle.requestReload(request), /busy/i)
+})
+
+test('reload restoration keeps recoverable submitted pending durable even when its tab is closed', async () => {
+  const pending = {
+    conversationId: 'conv-restore',
+    turnId: 'turn-restore',
+    requestId: 'request-restore',
+    phase: 'submitted',
+    tabId: 11,
+    monitorVersion: 3
+  }
+  const h = await harness({
+    'reload:receipt': {
+      requestId: 'reload-before-restore',
+      previousInstanceId: 'epoch-before-old',
+      expectedBuildId: 'a'.repeat(64)
+    },
+    'pending:conv-restore': pending,
+    'effect-receipt:request-restore': {
+      conversationId: 'conv-restore',
+      turnId: 'turn-restore',
+      requestId: 'request-restore',
+      userMessageId: 'user-restore',
+      externalUrl: 'https://chatgpt.com/c/thread-restore'
+    },
+    'conversation:conv-restore': { tabId: 11, url: 'https://chatgpt.com/c/thread-restore' }
+  })
+
+  const status = await h.lifecycle.status()
+  assert.equal(status.restoration.state, 'ready')
+  assert.equal(status.recoverablePendingCount, 1)
+  assert.equal(status.blockingPendingCount, 0)
+  assert.deepEqual(h.storage['pending:conv-restore'], pending)
 })
 
 test('reload admission excludes mutations in both directions', async () => {
@@ -195,6 +274,32 @@ async function updater() {
   return mod.updateExtension
 }
 const oldStatus = { instanceId: 'epoch-old', extensionId: 'fixed-id', buildId: 'a'.repeat(64), pendingCount: 0, outboxCount: 0, activeOperations: 0, restoration: { state: 'ready' } }
+
+test('independent updater accepts recoverable pending but fails closed against legacy pending status', async () => {
+  const update = await updater()
+  const safeStatus = { ...oldStatus, pendingCount: 1, recoverablePendingCount: 1, blockingPendingCount: 0 }
+  let token = null
+  const callTool = async (name, args) => {
+    if (name === 'extension_reload') {
+      token = args.request_id
+      return { accepted: true }
+    }
+    if (!token) return safeStatus
+    return {
+      ...safeStatus,
+      instanceId: 'epoch-new',
+      buildId: 'b'.repeat(64),
+      lastReload: { requestId: token, previousInstanceId: 'epoch-old' }
+    }
+  }
+  const result = await update(callTool, { expectedBuildId: 'b'.repeat(64), sleep: async () => {}, timeoutMs: 500 })
+  assert.equal(result.verified, true)
+
+  await assert.rejects(
+    update(async () => ({ ...oldStatus, pendingCount: 1 }), { expectedBuildId: 'b'.repeat(64), sleep: async () => {}, timeoutMs: 500 }),
+    /busy/i
+  )
+})
 
 test('independent updater tolerates lost reload ACK and verifies the correlated new runtime', async () => {
   const update = await updater()

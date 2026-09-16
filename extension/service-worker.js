@@ -451,13 +451,33 @@ async function resolveConversationAttachment(conversationId, requestedUrl, exist
 async function claimPendingTurnForTab(tab) {
   if (typeof tab?.id !== 'number') return null
   const stored = await chrome.storage.local.get(null)
+  const candidateUrl = stableConversationUrl(tabPageUrl(tab))
   for (const [key, value] of Object.entries(stored)) {
     if (!key.startsWith(PENDING_PREFIX)) continue
-    if (value?.tabId !== tab.id) continue
     if (value.phase === 'preparing' || value.phase === 'prepared') continue
+
+    let rebind = false
+    if (value?.tabId !== tab.id) {
+      if (!candidateUrl || !isRecoverableSubmittedPending(stored, value)) continue
+      const binding = stored[`${STORAGE_PREFIX}${value.conversationId}`]
+      const bindingUrl = stableConversationUrl(binding?.url)
+      if (!bindingUrl || pageIdentity(bindingUrl) !== pageIdentity(candidateUrl)) continue
+
+      if (typeof value.tabId === 'number') {
+        try {
+          const priorTab = await chrome.tabs.get(value.tabId)
+          const priorUrl = stableConversationUrl(tabPageUrl(priorTab))
+          if (priorUrl && pageIdentity(priorUrl) === pageIdentity(bindingUrl)) continue
+        } catch {
+          // The original tab is gone, so the exact same conversation may take over monitoring.
+        }
+      }
+      rebind = true
+    }
 
     const claimed = {
       ...value,
+      ...(rebind ? { tabId: tab.id } : {}),
       monitorVersion: Number.isInteger(value.monitorVersion) ? value.monitorVersion + 1 : 1
     }
     await savePendingTurn(claimed)
