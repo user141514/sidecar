@@ -265,6 +265,8 @@ WorkController collection treats Sidecar `ConversationState` as the authority fo
 
 A legacy `status=error` is also reconciled through the authoritative state owner before collection. WorkController calls `state()` once and re-reads the conversation; if fresh evidence repairs the same worker to `completed` or `need_continue`, that newer fact wins. Only an error that remains durable after this reconciliation opportunity retains the legacy failure-collection semantics. If the authoritative state owner is unavailable, collection fails closed rather than falling back to a legacy completed/error projection.
 
+Collection is idempotent per work: concurrent `collect(workId)` calls are serialized so a terminal frontier can append at most one `worker_result`. This serialization is scoped by `workId`; a blocked state owner or watchdog path for one work must not freeze collection of unrelated works.
+
 ## Failure semantics
 
 - Observation unavailable -> `unknown`; no automatic state-changing intent is dispatched.

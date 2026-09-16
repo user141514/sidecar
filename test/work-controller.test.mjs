@@ -649,6 +649,81 @@ test('WorkController fails closed when authoritative state owner is unavailable 
   assert.equal(ledger.events.some((event) => event.type === 'worker_result'), false)
 })
 
+test('concurrent WorkController collect calls append at most one worker_result for the same terminal frontier', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    { at: '2026-09-03T08:01:00.000Z', type: 'decision', payload: { action: 'SPLIT', reason: 'work found', frontiers: [{ id: 'f1', task: 'first task', depends_on: [] }] } },
+    { at: '2026-09-03T08:02:00.000Z', type: 'worker_dispatched', payload: { frontierId: 'f1', conversationId: 'conv_1', turnId: 'turn_1' } }
+  ])
+  const host = new FakeHost()
+  const target = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000106'
+  host.states.set('conv_1', { id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'done once', externalUrl: target })
+  host.authoritativeStates.set('conv_1', {
+    contractVersion: 1, conversationId: 'conv_1', target, stateVersion: 3,
+    turn: { turnId: 'turn_1', userMessageId: 'user-1', assistantMessageId: 'assistant-1' },
+    progress: 'terminal', body: 'substantive', delivery: 'delivered', gate: 'none',
+    writer: { mode: 'managed', epoch: 4 }
+  })
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+
+  const [left, right] = await Promise.all([controller.collect('work_test'), controller.collect('work_test')])
+
+  assert.equal(left.collected + right.collected, 1)
+  assert.equal(ledger.events.filter(event => event.type === 'worker_result' && event.payload.frontierId === 'f1').length, 1)
+})
+
+test('a blocked collect for one work does not freeze collection of an unrelated work', async () => {
+  const { WorkController } = await loadModule()
+  const workEvents = new Map()
+  const baseEvents = conversationId => [
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: `inspect ${conversationId}` } },
+    { at: '2026-09-03T08:01:00.000Z', type: 'decision', payload: { action: 'SPLIT', reason: 'work found', frontiers: [{ id: 'f1', task: 'task', depends_on: [] }] } },
+    { at: '2026-09-03T08:02:00.000Z', type: 'worker_dispatched', payload: { frontierId: 'f1', conversationId, turnId: `turn_${conversationId}` } }
+  ]
+  workEvents.set('work_a', baseEvents('conv_a'))
+  workEvents.set('work_b', baseEvents('conv_b'))
+  const ledger = {
+    async read(id) { return { id, createdAt: '2026-09-03T00:00:00.000Z', events: [...workEvents.get(id)] } },
+    async append(id, type, payload) {
+      const event = { at: new Date(FakeLedger.now).toISOString(), type, payload }
+      workEvents.get(id).push(event)
+      return event
+    }
+  }
+  const host = new FakeHost()
+  for (const id of ['a', 'b']) {
+    const conversationId = `conv_${id}`
+    const turnId = `turn_${conversationId}`
+    const target = `https://chatgpt.com/c/00000000-0000-0000-0000-00000000010${id === 'a' ? '7' : '8'}`
+    host.states.set(conversationId, { id: conversationId, status: 'completed', latestTurnId: turnId, latestResponse: `done ${id}`, externalUrl: target })
+    host.authoritativeStates.set(conversationId, {
+      contractVersion: 1, conversationId, target, stateVersion: 1,
+      turn: { turnId, userMessageId: `user-${id}`, assistantMessageId: `assistant-${id}` },
+      progress: 'terminal', body: 'substantive', delivery: 'delivered', gate: 'none',
+      writer: { mode: 'managed', epoch: 4 }
+    })
+  }
+  let releaseA
+  const gateA = new Promise(resolve => { releaseA = resolve })
+  const baseState = host.state.bind(host)
+  host.state = async id => {
+    if (id === 'conv_a') await gateA
+    return baseState(id)
+  }
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+
+  const pendingA = controller.collect('work_a')
+  await new Promise(resolve => setImmediate(resolve))
+  let bResolved = false
+  const pendingB = controller.collect('work_b').then(result => { bResolved = true; return result })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(bResolved, true)
+  assert.equal((await pendingB).collected, 1)
+  releaseA()
+  assert.equal((await pendingA).collected, 1)
+})
+
 test('WorkController leaves need_continue workers dispatched for an explicit continuation decision', async () => {
   const { WorkController } = await loadModule()
   assert.equal(typeof WorkController, 'function')

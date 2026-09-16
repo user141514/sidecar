@@ -296,6 +296,7 @@ export class WorkController {
     this.lastDispatchAt = null
     this.decisionQueue = Promise.resolve()
     this.dispatchQueue = Promise.resolve()
+    this.collectQueues = new Map()
   }
 
   async state(workId) {
@@ -486,6 +487,15 @@ export class WorkController {
   }
 
   async collect(workId) {
+    const previous = this.collectQueues.get(workId) ?? Promise.resolve()
+    const run = previous.then(() => this.#collect(workId))
+    const tail = run.catch(() => {})
+    this.collectQueues.set(workId, tail)
+    void tail.then(() => { if (this.collectQueues.get(workId) === tail) this.collectQueues.delete(workId) })
+    return run
+  }
+
+  async #collect(workId) {
     const before = await this.state(workId)
     let collected = 0
 
