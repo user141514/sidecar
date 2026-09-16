@@ -218,7 +218,7 @@ Rules required by current failures:
 5. Terminal/body evidence must be bound to the exact current user/assistant identities.
 6. Reducer output is durably reflected in Sidecar state before policy/dispatch consumes it.
 7. A newer user turn after the expected user identity makes that observation unreadable for the old turn; later assistant output cannot be rebound backward.
-8. `Continue generating` / interrupted generation is nonterminal even when the partial body is substantive.
+8. `Continue generating` / interrupted generation is nonterminal and semantically incomplete even when the partial body is structurally substantive. It projects to `progress=blocked`, `body=incomplete` so managed continuation policy has a deterministic recovery edge instead of an unhandled `blocked/substantive` state.
 9. `human_required` is a sticky control-plane veto and is never cleared merely because a browser observation reports no gate on a later poll. It is cleared only by an exact, non-model-facing human control-plane acknowledgement bound to the current conversation, state version, writer epoch, turn, and user/assistant message identities. A declarative `source=human` intent is not provenance. Once acknowledged, the old textual `NEED_INPUT` marker for that exact turn cannot relatch the gate, while a live browser approval UI remains an effect-safety veto.
 10. A late or repeated `EffectReceipt` is evidence for its exact `(requestId, conversationId, turnId)` only. It cannot acquire state authority for a newer turn or writer epoch, cannot roll back terminal/blocked state, and cannot advance `stateVersion` when authoritative semantics are unchanged.
 
@@ -266,6 +266,8 @@ WorkController collection treats Sidecar `ConversationState` as the authority fo
 A legacy `status=error` is also reconciled through the authoritative state owner before collection. WorkController calls `state()` once and re-reads the conversation; if fresh evidence repairs the same worker to `completed` or `need_continue`, that newer fact wins. A durable legacy error is collectible only when the authoritative state for the same latest turn does not contradict it: the gate is clear, delivery is not uncertain, the turn is not active, and it is not already authoritative terminal/substantive completion. If authoritative state is active, gated, uncertain, terminal-success, mismatched, or unavailable, collection fails closed rather than falling back to the legacy error projection.
 
 Collection is idempotent per work at the durable ledger boundary, not merely in one WorkController instance. In-memory `collect(workId)` serialization prevents duplicate collectors in the same process, while the final `worker_result` uses WorkLedger event-count compare-and-append against the snapshot revision. Any concurrent same-work mutation causes `WORK_STALE` and collection fails closed for retry instead of appending a second result. This coordination remains scoped by `workId`; a blocked state owner, watchdog path, or stale revision for one work must not freeze collection of unrelated works.
+
+For watchdog-required frontiers, `need_continue` is a durable handoff state, not merely a compatibility status. The in-process terminal listener is only a low-latency registration fast path. A Runtime restart or lost listener must recover by observing the exact durable `need_continue`, validating the dispatched turn/watchdog ancestry, and re-registering the exact conversation with Watchdog without collecting a result.
 
 ## Failure semantics
 

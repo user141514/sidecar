@@ -687,9 +687,11 @@ function readConversationStateObservation(expectedUserMessageId) {
     /(?:^|\n)\[SUPERVISOR_STATE\s*:\s*NEED_INPUT\]\s*$/.test(assistantText)
   const bodyState = !assistant
     ? 'empty'
-    : body.bodyComplete
-      ? 'substantive'
-      : (body.bodyText || body.shellText) ? 'incomplete' : 'empty'
+    : mode === 'INTERRUPTED'
+      ? 'incomplete'
+      : body.bodyComplete
+        ? 'substantive'
+        : (body.bodyText || body.shellText) ? 'incomplete' : 'empty'
 
   return {
     ready: true,

@@ -1219,6 +1219,30 @@ test('watchdog registration waits for the first terminal event carrying the exac
   assert.deepEqual(watchdog.registered, ['https://chatgpt.com/g/g-p-subagents-test/c/6aa-test-worker'])
 })
 
+test('collect re-registers a watchdog-required durable need_continue after runtime listener loss', async () => {
+  const { WorkController } = await loadModule()
+  const url = 'https://chatgpt.com/c/6aa-need-continue-restart'
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    { at: '2026-09-03T08:01:00.000Z', type: 'decision', payload: { action: 'SPLIT', reason: 'work found', frontiers: [{ id: 'f1', task: 'first task', watchdog: true, depends_on: [] }] } },
+    { at: '2026-09-03T08:02:00.000Z', type: 'worker_dispatched', payload: { frontierId: 'f1', conversationId: 'conv_1', turnId: 'turn_1', phase: 'accepted' } }
+  ])
+  const host = new FakeHost()
+  host.states.set('conv_1', {
+    id: 'conv_1', status: 'need_continue', latestTurnId: 'turn_1', latestResponse: 'partial response', externalUrl: url,
+    events: [{ type: 'send_intent', turnId: 'turn_1', source: 'coordinator' }]
+  })
+  const watchdog = new FakeWatchdog()
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, watchdog, now: () => FakeLedger.now })
+
+  const result = await controller.collect('work_test')
+
+  assert.equal(result.collected, 0)
+  assert.equal(result.state.frontiers[0].status, 'dispatched')
+  assert.deepEqual(watchdog.registered, [url])
+  assert.equal(ledger.events.some(event => event.type === 'worker_result'), false)
+})
+
 test('collect re-registers a required watchdog after registry loss and does not fall back to phase-one completion', async () => {
   const { WorkController } = await loadModule()
   const ledger = new FakeLedger()

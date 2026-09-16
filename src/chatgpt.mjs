@@ -642,10 +642,12 @@ export class ChatGptConversationHost {
     const alreadyCompleted = stored.events.some(event => event.turnId === turnId && event.type === 'response_completed')
     const alreadyBlocked = stored.events.some(event => event.turnId === turnId && event.type === 'need_continue')
     if (delivered && state.gate === 'human_required' && !alreadyCompleted && !alreadyBlocked && typeof acceptedBrowserObservation?.assistantText === 'string') {
-      await this.store.append(stored.id, {
+      const event = {
         type: 'need_continue', turnId, text: acceptedBrowserObservation.assistantText,
         reason: 'human_required', externalUrl: state.target, reconciled: true
-      })
+      }
+      await this.store.append(stored.id, event)
+      await this.#notifyTerminal(stored.id, event)
     } else if (delivered && state.progress === 'terminal' && state.body === 'substantive' && !alreadyCompleted && typeof acceptedBrowserObservation?.assistantText === 'string') {
       const event = {
         type: 'response_completed', turnId, text: acceptedBrowserObservation.assistantText,
@@ -654,10 +656,12 @@ export class ChatGptConversationHost {
       await this.store.append(stored.id, event)
       await this.#notifyTerminal(stored.id, event)
     } else if (delivered && state.progress === 'blocked' && state.body !== 'substantive' && !alreadyBlocked && typeof acceptedBrowserObservation?.assistantText === 'string') {
-      await this.store.append(stored.id, {
+      const event = {
         type: 'need_continue', turnId, text: acceptedBrowserObservation.assistantText,
         reason: 'assistant_body_incomplete', externalUrl: state.target, reconciled: true
-      })
+      }
+      await this.store.append(stored.id, event)
+      await this.#notifyTerminal(stored.id, event)
     }
     return state
   }
@@ -794,14 +798,16 @@ export class ChatGptConversationHost {
     }
 
     if (event.type === 'need_continue') {
-      await this.store.append(conversationId, {
+      const recorded = {
         eventId: event.eventId,
         type: 'need_continue',
         turnId: event.turnId,
         text: event.text ?? '',
         reason: event.reason ?? 'assistant_body_incomplete',
         externalUrl: event.externalUrl
-      })
+      }
+      await this.store.append(conversationId, recorded)
+      await this.#notifyTerminal(conversationId, recorded)
       return true
     }
 

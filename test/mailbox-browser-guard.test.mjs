@@ -90,12 +90,12 @@ test('state observation fails closed when a newer user turn supersedes the expec
   assert.equal(state.terminal, null)
 })
 
-test('interrupted substantive response is not terminal state evidence', async () => {
+test('interrupted substantive response is explicitly incomplete for continuation policy', async () => {
   const f = fixture({ bodyMode: 'substantive', interrupted: true })
   const state = await f.call({ type: 'conversation_state_observe', expectedUserMessageId: 'u1' })
   assert.equal(state.readable, true)
   assert.equal(state.generating, false)
-  assert.equal(state.body, 'substantive')
+  assert.equal(state.body, 'incomplete')
   assert.equal(state.terminal, false)
 })
 

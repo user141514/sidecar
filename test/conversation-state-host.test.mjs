@@ -69,11 +69,16 @@ test('ordinary read reconciles stale generating ledger through authoritative sta
   assert.equal(result.latestResponse, 'READ RESULT')
 })
 
-test('ordinary read durably exposes blocked incomplete state as need_continue', async t => {
+test('ordinary read durably exposes blocked incomplete state as need_continue and notifies terminal listeners', async t => {
   const { host, conversation } = await fixture(t, browser())
+  let terminal = null
+  host.onTerminal(conversation.id, async event => { terminal = event })
   const result = await host.read(conversation.id)
   assert.equal(result.status, 'need_continue')
   assert.equal(result.latestResponse, 'partial')
+  assert.equal(terminal?.type, 'need_continue')
+  assert.equal(terminal?.turnId, 'turn-1')
+  assert.equal(terminal?.reason, 'assistant_body_incomplete')
 })
 
 test('human gate vetoes legacy completion even when terminal body is substantive', async t => {

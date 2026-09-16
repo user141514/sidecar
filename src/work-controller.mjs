@@ -510,6 +510,13 @@ export class WorkController {
         if (conversation.status === 'error') conversation = await this.conversationHost.read(frontier.conversationId)
       }
       if (frontier.status === 'error' && conversation.status !== 'completed') continue
+      if (frontier.turnId && conversation.latestTurnId !== frontier.turnId &&
+          !(frontier.watchdog === true && isWatchdogContinuation(conversation, frontier.turnId))) continue
+      if (frontier.watchdog === true && conversation.status === 'need_continue') {
+        if (!this.watchdog || !conversation.externalUrl) continue
+        try { await this.watchdog.register(conversation.externalUrl) } catch {}
+        continue
+      }
       if (conversation.status !== 'completed' && conversation.status !== 'error') continue
       if (conversation.status === 'completed') {
         const authoritativeComplete =
@@ -529,9 +536,6 @@ export class WorkController {
           !(authoritative?.progress === 'terminal' && authoritative?.body === 'substantive')
         if (!authoritativeErrorCompatible) continue
       }
-      if (frontier.turnId && conversation.latestTurnId !== frontier.turnId &&
-          !(frontier.watchdog === true && isWatchdogContinuation(conversation, frontier.turnId))) continue
-
       let watchdogCompletion = null
       if (frontier.watchdog === true && conversation.status === 'completed') {
         if (!this.watchdog || !conversation.externalUrl) continue

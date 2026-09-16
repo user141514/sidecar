@@ -488,6 +488,8 @@ test('need_continue extension events are durably recorded before acknowledgement
   const store = new MemoryStore()
   const host = new ChatGptConversationHost({ bridge, store })
   const created = await host.create()
+  let terminal = null
+  host.onTerminal(created.id, async value => { terminal = value })
   const event = {
     eventId: 'terminal:conv_test:turn_need:need_continue',
     type: 'need_continue',
@@ -504,6 +506,8 @@ test('need_continue extension events are durably recorded before acknowledgement
   const recorded = store.events.find((item) => item.type === 'need_continue' && item.turnId === 'turn_need')
   assert.equal(recorded?.text, 'partial shell')
   assert.equal(recorded?.reason, 'assistant_body_incomplete')
+  assert.equal(terminal?.type, 'need_continue')
+  assert.equal(terminal?.turnId, 'turn_need')
   assert.deepEqual(bridge.ackedEvents, [event.eventId])
 })
 
