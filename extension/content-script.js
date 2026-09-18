@@ -219,6 +219,11 @@ function webGptStrengthFromNode(node) {
   return canonicalWebGptStrength(elementLabel(node))
 }
 
+function isWebGptPickerOption(node) {
+  const role = String(node?.getAttribute?.('role') ?? '').toLowerCase()
+  return role === 'menuitem' || role === 'menuitemradio' || role === 'option' || role === 'radio'
+}
+
 function webGptStrengthControlCandidates() {
   const seen = new Set()
   const out = []
@@ -234,7 +239,7 @@ function webGptStrengthControlCandidates() {
 
 function findWebGptStrengthControl() {
   return webGptStrengthControlCandidates().find((control) => {
-    if (control.disabled) return false
+    if (control.disabled || isWebGptPickerOption(control)) return false
     const label = elementLabel(control).toLowerCase()
     if (label.includes('switch model') || label.includes('切换模型')) return false
     return label.includes('reasoning') ||
@@ -250,7 +255,7 @@ function webGptModelModeFromNode(node) {
 
 function findWebGptModelControl() {
   return webGptStrengthControlCandidates().find((control) => {
-    if (control.disabled) return false
+    if (control.disabled || isWebGptPickerOption(control)) return false
     const label = elementLabel(control).toLowerCase()
     return label.includes('switch model') ||
       label.includes('切换模型') ||

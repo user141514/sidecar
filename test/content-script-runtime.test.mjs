@@ -782,7 +782,7 @@ test('webgpt shift probe normalizes Pro model mode to Thinking before selecting 
     title: 'ChatGPT',
     querySelector() { return null },
     querySelectorAll(selector) {
-      if (selector === 'button') return [modelButton]
+      if (selector === 'button') return [modelButton, high]
       if (selector === '.__composer-pill') return modelMode === 'Thinking' ? [strengthButton] : []
       if (selector.includes('[role="button"]') || selector.includes('[aria-haspopup]') || selector.includes('[aria-controls]')) {
         return [modelButton, ...(modelMode === 'Thinking' ? [strengthButton] : [])]
