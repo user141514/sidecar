@@ -180,6 +180,29 @@ const WEBGPT_STRENGTH_OFFSET = new Map([
   ['High', 2],
   ['Extra High', 3]
 ])
+const WEBGPT_MODEL_MODE_ALIASES = [
+  { mode: 'Thinking', aliases: ['thinking', '思考'] },
+  { mode: 'Instant', aliases: ['instant', '即时'] },
+  { mode: 'Pro', aliases: ['pro'] }
+]
+
+function canonicalWebGptModelMode(value) {
+  const label = String(value ?? '').trim().toLowerCase()
+  for (const entry of WEBGPT_MODEL_MODE_ALIASES) {
+    for (const alias of entry.aliases) {
+      const target = alias.toLowerCase()
+      if (
+        label === target ||
+        label.startsWith(`${target} `) ||
+        label.startsWith(`${target}·`) ||
+        label.startsWith(`${target} ·`) ||
+        label.endsWith(` ${target}`) ||
+        label.includes(` ${target} `)
+      ) return entry.mode
+    }
+  }
+  return null
+}
 
 function canonicalWebGptStrength(value) {
   const label = String(value ?? '').trim().toLowerCase()
@@ -213,12 +236,65 @@ function findWebGptStrengthControl() {
   return webGptStrengthControlCandidates().find((control) => {
     if (control.disabled) return false
     const label = elementLabel(control).toLowerCase()
-    return label.includes('thinking') ||
-      label.includes('reasoning') ||
+    if (label.includes('switch model') || label.includes('切换模型')) return false
+    return label.includes('reasoning') ||
       label.includes('思考强度') ||
       label.includes('推理强度') ||
       Boolean(webGptStrengthFromNode(control))
   }) || null
+}
+
+function webGptModelModeFromNode(node) {
+  return canonicalWebGptModelMode(elementLabel(node))
+}
+
+function findWebGptModelControl() {
+  return webGptStrengthControlCandidates().find((control) => {
+    if (control.disabled) return false
+    const label = elementLabel(control).toLowerCase()
+    return label.includes('switch model') ||
+      label.includes('切换模型') ||
+      Boolean(webGptModelModeFromNode(control))
+  }) || null
+}
+
+function webGptModelOptionCandidates(control) {
+  const popupId = control?.getAttribute?.('aria-controls')
+  const popup = popupId && typeof document.getElementById === 'function'
+    ? document.getElementById(popupId)
+    : null
+  const popupCandidates = popup?.querySelectorAll ? [...popup.querySelectorAll('*')] : []
+  return popupCandidates.length ? popupCandidates : appMenuCandidates()
+}
+
+function findWebGptModelOption(target, control) {
+  return webGptModelOptionCandidates(control)
+    .find((node) => !node.disabled && webGptModelModeFromNode(node) === target) || null
+}
+
+async function ensureWebGptModelMode(target) {
+  const control = findWebGptModelControl()
+  if (!control) throw new Error('ChatGPT model control was not found')
+  const before = webGptModelModeFromNode(control) || elementLabel(control)
+  if (before === target) return { before, after: target }
+
+  openWebGptStrengthControl(control)
+  let option = null
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    option = findWebGptModelOption(target, control)
+    if (option) break
+    await yieldWebGptUi()
+  }
+  if (!option) throw new Error(`ChatGPT model option was not found: ${target}`)
+  option.click()
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const afterControl = findWebGptModelControl()
+    const after = afterControl ? webGptModelModeFromNode(afterControl) : null
+    if (after === target) return { before, after }
+    await yieldWebGptUi()
+  }
+  throw new Error(`ChatGPT model control did not read back target: ${target}`)
 }
 
 async function yieldWebGptUi() {
@@ -349,7 +425,21 @@ async function runWebGptShiftTest(target) {
   if (typeof target !== 'string' || !target.trim()) throw new Error('WebGPT shift target is required')
   const wanted = canonicalWebGptStrength(target)
   if (!wanted) throw new Error(`Unsupported WebGPT shift target: ${target}`)
-  const control = await waitForWebGptStrengthControl()
+
+  let control = await waitForWebGptStrengthControl()
+  let before = null
+  if (!control) {
+    const modelControl = findWebGptModelControl()
+    if (modelControl) {
+      before = webGptModelModeFromNode(modelControl) || elementLabel(modelControl)
+      if (wanted === 'Instant') {
+        await ensureWebGptModelMode('Instant')
+        return { switched: true, before, after: 'Instant' }
+      }
+      await ensureWebGptModelMode('Thinking')
+      control = await waitForWebGptStrengthControl()
+    }
+  }
   if (!control) {
     const candidates = webGptStrengthControlCandidates()
       .map(elementLabel)
@@ -357,7 +447,7 @@ async function runWebGptShiftTest(target) {
       .slice(-20)
     throw new Error(`WebGPT thinking control was not found; candidates=${JSON.stringify(candidates)}`)
   }
-  const before = webGptStrengthFromNode(control) || elementLabel(control)
+  before ??= webGptStrengthFromNode(control) || elementLabel(control)
   openWebGptStrengthControl(control)
 
   let option = null

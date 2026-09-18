@@ -41,6 +41,8 @@ class FakeHost {
   constructor() {
     this.created = []
     this.sent = []
+    this.shifts = []
+    this.shiftResult = null
     this.states = new Map()
     this.authoritativeStates = new Map()
     this.terminalListeners = new Map()
@@ -55,7 +57,19 @@ class FakeHost {
 
   async create(options = {}) {
     this.created.push(options)
-    return { id: `conv_${this.created.length}`, status: 'idle' }
+    const index = this.created.length
+    return {
+      id: `conv_${index}`,
+      status: 'idle',
+      tabId: 100 + index,
+      externalUrl: `${managedProjectUrl}/c/conv_${index}`
+    }
+  }
+
+  async shiftTest(target, targetUrl = null, targetTabId = null) {
+    this.shifts.push({ target, targetUrl, targetTabId })
+    if (this.shiftResult instanceof Error) throw this.shiftResult
+    return this.shiftResult ?? { switched: true, before: 'Pro', after: target, tabId: targetTabId }
   }
 
   async send(id, text, options = {}) {
@@ -338,6 +352,7 @@ test('WorkController dispatch creates managed workers inside the configured suba
   assert.equal(dispatched.worker_kind, 'conversation_worker')
   assert.equal(dispatched.backend, 'sidecar')
   assert.deepEqual(host.created, [{ projectUrl: managedProjectUrl }])
+  assert.deepEqual(host.shifts, [{ target: 'High', targetUrl: null, targetTabId: 101 }])
   const dispatchEvents = ledger.events.filter((event) => event.type === 'worker_dispatched')
   assert.equal(dispatchEvents.length, 2)
   assert.ok(dispatchEvents.every((event) => event.payload.worker_kind === 'conversation_worker'))
@@ -345,6 +360,71 @@ test('WorkController dispatch creates managed workers inside the configured suba
   const state = await controller.state('work_test')
   assert.equal(state.frontiers[0].worker_kind, 'conversation_worker')
   assert.equal(state.frontiers[0].backend, 'sidecar')
+})
+
+test('WorkController allows an explicit managed worker strength override', async () => {
+  const { WorkController } = await loadModule()
+  assert.equal(typeof WorkController, 'function')
+  if (typeof WorkController !== 'function') return
+
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    {
+      at: '2026-09-03T08:01:00.000Z',
+      type: 'decision',
+      payload: {
+        action: 'SPLIT',
+        reason: 'one managed frontier',
+        frontiers: [{ id: 'f1', task: 'inspect recovery', depends_on: [] }]
+      }
+    }
+  ])
+  const host = new FakeHost()
+  const controller = new WorkController({
+    ledger,
+    conversationHost: host,
+    managedProjectUrl,
+    workerStrength: 'Medium',
+    now: () => FakeLedger.now
+  })
+
+  const dispatched = await controller.dispatch('work_test', 'f1')
+  assert.equal(dispatched.dispatched, true)
+  assert.deepEqual(host.shifts, [{ target: 'Medium', targetUrl: null, targetTabId: 101 }])
+})
+
+test('WorkController refuses to send a worker prompt when strength normalization fails', async () => {
+  const { WorkController } = await loadModule()
+  assert.equal(typeof WorkController, 'function')
+  if (typeof WorkController !== 'function') return
+
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    {
+      at: '2026-09-03T08:01:00.000Z',
+      type: 'decision',
+      payload: {
+        action: 'SPLIT',
+        reason: 'one managed frontier',
+        frontiers: [{ id: 'f1', task: 'inspect recovery', depends_on: [] }]
+      }
+    }
+  ])
+  const host = new FakeHost()
+  host.shiftResult = { switched: true, before: 'Pro', after: 'Extra High', tabId: 101 }
+  const controller = new WorkController({
+    ledger,
+    conversationHost: host,
+    managedProjectUrl,
+    now: () => FakeLedger.now
+  })
+
+  await assert.rejects(
+    controller.dispatch('work_test', 'f1'),
+    /worker strength normalization failed/i
+  )
+  assert.equal(host.sent.length, 0)
+  assert.deepEqual(host.shifts, [{ target: 'High', targetUrl: null, targetTabId: 101 }])
 })
 
 test('WorkController refuses managed dispatch before Project identity is resolved', async () => {

@@ -3,6 +3,20 @@ const ORCHESTRATION_MODES = new Set(['EXPLORE', 'EXECUTE', 'ADVERSARIAL', 'SYNTH
 const MIN_DISPATCH_INTERVAL_MS = 120_000
 const WORKER_KIND = 'conversation_worker'
 const WORKER_BACKEND = 'sidecar'
+const DEFAULT_WORKER_STRENGTH = 'High'
+const WORKER_STRENGTHS = new Map([
+  ['instant', 'Instant'],
+  ['medium', 'Medium'],
+  ['high', 'High'],
+  ['extra high', 'Extra High']
+])
+
+function normalizeWorkerStrength(value = DEFAULT_WORKER_STRENGTH) {
+  if (typeof value !== 'string' || !value.trim()) throw new TypeError('workerStrength must be a non-empty string')
+  const normalized = WORKER_STRENGTHS.get(value.trim().toLowerCase())
+  if (!normalized) throw new TypeError(`unsupported workerStrength: ${value}`)
+  return normalized
+}
 
 function requireString(value, message) {
   if (typeof value !== 'string' || !value.trim()) throw new TypeError(message)
@@ -286,13 +300,14 @@ function isWatchdogContinuation(conversation, ancestorTurnId) {
 }
 
 export class WorkController {
-  constructor({ ledger, conversationHost, managedProjectUrl = null, watchdog = null, now = () => Date.now(), minDispatchIntervalMs = MIN_DISPATCH_INTERVAL_MS }) {
+  constructor({ ledger, conversationHost, managedProjectUrl = null, watchdog = null, now = () => Date.now(), minDispatchIntervalMs = MIN_DISPATCH_INTERVAL_MS, workerStrength = DEFAULT_WORKER_STRENGTH }) {
     this.ledger = ledger
     this.conversationHost = conversationHost
     this.managedProjectUrl = normalizeManagedProjectUrl(managedProjectUrl)
     this.watchdog = watchdog
     this.now = now
     this.minDispatchIntervalMs = minDispatchIntervalMs
+    this.workerStrength = normalizeWorkerStrength(workerStrength)
     this.lastDispatchAt = null
     this.decisionQueue = Promise.resolve()
     this.dispatchQueue = Promise.resolve()
@@ -430,6 +445,21 @@ export class WorkController {
     }
 
     try {
+      if (!Number.isInteger(conversation.tabId)) {
+        throw new Error('worker strength normalization failed: allocated child tabId is unavailable')
+      }
+      if (typeof this.conversationHost.shiftTest !== 'function') {
+        throw new Error('worker strength normalization failed: strength control is unavailable')
+      }
+      const shifted = await this.conversationHost.shiftTest(this.workerStrength, null, conversation.tabId)
+      if (
+        shifted?.switched !== true ||
+        shifted?.after !== this.workerStrength ||
+        shifted?.tabId !== conversation.tabId
+      ) {
+        throw new Error(`worker strength normalization failed: expected ${this.workerStrength}`)
+      }
+
       this.lastDispatchAt = this.now()
       const sent = await this.conversationHost.send(conversation.id, workerPrompt(frontier, state), { preAdmitted })
       await this.ledger.append(workId, 'worker_dispatched', {

@@ -730,6 +730,102 @@ test('webgpt shift probe waits for a semantic strength control rendered as role 
   assert.ok(controlQueries >= 3)
 })
 
+test('webgpt shift probe normalizes Pro model mode to Thinking before selecting High effort', async () => {
+  let modelMode = 'Pro'
+  let modelMenuOpen = false
+  let strengthMenuOpen = false
+  let strength = 'Medium'
+
+  const modelButton = {
+    disabled: false,
+    className: 'model-selector',
+    get textContent() { return modelMode },
+    getAttribute(name) {
+      if (name === 'aria-label') return `${modelMode} · Switch model`
+      if (name === 'aria-haspopup') return 'menu'
+      return null
+    },
+    click() { modelMenuOpen = true }
+  }
+  const thinking = {
+    disabled: false,
+    textContent: 'Thinking',
+    getAttribute(name) {
+      if (name === 'role') return 'menuitemradio'
+      if (name === 'aria-label') return 'Thinking'
+      return null
+    },
+    click() { modelMode = 'Thinking'; modelMenuOpen = false }
+  }
+  const strengthButton = {
+    disabled: false,
+    className: '__composer-pill',
+    get textContent() { return strength },
+    getAttribute(name) {
+      if (name === 'aria-label') return strength
+      if (name === 'class') return this.className
+      return null
+    },
+    click() { strengthMenuOpen = true }
+  }
+  const high = {
+    disabled: false,
+    textContent: 'High',
+    getAttribute(name) {
+      if (name === 'role') return 'menuitemradio'
+      if (name === 'aria-label') return 'High'
+      return null
+    },
+    click() { strength = 'High'; strengthMenuOpen = false }
+  }
+  const document = {
+    title: 'ChatGPT',
+    querySelector() { return null },
+    querySelectorAll(selector) {
+      if (selector === 'button') return [modelButton]
+      if (selector === '.__composer-pill') return modelMode === 'Thinking' ? [strengthButton] : []
+      if (selector.includes('[role="button"]') || selector.includes('[aria-haspopup]') || selector.includes('[aria-controls]')) {
+        return [modelButton, ...(modelMode === 'Thinking' ? [strengthButton] : [])]
+      }
+      if (selector.includes('[role="menuitem"]') || selector.includes('[role="option"]')) {
+        if (modelMenuOpen) return [thinking]
+        if (strengthMenuOpen) return [high]
+        return []
+      }
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      if (selector === '[data-message-author-role="user"]') return []
+      return []
+    },
+    execCommand() { return true }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/c/profile-test#webgpt-shift-test=High', hash: '#webgpt-shift-test=High' },
+    chrome: { runtime: { sendMessage: async () => null, onMessage: { addListener() {}, removeListener() {} } } },
+    HTMLTextAreaElement: class {},
+    HTMLInputElement: class {},
+    InputEvent: class {},
+    Date,
+    Promise,
+    Object,
+    URL,
+    console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+  for (let attempt = 0; attempt < 20 && !document.title.startsWith('WEBGPT_SHIFT_'); attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  assert.equal(document.title, 'WEBGPT_SHIFT_OK|Pro|High')
+  assert.equal(modelMode, 'Thinking')
+  assert.equal(strength, 'High')
+})
+
 test('webgpt shift probe accepts a localized class-only composer pill as the strength control', async () => {
   let pickerOpen = false
   let selected = '极高'

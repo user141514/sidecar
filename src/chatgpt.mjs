@@ -142,12 +142,14 @@ export class ChatGptConversationHost {
     return { projectUrl: normalized }
   }
 
-  async shiftTest(target, targetUrl = null) {
+  async shiftTest(target, targetUrl = null, targetTabId = null) {
     if (typeof target !== 'string' || !target.trim()) throw new Error('WebGPT shift target is required')
     if (targetUrl !== null && (typeof targetUrl !== 'string' || !targetUrl.trim())) throw new Error('WebGPT shift target URL is invalid')
+    if (targetTabId !== null && !Number.isInteger(targetTabId)) throw new Error('WebGPT shift target tab id is invalid')
     return this.bridge.request('webgpt_shift_test', {
       target: target.trim(),
       ...(targetUrl ? { target_url: targetUrl.trim() } : {}),
+      ...(Number.isInteger(targetTabId) ? { target_tab_id: targetTabId } : {}),
       writerEpoch: this.writer.epoch
     })
   }

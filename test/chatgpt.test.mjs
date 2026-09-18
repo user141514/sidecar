@@ -117,6 +117,20 @@ test('webgpt shift probe forwards the target to the browser bridge', async () =>
   assert.equal(bridge.requests[0].params.target, 'Extra High')
 })
 
+test('webgpt shift probe forwards an exact allocated child tab id to the browser bridge', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  assert.equal(typeof ChatGptConversationHost, 'function')
+  if (typeof ChatGptConversationHost !== 'function') return
+
+  const bridge = new FakeBridge()
+  const host = new ChatGptConversationHost({ bridge, store: new MemoryStore() })
+  await host.shiftTest('High', null, 202)
+
+  assert.equal(bridge.requests[0].method, 'webgpt_shift_test')
+  assert.equal(bridge.requests[0].params.target, 'High')
+  assert.equal(bridge.requests[0].params.target_tab_id, 202)
+})
+
 test('webgpt shift probe forwards an exact conversation URL to the browser bridge', async () => {
   const { ChatGptConversationHost } = await loadChatGptModule()
   assert.equal(typeof ChatGptConversationHost, 'function')

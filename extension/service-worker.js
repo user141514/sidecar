@@ -1030,10 +1030,15 @@ async function webGptShiftTest(params) {
   const eligible = managedCandidates.length ? managedCandidates : candidates
   const targetUrl = params.target_url ? stableConversationUrl(params.target_url) : null
   if (params.target_url && !targetUrl) throw new Error('WebGPT shift target_url must be a ChatGPT conversation URL')
-  const tab = targetUrl
-    ? eligible.find((candidate) => pageIdentity(stableConversationUrl(tabPageUrl(candidate))) === pageIdentity(targetUrl))
-    : (eligible.find((candidate) => candidate.active) || eligible[0])
+  const targetTabId = params.target_tab_id === undefined ? null : Number(params.target_tab_id)
+  if (targetTabId !== null && !Number.isInteger(targetTabId)) throw new Error('WebGPT shift target_tab_id must be an integer')
+  const tab = targetTabId !== null
+    ? eligible.find((candidate) => candidate.id === targetTabId)
+    : targetUrl
+      ? eligible.find((candidate) => pageIdentity(stableConversationUrl(tabPageUrl(candidate))) === pageIdentity(targetUrl))
+      : (eligible.find((candidate) => candidate.active) || eligible[0])
   if (!tab || !Number.isInteger(tab.id)) {
+    if (targetTabId !== null) throw new Error('No matching ChatGPT tab was found for target_tab_id')
     throw new Error(targetUrl ? 'No matching ChatGPT conversation tab was found' : 'No existing ChatGPT tab was found')
   }
   let result
