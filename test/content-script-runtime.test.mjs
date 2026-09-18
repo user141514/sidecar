@@ -839,8 +839,8 @@ test('webgpt shift probe accepts a localized class-only composer pill as the str
       if (name === 'class') return this.className
       return null
     },
-    dispatchEvent() { pointerDowns += 1; return true },
-    click() { pickerOpen = true }
+    dispatchEvent() { pointerDowns += 1; pickerOpen = true; return true },
+    click() {}
   }
   const high = {
     disabled: false,
@@ -891,7 +891,7 @@ test('webgpt shift probe accepts a localized class-only composer pill as the str
   }
 
   assert.equal(document.title, 'WEBGPT_SHIFT_OK|Extra High|High')
-  assert.equal(pointerDowns, 0)
+  assert.equal(pointerDowns, 1)
 })
 
 test('project_find returns the canonical Project URL from the current sidebar without clicking', async () => {

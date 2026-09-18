@@ -283,7 +283,7 @@ async function ensureWebGptModelMode(target) {
   const before = webGptModelModeFromNode(control) || elementLabel(control)
   if (before === target) return { before, after: target }
 
-  openWebGptStrengthControl(control)
+  await openWebGptStrengthControl(control, () => Boolean(findWebGptModelOption(target, control)))
   let option = null
   for (let attempt = 0; attempt < 20; attempt += 1) {
     option = findWebGptModelOption(target, control)
@@ -406,14 +406,12 @@ async function driveWebGptStrengthSlider(slider, wanted) {
   return currentIndex === targetIndex
 }
 
-function openWebGptStrengthControl(control) {
-  const className = typeof control?.className === 'string'
-    ? control.className
-    : control?.getAttribute?.('class') || ''
-  if (className.includes('__composer-pill')) {
-    control.click()
-    return
-  }
+function webGptControlOpenState(control) {
+  return control?.getAttribute?.('data-state') === 'open' ||
+    control?.getAttribute?.('aria-expanded') === 'true'
+}
+
+async function openWebGptStrengthControl(control, ready = () => false) {
   if (typeof PointerEvent === 'function' && typeof control?.dispatchEvent === 'function') {
     control.dispatchEvent(new PointerEvent('pointerdown', {
       bubbles: true,
@@ -421,9 +419,14 @@ function openWebGptStrengthControl(control) {
       pointerType: 'mouse',
       isPrimary: true
     }))
-    return
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await yieldWebGptUi()
+      if (webGptControlOpenState(control) || ready()) return
+    }
   }
+
   control.click()
+  await yieldWebGptUi()
 }
 
 async function runWebGptShiftTest(target) {
@@ -453,7 +456,10 @@ async function runWebGptShiftTest(target) {
     throw new Error(`WebGPT thinking control was not found; candidates=${JSON.stringify(candidates)}`)
   }
   before ??= webGptStrengthFromNode(control) || elementLabel(control)
-  openWebGptStrengthControl(control)
+  await openWebGptStrengthControl(
+    control,
+    () => Boolean(findWebGptStrengthOption(wanted, control) || findWebGptStrengthSlider(control))
+  )
 
   let option = null
   let slider = null
