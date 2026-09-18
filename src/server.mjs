@@ -687,9 +687,10 @@ async function startDefault() {
   bridge.on('error', (error) => console.error(error instanceof Error ? error.stack : String(error)))
 
   const dataRoot = process.env.SIDECAR_DATA_ROOT ?? null
-  const writerLease = await runtimeWriterLease(dataRoot)
+  let writerLease = null
   let app
   try {
+    writerLease = await runtimeWriterLease(dataRoot)
     await claimExtensionWriterEpoch(bridge, writerLease.epoch)
     const components = createRuntimeComponents({ bridge, dataRoot, writerEpoch: writerLease.epoch })
     app = createSidecarServer({
@@ -701,7 +702,8 @@ async function startDefault() {
     const address = await app.listen({ host, port })
     console.error(JSON.stringify({ ok: true, service: 'conversation-sidecar', host: address.address, port: address.port, mcp: '/mcp' }))
   } catch (error) {
-    await writerLease.release().catch(() => {})
+    await writerLease?.release().catch(() => {})
+    channel.close()
     throw error
   }
 

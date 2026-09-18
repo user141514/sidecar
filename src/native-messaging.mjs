@@ -75,6 +75,7 @@ export class NativeMessageChannel extends EventEmitter {
     this.input.off('data', this.onData)
     this.input.off('end', this.onEnd)
     this.input.off('error', this.onInputError)
+    this.input.pause?.()
     this.emit('close')
   }
 }

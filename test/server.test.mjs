@@ -1,9 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { WorkLedger } from '../src/work-ledger.mjs'
 import { MemoryPool } from '../src/memory-pool.mjs'
 
@@ -708,6 +710,43 @@ test('runtime writer lease is claimed only from the stable data root', async () 
   assert.equal(durable.epoch, 12)
   assert.equal(durable.release, release)
   assert.deepEqual(calls, [join(dataRoot, 'writer-authority.json')])
+})
+
+test('runtime startup exits when a live writer lease blocks acquisition instead of leaving a native-host zombie', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'conversation-sidecar-writer-busy-'))
+  const statePath = join(root, 'writer-authority.json')
+  const lock = `${statePath}.lock`
+  await writeFile(statePath, `${JSON.stringify({ version: 1, epoch: 7 })}\n`)
+  await mkdir(lock)
+  await writeFile(join(lock, 'owner.json'), `${JSON.stringify({ pid: process.pid, ownerId: 'live-test-owner' })}\n`)
+
+  const serverPath = fileURLToPath(new URL('../src/server.mjs', import.meta.url))
+  const child = spawn(process.execPath, [serverPath], {
+    env: {
+      ...process.env,
+      SIDECAR_DATA_ROOT: root,
+      SIDECAR_HOST: '127.0.0.1',
+      SIDECAR_PORT: '0'
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true
+  })
+
+  try {
+    const outcome = await Promise.race([
+      new Promise((resolve) => child.once('exit', (code, signal) => resolve({ exited: true, code, signal }))),
+      new Promise((resolve) => setTimeout(() => resolve({ exited: false }), 1_200))
+    ])
+    if (!outcome.exited) child.kill('SIGKILL')
+    assert.equal(outcome.exited, true)
+    assert.notEqual(outcome.code, 0)
+  } finally {
+    child.stdin?.destroy()
+    child.stdout?.destroy()
+    child.stderr?.destroy()
+    if (child.exitCode === null) child.kill('SIGKILL')
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('runtime browser writer epoch claim is explicit and fail-closed', async () => {
