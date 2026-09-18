@@ -1049,7 +1049,11 @@ async function webGptShiftTest(params) {
     const detail = diagnostic ? `; diagnostic=${JSON.stringify(diagnostic)}` : ''
     throw new Error(`${error instanceof Error ? error.message : String(error)}${detail}`)
   }
-  if (result?.switched !== true) throw new Error(result?.error || 'WebGPT shift probe failed')
+  if (result?.switched !== true) {
+    const diagnostic = await webGptStrengthDomDiagnostic(tab.id)
+    const detail = diagnostic ? `; diagnostic=${JSON.stringify(diagnostic)}` : ''
+    throw new Error(`${result?.error || 'WebGPT shift probe failed'}${detail}`)
+  }
   return { ...result, tabId: tab.id, url: tabPageUrl(tab) }
 }
 
