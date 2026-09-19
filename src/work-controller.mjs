@@ -300,11 +300,10 @@ function isWatchdogContinuation(conversation, ancestorTurnId) {
 }
 
 export class WorkController {
-  constructor({ ledger, conversationHost, managedProjectUrl = null, watchdog = null, now = () => Date.now(), minDispatchIntervalMs = MIN_DISPATCH_INTERVAL_MS, workerStrength = DEFAULT_WORKER_STRENGTH }) {
+  constructor({ ledger, conversationHost, managedProjectUrl = null, now = () => Date.now(), minDispatchIntervalMs = MIN_DISPATCH_INTERVAL_MS, workerStrength = DEFAULT_WORKER_STRENGTH }) {
     this.ledger = ledger
     this.conversationHost = conversationHost
     this.managedProjectUrl = normalizeManagedProjectUrl(managedProjectUrl)
-    this.watchdog = watchdog
     this.now = now
     this.minDispatchIntervalMs = minDispatchIntervalMs
     this.workerStrength = normalizeWorkerStrength(workerStrength)
@@ -432,18 +431,6 @@ export class WorkController {
       phase: 'allocated'
     })
 
-    let removeTerminalListener = null
-    if (
-      frontier.watchdog === true &&
-      this.watchdog &&
-      typeof this.conversationHost.onTerminal === 'function'
-    ) {
-      removeTerminalListener = this.conversationHost.onTerminal(conversation.id, async (event) => {
-        if (typeof event?.externalUrl !== 'string' || !event.externalUrl) return
-        await this.watchdog.register(event.externalUrl)
-      })
-    }
-
     try {
       if (!Number.isInteger(conversation.tabId)) {
         throw new Error('worker strength normalization failed: allocated child tabId is unavailable')
@@ -481,7 +468,6 @@ export class WorkController {
         accepted: sent.accepted === true
       }
     } catch (error) {
-      if (error?.code !== 'DELIVERY_UNCERTAIN') removeTerminalListener?.()
       if (error?.code === 'DELIVERY_UNCERTAIN') {
         await this.ledger.append(workId, 'worker_dispatched', {
           frontierId,
@@ -542,11 +528,7 @@ export class WorkController {
       if (frontier.status === 'error' && conversation.status !== 'completed') continue
       if (frontier.turnId && conversation.latestTurnId !== frontier.turnId &&
           !(frontier.watchdog === true && isWatchdogContinuation(conversation, frontier.turnId))) continue
-      if (frontier.watchdog === true && conversation.status === 'need_continue') {
-        if (!this.watchdog || !conversation.externalUrl) continue
-        try { await this.watchdog.register(conversation.externalUrl) } catch {}
-        continue
-      }
+      if (conversation.status === 'need_continue') continue
       if (conversation.status !== 'completed' && conversation.status !== 'error') continue
       if (conversation.status === 'completed') {
         const authoritativeComplete =
@@ -566,20 +548,6 @@ export class WorkController {
           !(authoritative?.progress === 'terminal' && authoritative?.body === 'substantive')
         if (!authoritativeErrorCompatible) continue
       }
-      let watchdogCompletion = null
-      if (frontier.watchdog === true && conversation.status === 'completed') {
-        if (!this.watchdog || !conversation.externalUrl) continue
-        try {
-          watchdogCompletion = await this.watchdog.completion(conversation.externalUrl)
-        } catch {}
-        if (watchdogCompletion?.active === true) continue
-        if (watchdogCompletion?.completed !== true) {
-          try { await this.watchdog.register(conversation.externalUrl) } catch {}
-          continue
-        }
-      }
-
-      const watchdogCompleted = watchdogCompletion?.completed === true
       if (typeof this.ledger.appendIfEventCount !== 'function') throw new Error('work ledger compare-and-append is required for collection')
       try {
         await this.ledger.appendIfEventCount(workId, expectedEventCount, 'worker_result', {
@@ -587,19 +555,14 @@ export class WorkController {
           conversationId: frontier.conversationId,
           worker_kind: WORKER_KIND,
           backend: WORKER_BACKEND,
-          outcome: watchdogCompleted ? 'completed' : conversation.status,
-          result: watchdogCompleted ? watchdogCompletion.result : (conversation.latestResponse ?? null),
-          error: watchdogCompleted ? null : (conversation.error ?? null)
+          outcome: conversation.status,
+          result: conversation.latestResponse ?? null,
+          error: conversation.error ?? null
         })
         expectedEventCount += 1
       } catch (error) {
         if (error?.code === 'WORK_STALE') break
         throw error
-      }
-      if (watchdogCompleted && conversation.externalUrl) {
-        try {
-          await this.watchdog.ackCompletion(conversation.externalUrl)
-        } catch {}
       }
       collected += 1
     }

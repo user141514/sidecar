@@ -1275,7 +1275,7 @@ test('collect repairs a historical error only when the same worker later complet
   assert.equal((await controller.collect('work_test')).collected, 0)
 })
 
-test('watchdog registration waits for the first terminal event carrying the exact conversation URL', async () => {
+test('managed child dispatch never registers the child conversation with external Watchdog', async () => {
   const { WorkController } = await loadModule()
   const ledger = new FakeLedger()
   const host = new FakeHost()
@@ -1296,10 +1296,10 @@ test('watchdog registration waits for the first terminal event carrying the exac
     type: 'response_completed',
     externalUrl: 'https://chatgpt.com/g/g-p-subagents-test/c/6aa-test-worker'
   })
-  assert.deepEqual(watchdog.registered, ['https://chatgpt.com/g/g-p-subagents-test/c/6aa-test-worker'])
+  assert.deepEqual(watchdog.registered, [])
 })
 
-test('collect re-registers a watchdog-required durable need_continue after runtime listener loss', async () => {
+test('collect leaves a child need_continue dispatched without registering external Watchdog', async () => {
   const { WorkController } = await loadModule()
   const url = 'https://chatgpt.com/c/6aa-need-continue-restart'
   const ledger = new FakeLedger([
@@ -1319,11 +1319,11 @@ test('collect re-registers a watchdog-required durable need_continue after runti
 
   assert.equal(result.collected, 0)
   assert.equal(result.state.frontiers[0].status, 'dispatched')
-  assert.deepEqual(watchdog.registered, [url])
+  assert.deepEqual(watchdog.registered, [])
   assert.equal(ledger.events.some(event => event.type === 'worker_result'), false)
 })
 
-test('collect re-registers a required watchdog after registry loss and does not fall back to phase-one completion', async () => {
+test('collect uses authoritative Sidecar completion without an external Watchdog completion gate', async () => {
   const { WorkController } = await loadModule()
   const ledger = new FakeLedger()
   const host = new FakeHost()
@@ -1341,19 +1341,16 @@ test('collect re-registers a required watchdog after registry loss and does not 
     id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'phase one only', externalUrl: url
   })
 
-  const afterRestart = await controller.collect('work_test')
-
-  assert.equal(afterRestart.collected, 0)
-  assert.equal(afterRestart.state.frontiers[0].status, 'dispatched')
-  assert.deepEqual(watchdog.registered, [url])
-
-  watchdog.completions.set(url, { active: false, completed: true, result: 'final after restart' })
   const collected = await controller.collect('work_test')
+
   assert.equal(collected.collected, 1)
-  assert.equal(collected.state.frontiers[0].result, 'final after restart')
+  assert.equal(collected.state.frontiers[0].status, 'completed')
+  assert.equal(collected.state.frontiers[0].result, 'phase one only')
+  assert.deepEqual(watchdog.registered, [])
+  assert.deepEqual(watchdog.acked, [])
 })
 
-test('required watchdog registration failure is fail-closed during collect', async () => {
+test('external Watchdog availability cannot block collection of a completed managed child', async () => {
   const { WorkController } = await loadModule()
   const ledger = new FakeLedger()
   const host = new FakeHost()
@@ -1369,17 +1366,18 @@ test('required watchdog registration failure is fail-closed during collect', asy
   })
   await controller.dispatch('work_test', 'f1')
   host.states.set('conv_1', {
-    id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'must not collect', externalUrl: url
+    id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'collect me', externalUrl: url
   })
 
   const result = await controller.collect('work_test')
 
-  assert.equal(result.collected, 0)
-  assert.equal(result.state.frontiers[0].status, 'dispatched')
-  assert.deepEqual(watchdog.registered, [url])
+  assert.equal(result.collected, 1)
+  assert.equal(result.state.frontiers[0].status, 'completed')
+  assert.equal(result.state.frontiers[0].result, 'collect me')
+  assert.deepEqual(watchdog.registered, [])
 })
 
-test('collect waits for watchdog completion and uses the final watchdog result', async () => {
+test('external Watchdog state does not override a completed managed child result', async () => {
   const { WorkController } = await loadModule()
   const ledger = new FakeLedger()
   const host = new FakeHost()
@@ -1396,17 +1394,12 @@ test('collect waits for watchdog completion and uses the final watchdog result',
   host.states.set('conv_1', {
     id: 'conv_1', status: 'completed', latestTurnId: 'turn_1', latestResponse: 'phase one only', externalUrl: url
   })
-  watchdog.completions.set(url, { active: true, completed: false, result: null })
+  watchdog.completions.set(url, { active: true, completed: false, result: 'ignore me' })
 
-  const premature = await controller.collect('work_test')
-  assert.equal(premature.collected, 0)
-  assert.equal(premature.state.frontiers[0].status, 'dispatched')
-
-  watchdog.completions.set(url, { active: false, completed: true, result: 'final watchdog result' })
   const collected = await controller.collect('work_test')
 
   assert.equal(collected.collected, 1)
   assert.equal(collected.state.frontiers[0].status, 'completed')
-  assert.equal(collected.state.frontiers[0].result, 'final watchdog result')
-  assert.deepEqual(watchdog.acked, [url])
+  assert.equal(collected.state.frontiers[0].result, 'phase one only')
+  assert.deepEqual(watchdog.acked, [])
 })

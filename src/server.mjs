@@ -9,7 +9,6 @@ import { ExtensionBridge, NativeMessageChannel } from './native-messaging.mjs'
 import { ConversationStore } from './store.mjs'
 import { WorkLedger } from './work-ledger.mjs'
 import { WorkController } from './work-controller.mjs'
-import { WatchdogClient } from './watchdog-client.mjs'
 import { MemoryPool } from './memory-pool.mjs'
 import { MemorySyncBridge } from './memory-sync-bridge.mjs'
 import { SendAdmission } from './send-admission.mjs'
@@ -669,8 +668,7 @@ export function createRuntimeComponents({
   const sendAdmission = new SendAdmission({ statePath: dataRoot ? join(dataRoot, 'send-admission.json') : defaultSendAdmissionPath })
   const conversationHost = new ChatGptConversationHost({ bridge, store, sendAdmission, managedProjectUrl, writerEpoch })
   const workLedger = new WorkLedger(dataRoot ? join(dataRoot, 'works') : defaultWorkRoot)
-  const watchdog = new WatchdogClient()
-  const workController = new WorkController({ ledger: workLedger, conversationHost, managedProjectUrl, watchdog })
+  const workController = new WorkController({ ledger: workLedger, conversationHost, managedProjectUrl })
   const memoryRoot = dataRoot ? join(dataRoot, 'memory') : defaultMemoryRoot
   const memorySyncBridge = providedMemorySyncBridge ?? new MemorySyncBridge({ memoryRoot, mymemRepo })
   const memoryPool = new MemoryPool({
