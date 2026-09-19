@@ -15,6 +15,7 @@ const OUTBOX_PREFIX = 'outbox:'
 const EFFECT_RECEIPT_PREFIX = 'effect-receipt:'
 const WRITER_AUTHORITY_KEY = 'writer:authority'
 const WINDOW0_KEY = 'window0'
+const AUTOMATION_WINDOW_SENTINEL = 'automation-window.html'
 
 let nativePort = null
 let reconnectTimer = null
@@ -347,31 +348,43 @@ async function clearWindow0() {
   await chrome.storage.local.remove(WINDOW0_KEY)
 }
 
-async function ensureWindow0(url) {
-  const stored = await loadWindow0()
-  if (typeof stored?.windowId === 'number') {
-    try {
-      await chrome.windows.get(stored.windowId)
-      return { windowId: stored.windowId, created: false, tab: null }
-    } catch {
-      await clearWindow0()
-    }
+function automationWindowSentinelUrl() {
+  return chrome.runtime.getURL(AUTOMATION_WINDOW_SENTINEL)
+}
+
+async function validOwnedWindow0(stored) {
+  if (!Number.isInteger(stored?.windowId) || !Number.isInteger(stored?.sentinelTabId)) return null
+  try {
+    await chrome.windows.get(stored.windowId)
+    const sentinel = await chrome.tabs.get(stored.sentinelTabId)
+    if (sentinel.windowId !== stored.windowId) return null
+    if (tabPageUrl(sentinel) !== automationWindowSentinelUrl()) return null
+    return { windowId: stored.windowId, sentinelTabId: stored.sentinelTabId }
+  } catch {
+    return null
   }
+}
+
+async function ensureWindow0() {
+  const stored = await loadWindow0()
+  const owned = await validOwnedWindow0(stored)
+  if (owned) return { ...owned, created: false }
+  if (stored) await clearWindow0()
 
   const window = await chrome.windows.create({
-    url,
+    url: automationWindowSentinelUrl(),
     type: 'normal',
     focused: false,
     state: 'minimized'
   })
-  const tab = window?.tabs?.[0]
-  if (!window || typeof window.id !== 'number' || !tab || typeof tab.id !== 'number') {
-    throw new Error('Chrome did not return window0 and its initial tab')
+  const sentinel = window?.tabs?.[0]
+  if (!window || typeof window.id !== 'number' || !sentinel || typeof sentinel.id !== 'number') {
+    throw new Error('Chrome did not return an owned automation window and sentinel tab')
   }
 
-  const window0 = { windowId: window.id }
+  const window0 = { windowId: window.id, sentinelTabId: sentinel.id }
   await saveWindow0(window0)
-  return { ...window0, created: true, tab }
+  return { ...window0, created: true }
 }
 
 async function findRegisteredLiveTab(state, expectedUrl) {
@@ -401,9 +414,10 @@ async function resolveConversationAttachment(conversationId, requestedUrl, exist
   }
   const stored = await loadConversation(conversationId)
   const expectedUrl = chooseConversationUrl(requestedUrl, stored?.url)
+  const window0 = await ensureWindow0()
   const liveTab = await findRegisteredLiveTab(stored, expectedUrl)
 
-  if (liveTab) {
+  if (liveTab && liveTab.windowId === window0.windowId) {
     const state = {
       windowId: liveTab.windowId,
       tabId: liveTab.id,
@@ -417,11 +431,8 @@ async function resolveConversationAttachment(conversationId, requestedUrl, exist
     }
   }
 
-  const window0 = await ensureWindow0(expectedUrl)
-  let tab = window0.created
-    ? window0.tab
-    : await findMatchingConversationTab(window0.windowId, expectedUrl)
-  const matchedExistingTab = !window0.created && Boolean(tab)
+  let tab = await findMatchingConversationTab(window0.windowId, expectedUrl)
+  const matchedExistingTab = Boolean(tab)
 
   if (!tab) {
     tab = await chrome.tabs.create({
@@ -627,10 +638,8 @@ async function createProject(params) {
   const name = typeof params.name === 'string' ? params.name.trim() : ''
   if (!name) throw new Error('Project name is required')
 
-  const window0 = await ensureWindow0(CHATGPT_URL)
-  const tab = window0.created
-    ? window0.tab
-    : await chrome.tabs.create({ windowId: window0.windowId, url: CHATGPT_URL, active: false })
+  const window0 = await ensureWindow0()
+  const tab = await chrome.tabs.create({ windowId: window0.windowId, url: CHATGPT_URL, active: false })
 
   if (!tab || typeof tab.id !== 'number') {
     throw new Error('Chrome did not return a tab for Project creation')
@@ -658,8 +667,9 @@ async function reuseAllocatedConversationAttachment(conversationId, requestedUrl
   const stored = await loadConversation(conversationId)
   if (!stored) return null
   const expectedUrl = chooseConversationUrl(stored.url, requestedUrl)
+  const window0 = await ensureWindow0()
   const liveTab = await findRegisteredLiveTab(stored, expectedUrl)
-  if (liveTab) {
+  if (liveTab && liveTab.windowId === window0.windowId) {
     const state = {
       windowId: liveTab.windowId,
       tabId: liveTab.id,
@@ -681,10 +691,8 @@ async function createConversation(params) {
   const projectUrl = projectHomeUrl(url)
   const projectSeedUrl = projectUrl ? await findProjectConversationSeedUrl(projectUrl) : null
   const initialUrl = projectUrl ? (projectSeedUrl || CHATGPT_URL) : url
-  const window0 = await ensureWindow0(initialUrl)
-  const tab = window0.created
-    ? window0.tab
-    : await chrome.tabs.create({ windowId: window0.windowId, url: initialUrl, active: Boolean(projectUrl) })
+  const window0 = await ensureWindow0()
+  const tab = await chrome.tabs.create({ windowId: window0.windowId, url: initialUrl, active: Boolean(projectUrl) })
 
   if (!tab || typeof tab.id !== 'number') {
     throw new Error('Chrome did not return a tab for the new conversation')

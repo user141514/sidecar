@@ -90,6 +90,9 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
       getManifest() {
         return { version: 'test' }
       },
+      getURL(path) {
+        return `chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/${path}`
+      },
       onMessage: {
         addListener(listener) {
           runtimeMessageListeners.push(listener)
@@ -365,8 +368,12 @@ test('Project slug redirect preserves the existing tab', async () => {
   const home = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
   const alias = home.replace('/project', '-subagents/project')
   const harness = makeHarness({
-    storage: { window0: { windowId: 10 }, 'conversation:conv_alias': { windowId: 10, tabId: 20, url: home } },
-    windows: [{ id: 10 }], tabs: [{ id: 20, windowId: 10, url: alias }]
+    storage: { window0: { windowId: 10, sentinelTabId: 19 }, 'conversation:conv_alias': { windowId: 10, tabId: 20, url: home } },
+    windows: [{ id: 10 }],
+    tabs: [
+      { id: 19, windowId: 10, url: 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html', active: true },
+      { id: 20, windowId: 10, url: alias }
+    ]
   })
   const result = await harness.request('conversation_send', { conversationId: 'conv_alias', turnId: 'turn_alias', text: 'hello', externalUrl: home })
   assert.equal(result.ok, true)
@@ -500,7 +507,8 @@ test('overlapping browser sends are rejected before touching a busy conversation
   release()
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(retry.ok, false)
-  assert.equal(harness.createdTabs.length + harness.createdWindows.length, 1)
+  assert.equal(harness.createdWindows.length, 1)
+  assert.equal(harness.createdTabs.length, 1)
   assert.equal(harness.sentToTabs.filter(x => x.message.type === 'conversation_prepare').length, 1)
 })
 
@@ -569,10 +577,63 @@ test('project_find scans existing ChatGPT tabs and returns a canonical matching 
   assert.equal(harness.createdWindows.length, 0)
 })
 
-test('project_create opens one root tab in window0 and returns its canonical Project URL', async () => {
+test('conversation_create rejects a legacy bare window0 and creates a new owned automation window', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-isolated-test/project'
   const harness = makeHarness({
     storage: { window0: { windowId: 10 } },
-    windows: [{ id: 10 }]
+    windows: [{ id: 10, focused: true, state: 'normal' }],
+    tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/c/human-current', active: true }]
+  })
+
+  const response = await harness.request('conversation_create', {
+    conversationId: 'conv_isolated',
+    url: projectUrl
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(harness.createdWindows.length, 1)
+  assert.equal(harness.createdWindows[0].focused, false)
+  assert.equal(harness.createdWindows[0].state, 'minimized')
+  assert.equal(
+    harness.createdWindows[0].tabs[0].url,
+    'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html'
+  )
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.createdTabs[0].windowId, harness.createdWindows[0].id)
+  assert.notEqual(harness.createdTabs[0].windowId, 10)
+  assert.equal(harness.createdTabs[0].active, true)
+  assert.equal(harness.storageState.window0.windowId, harness.createdWindows[0].id)
+  assert.equal(harness.storageState.window0.sentinelTabId, harness.createdWindows[0].tabs[0].id)
+})
+
+test('conversation_create reuses only a window0 with a valid Sidecar sentinel', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-owned-test/project'
+  const sentinelUrl = 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html'
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10, sentinelTabId: 19 } },
+    windows: [{ id: 10, focused: false, state: 'minimized' }],
+    tabs: [{ id: 19, windowId: 10, url: sentinelUrl, active: true }]
+  })
+
+  const response = await harness.request('conversation_create', {
+    conversationId: 'conv_owned',
+    url: projectUrl
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(harness.createdWindows.length, 0)
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.createdTabs[0].windowId, 10)
+  assert.equal(harness.createdTabs[0].active, true)
+  assert.equal(harness.storageState.window0.windowId, 10)
+  assert.equal(harness.storageState.window0.sentinelTabId, 19)
+})
+
+test('project_create opens one root tab in window0 and returns its canonical Project URL', async () => {
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10, sentinelTabId: 19 } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 19, windowId: 10, url: 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html', active: true }]
   })
 
   const response = await harness.request('project_create', { name: 'subagents' })
@@ -594,9 +655,12 @@ test('conversation_create prefers an existing same-Project conversation as the h
   const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
   const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/c/thread-existing'
   const harness = makeHarness({
-    storage: { window0: { windowId: 10 } },
+    storage: { window0: { windowId: 10, sentinelTabId: 19 } },
     windows: [{ id: 10 }],
-    tabs: [{ id: 20, windowId: 10, url: seedThreadUrl }]
+    tabs: [
+      { id: 19, windowId: 10, url: 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html', active: true },
+      { id: 20, windowId: 10, url: seedThreadUrl }
+    ]
   })
 
   const response = await harness.request('conversation_create', {
@@ -619,9 +683,12 @@ test('conversation_create is idempotent for the same logical conversation attach
   const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
   const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/c/thread-existing'
   const harness = makeHarness({
-    storage: { window0: { windowId: 10 } },
+    storage: { window0: { windowId: 10, sentinelTabId: 19 } },
     windows: [{ id: 10 }],
-    tabs: [{ id: 20, windowId: 10, url: seedThreadUrl }]
+    tabs: [
+      { id: 19, windowId: 10, url: 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html', active: true },
+      { id: 20, windowId: 10, url: seedThreadUrl }
+    ]
   })
   const request = { conversationId: 'conv_idempotent_create', url: projectUrl }
 
@@ -635,6 +702,34 @@ test('conversation_create is idempotent for the same logical conversation attach
   assert.equal(second.result.windowId, first.result.windowId)
   assert.equal(second.result.url, first.result.url)
   assert.equal(harness.createdTabs.length, createdAfterFirst)
+})
+
+test('conversation_create replay rehomes a legacy human-window binding into the owned automation window', async () => {
+  const externalUrl = 'https://chatgpt.com/g/g-p-rehome-test/c/thread-existing'
+  const sentinelUrl = 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10, sentinelTabId: 19 },
+      'conversation:conv_replay_rehome': { windowId: 11, tabId: 30, url: externalUrl }
+    },
+    windows: [{ id: 10 }, { id: 11, focused: true }],
+    tabs: [
+      { id: 19, windowId: 10, url: sentinelUrl, active: true },
+      { id: 30, windowId: 11, url: externalUrl, active: true }
+    ]
+  })
+
+  const response = await harness.request('conversation_create', {
+    conversationId: 'conv_replay_rehome',
+    url: 'https://chatgpt.com/g/g-p-rehome-test/project'
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.createdTabs[0].windowId, 10)
+  assert.equal(harness.createdTabs[0].url, externalUrl)
+  assert.equal(response.result.windowId, 10)
+  assert.equal(response.result.tabId, harness.createdTabs[0].id)
 })
 
 test('conversation_create replay reopens its materialized exact thread instead of allocating a new Project draft', async () => {
@@ -754,11 +849,14 @@ test('send forwards a per-message app selection to the content-script prepare st
   const externalUrl = 'https://chatgpt.com/c/app-selection-123'
   const harness = makeHarness({
     storage: {
-      window0: { windowId: 10 },
+      window0: { windowId: 10, sentinelTabId: 19 },
       'conversation:conv_app': { windowId: 10, tabId: 20, url: externalUrl }
     },
     windows: [{ id: 10 }],
-    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+    tabs: [
+      { id: 19, windowId: 10, url: 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html', active: true },
+      { id: 20, windowId: 10, url: externalUrl }
+    ]
   })
 
   const response = await harness.request('conversation_send', {
@@ -1124,11 +1222,14 @@ test('send reloads a matching tab whose content script was invalidated by extens
   const externalUrl = 'https://chatgpt.com/c/pre-reload-123'
   const harness = makeHarness({
     storage: {
-      window0: { windowId: 10 },
+      window0: { windowId: 10, sentinelTabId: 19 },
       'conversation:conv_existing': { windowId: 10, tabId: 20, url: externalUrl }
     },
     windows: [{ id: 10 }],
-    tabs: [{ id: 20, windowId: 10, url: externalUrl, status: 'complete' }],
+    tabs: [
+      { id: 19, windowId: 10, url: 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html', active: true },
+      { id: 20, windowId: 10, url: externalUrl, status: 'complete' }
+    ],
     staleContentScriptTabIds: [20]
   })
 
@@ -1152,11 +1253,14 @@ test('send reattaches a project conversation to an already-open matching project
   const externalUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-456'
   const harness = makeHarness({
     storage: {
-      window0: { windowId: 10 },
+      window0: { windowId: 10, sentinelTabId: 19 },
       'conversation:conv_project': { windowId: 10, tabId: 20, url: externalUrl }
     },
     windows: [{ id: 10 }],
-    tabs: [{ id: 30, windowId: 10, url: externalUrl }]
+    tabs: [
+      { id: 19, windowId: 10, url: 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html', active: true },
+      { id: 30, windowId: 10, url: externalUrl }
+    ]
   })
 
   const response = await harness.request('conversation_send', {
@@ -1176,11 +1280,14 @@ test('send reattaches a stale tab binding to an already-open matching ChatGPT co
   const externalUrl = 'https://chatgpt.com/c/persistent-123'
   const harness = makeHarness({
     storage: {
-      window0: { windowId: 10 },
+      window0: { windowId: 10, sentinelTabId: 19 },
       'conversation:conv_existing': { windowId: 10, tabId: 20, url: externalUrl }
     },
     windows: [{ id: 10 }],
-    tabs: [{ id: 30, windowId: 10, url: externalUrl }]
+    tabs: [
+      { id: 19, windowId: 10, url: 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html', active: true },
+      { id: 30, windowId: 10, url: externalUrl }
+    ]
   })
 
   const response = await harness.request('conversation_send', {
@@ -1198,6 +1305,40 @@ test('send reattaches a stale tab binding to an already-open matching ChatGPT co
     harness.sentToTabs.some(({ tabId, message }) => tabId === 30 && message.type === 'conversation_submit'),
     true
   )
+})
+
+test('send rehomes a legacy conversation binding out of the human window into the owned automation window', async () => {
+  const externalUrl = 'https://chatgpt.com/c/legacy-human-bound'
+  const sentinelUrl = 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10, sentinelTabId: 19 },
+      'conversation:conv_legacy_human': { windowId: 11, tabId: 30, url: externalUrl }
+    },
+    windows: [{ id: 10 }, { id: 11, focused: true }],
+    tabs: [
+      { id: 19, windowId: 10, url: sentinelUrl, active: true },
+      { id: 30, windowId: 11, url: externalUrl, active: true }
+    ]
+  })
+
+  const response = await harness.request('conversation_send', {
+    conversationId: 'conv_legacy_human',
+    turnId: 'turn_rehome',
+    text: 'continue',
+    externalUrl
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.createdTabs[0].windowId, 10)
+  assert.equal(harness.createdTabs[0].url, externalUrl)
+  assert.equal(
+    harness.sentToTabs.some(({ tabId, message }) => tabId === 30 && message.type === 'conversation_prepare'),
+    false
+  )
+  assert.equal(harness.storageState['conversation:conv_legacy_human'].windowId, 10)
+  assert.equal(harness.storageState['conversation:conv_legacy_human'].tabId, harness.createdTabs[0].id)
 })
 
 test('send reopens the stable ChatGPT conversation URL when no matching tab remains', async () => {
@@ -1225,7 +1366,7 @@ test('send reopens the stable ChatGPT conversation URL when no matching tab rema
   assert.equal(harness.storageState['conversation:conv_existing'].tabId, harness.createdTabs[0].id)
 })
 
-test('send replaces stale physical window0 and attaches the old logical conversation to its initial tab', async () => {
+test('send replaces stale physical window0 with an owned sentinel window and reopens the exact conversation in a child tab', async () => {
   const externalUrl = 'https://chatgpt.com/c/persistent-789'
   const harness = makeHarness({
     storage: {
@@ -1244,13 +1385,18 @@ test('send replaces stale physical window0 and attaches the old logical conversa
   assert.equal(response.ok, true)
   assert.equal(response.result.reattached, true)
   assert.equal(harness.createdWindows.length, 1)
-  assert.equal(harness.createdWindows[0].tabs[0].url, externalUrl)
+  assert.equal(
+    harness.createdWindows[0].tabs[0].url,
+    'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html'
+  )
   assert.equal(harness.createdWindows[0].focused, false)
   assert.equal(harness.createdWindows[0].state, 'minimized')
-  assert.equal(harness.createdTabs.length, 0)
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.createdTabs[0].url, externalUrl)
+  assert.equal(harness.createdTabs[0].windowId, harness.createdWindows[0].id)
   assert.equal(
     harness.storageState['conversation:conv_existing'].tabId,
-    harness.createdWindows[0].tabs[0].id
+    harness.createdTabs[0].id
   )
 })
 
