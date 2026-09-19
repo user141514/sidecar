@@ -242,7 +242,8 @@ function findWebGptStrengthControl() {
     if (control.disabled || isWebGptPickerOption(control)) return false
     const label = elementLabel(control).toLowerCase()
     if (label.includes('switch model') || label.includes('切换模型')) return false
-    return label.includes('reasoning') ||
+    return label.includes('thinking strength') ||
+      label.includes('reasoning') ||
       label.includes('思考强度') ||
       label.includes('推理强度') ||
       Boolean(webGptStrengthFromNode(control))
@@ -343,6 +344,22 @@ function findWebGptStrengthOption(target, control) {
     .find((node) => !node.disabled && webGptStrengthFromNode(node) === wanted) || null
 }
 
+function selectedWebGptStrengthFromOption(node) {
+  if (!node) return null
+  const selected = node.getAttribute?.('aria-checked') === 'true' ||
+    node.getAttribute?.('aria-selected') === 'true' ||
+    node.getAttribute?.('data-state') === 'checked'
+  return selected ? webGptStrengthFromNode(node) : null
+}
+
+function selectedWebGptStrengthFromMenu(control) {
+  for (const node of webGptStrengthOptionCandidates(control)) {
+    const selected = selectedWebGptStrengthFromOption(node)
+    if (selected) return selected
+  }
+  return null
+}
+
 function webGptStrengthOptionDiagnostics(control) {
   return webGptStrengthOptionCandidates(control)
     .map(elementLabel)
@@ -356,6 +373,21 @@ function findWebGptStrengthSlider(control) {
     const rawValue = node?.getAttribute?.('aria-valuenow')
     const value = rawValue === null || rawValue === undefined ? null : Number(rawValue)
     return role === 'slider' || Number.isInteger(value)
+  }) || null
+}
+
+function findWebGptStrengthGateway(control) {
+  return webGptStrengthOptionCandidates(control).find((node) => {
+    if (node?.disabled || isWebGptPickerOption(node) && webGptStrengthFromNode(node)) return false
+    const className = typeof node?.className === 'string'
+      ? node.className
+      : node?.getAttribute?.('class') || ''
+    const label = elementLabel(node).toLowerCase()
+    return className.includes('SliderControl') ||
+      label.includes('thinking strength') ||
+      label.includes('reasoning strength') ||
+      label.includes('思考强度') ||
+      label.includes('推理强度')
   }) || null
 }
 
@@ -463,11 +495,21 @@ async function runWebGptShiftTest(target) {
 
   let option = null
   let slider = null
+  let gatewayOpened = false
   for (let attempt = 0; attempt < 20; attempt += 1) {
     option = findWebGptStrengthOption(wanted, control)
     if (option) break
     slider = findWebGptStrengthSlider(control)
     if (slider) break
+    if (!gatewayOpened) {
+      const gateway = findWebGptStrengthGateway(control)
+      if (gateway) {
+        gateway.click()
+        gatewayOpened = true
+        await yieldWebGptUi()
+        continue
+      }
+    }
     await yieldWebGptUi()
   }
   if (option) {
@@ -485,7 +527,10 @@ async function runWebGptShiftTest(target) {
 
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const afterControl = findWebGptStrengthControl()
-    const after = webGptStrengthFromSlider(slider) || (afterControl ? (webGptStrengthFromNode(afterControl) || elementLabel(afterControl)) : null)
+    const after = webGptStrengthFromSlider(slider) ||
+      selectedWebGptStrengthFromOption(option) ||
+      (afterControl ? selectedWebGptStrengthFromMenu(afterControl) : null) ||
+      (afterControl ? (webGptStrengthFromNode(afterControl) || elementLabel(afterControl)) : null)
     if (after === wanted) return { switched: true, before, after }
     await yieldWebGptUi()
   }
