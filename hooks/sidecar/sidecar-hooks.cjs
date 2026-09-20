@@ -121,7 +121,7 @@ function formatContext(authority) {
     'Use the installed Runtime Home and stable CLI as execution authority. A Git checkout/worktree is source authority only when modifying Sidecar itself.',
     'Do not use project-find as managed Project authority; do not reconstruct a Project URL from memory; do not fall back to root https://chatgpt.com/.',
     'Do not substitute DevSpace host_worker or Orca workers when the requested worker is a real ChatGPT child conversation.',
-    'Thinking-strength ceiling for Sidecar managed children: High. Extra High / 极高 and any future stronger level are forbidden. Pro is a model mode, not permission to exceed High.',
+    'Sidecar managed children must never select or switch to Pro. Normalize only to a non-Pro mode when required to set an allowed strength. Default and ceiling: High. Extra High / 极高 and any future stronger level are forbidden.',
     'If the prompt explicitly asks for DevSpace host workers or Orca workers instead, route to that system and ignore Sidecar execution.',
     '',
     'SIDECAR_RUNTIME_AUTHORITY:',

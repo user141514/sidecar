@@ -22,7 +22,9 @@ test('Sidecar prompt injects runtime authority context', () => {
   assert.match(context, /conversation-workers Skill/)
   assert.match(context, /project-find as managed Project authority/)
   assert.match(context, /conversation-work create -> decide -> dispatch -> collect/)
-  assert.match(context, /Thinking-strength ceiling.*High/)
+  assert.match(context, /never select or switch to Pro/)
+  assert.match(context, /Normalize only to a non-Pro mode/)
+  assert.match(context, /Default and ceiling: High/)
   assert.match(context, /Extra High \/ 极高.*forbidden/)
 })
 

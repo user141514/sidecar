@@ -335,7 +335,6 @@ test('WorkController dispatch creates managed workers inside the configured suba
     }
   ])
   const host = new FakeHost()
-  host.shiftResult = new Error('WebGPT thinking control was not found')
   const controller = new WorkController({
     ledger,
     conversationHost: host,
@@ -348,7 +347,7 @@ test('WorkController dispatch creates managed workers inside the configured suba
   assert.equal(dispatched.worker_kind, 'conversation_worker')
   assert.equal(dispatched.backend, 'sidecar')
   assert.deepEqual(host.created, [{ projectUrl: managedProjectUrl }])
-  assert.deepEqual(host.shifts, [])
+  assert.deepEqual(host.shifts, [{ target: 'High', targetUrl: null, targetTabId: 101 }])
   const dispatchEvents = ledger.events.filter((event) => event.type === 'worker_dispatched')
   assert.equal(dispatchEvents.length, 2)
   assert.ok(dispatchEvents.every((event) => event.payload.worker_kind === 'conversation_worker'))
@@ -387,6 +386,14 @@ test('WorkController allows an explicit managed worker strength override', async
   const dispatched = await controller.dispatch('work_test', 'f1')
   assert.equal(dispatched.dispatched, true)
   assert.deepEqual(host.shifts, [{ target: 'Medium', targetUrl: null, targetTabId: 101 }])
+})
+
+test('WorkController rejects Extra High as a managed worker strength', async () => {
+  const { WorkController } = await loadModule()
+  assert.throws(
+    () => new WorkController({ ledger: new FakeLedger(), conversationHost: new FakeHost(), managedProjectUrl, workerStrength: 'Extra High' }),
+    /unsupported workerStrength/i
+  )
 })
 
 test('WorkController refuses to send a worker prompt when strength normalization fails', async () => {

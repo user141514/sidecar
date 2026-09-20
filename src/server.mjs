@@ -471,7 +471,7 @@ async function handleRpc(conversationHost, workLedger, workController, memoryPoo
         protocolVersion: message.params?.protocolVersion ?? '2025-06-18',
         capabilities: { tools: {} },
         serverInfo: { name: 'conversation-sidecar', version: '0.0.2' },
-        instructions: 'Use project_create/project_pin for optional Project setup, conversation_create/conversation_send/conversation_read for conversations, and work_* for structured coordinator trajectories. A successful work_append(type=completed) requires prior STOP and durable MemoryPool publication; work_memory_publish remains an idempotent repair/backfill tool. Historical memory is never auto-injected. Raw local events are the source of truth. Reasoning effort is configured manually by the user in ChatGPT; the sidecar does not change it.'
+        instructions: 'Use project_create/project_pin for optional Project setup, conversation_create/conversation_send/conversation_read for conversations, and work_* for structured coordinator trajectories. A successful work_append(type=completed) requires prior STOP and durable MemoryPool publication; work_memory_publish remains an idempotent repair/backfill tool. Historical memory is never auto-injected. Raw local events are the source of truth. Managed conversation workers normalize thinking strength to High before sending and never select Pro or Extra High.'
       })
     }
   }

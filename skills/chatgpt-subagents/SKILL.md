@@ -52,9 +52,9 @@ Creation pacing is owned by Sidecar transport, not by task decomposition. Multip
 
 ### Thinking-strength ceiling
 
-Treat ChatGPT model mode and thinking strength as separate dimensions. `Pro` is a model mode; it is not a thinking-strength level. The maximum permitted thinking strength for any Sidecar-managed child is `High` / `高`.
+Treat ChatGPT model mode and thinking strength as separate dimensions. Never select or switch a Sidecar-managed child to `Pro`. A non-Pro mode transition is permitted only when required to reach an allowed thinking-strength setting, for example normalizing to `Thinking` before selecting `High`.
 
-Allowed thinking-strength settings are `Instant`, `Medium`, and `High`. Never select, request, infer, or auto-upgrade a managed child to `Extra High` / `极高` or to any future option stronger than `High`. If a requested or discovered strength exceeds `High`, clamp/refuse it rather than silently using the higher setting. Do not reinterpret `Pro` as permission to exceed the `High` ceiling.
+The default and maximum permitted thinking strength for any Sidecar-managed child is `High` / `高`. Allowed thinking-strength settings are `Instant`, `Medium`, and `High`. Never select, request, infer, or auto-upgrade a managed child to `Extra High` / `极高` or to any future option stronger than `High`. If a requested or discovered strength exceeds `High`, reject it rather than silently using the higher setting. Before sending the managed child prompt, require read-back confirmation that the selected strength is the intended allowed value.
 
 Manual transport remains available through `chatgpt-conversation create [--project <project_url>]`, `send`, and `read` only when manual transport is actually intended. When `--project` is needed, take the URL from the current Runtime Home config, never from memory or a stale cross-host path. Do not use manual root conversations as a substitute for managed worker dispatch.
 

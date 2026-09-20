@@ -2,12 +2,11 @@ const DECISION_ACTIONS = new Set(['CONTINUE', 'SPLIT', 'PRUNE', 'REVISE', 'STOP'
 const ORCHESTRATION_MODES = new Set(['EXPLORE', 'EXECUTE', 'ADVERSARIAL', 'SYNTHESIZE'])
 const WORKER_KIND = 'conversation_worker'
 const WORKER_BACKEND = 'sidecar'
-const DEFAULT_WORKER_STRENGTH = null
+const DEFAULT_WORKER_STRENGTH = 'High'
 const WORKER_STRENGTHS = new Map([
   ['instant', 'Instant'],
   ['medium', 'Medium'],
-  ['high', 'High'],
-  ['extra high', 'Extra High']
+  ['high', 'High']
 ])
 
 function normalizeWorkerStrength(value = DEFAULT_WORKER_STRENGTH) {
