@@ -3,7 +3,7 @@ const ORCHESTRATION_MODES = new Set(['EXPLORE', 'EXECUTE', 'ADVERSARIAL', 'SYNTH
 const MIN_DISPATCH_INTERVAL_MS = 120_000
 const WORKER_KIND = 'conversation_worker'
 const WORKER_BACKEND = 'sidecar'
-const DEFAULT_WORKER_STRENGTH = 'High'
+const DEFAULT_WORKER_STRENGTH = null
 const WORKER_STRENGTHS = new Map([
   ['instant', 'Instant'],
   ['medium', 'Medium'],
@@ -12,6 +12,7 @@ const WORKER_STRENGTHS = new Map([
 ])
 
 function normalizeWorkerStrength(value = DEFAULT_WORKER_STRENGTH) {
+  if (value === null || value === undefined) return null
   if (typeof value !== 'string' || !value.trim()) throw new TypeError('workerStrength must be a non-empty string')
   const normalized = WORKER_STRENGTHS.get(value.trim().toLowerCase())
   if (!normalized) throw new TypeError(`unsupported workerStrength: ${value}`)
@@ -432,19 +433,21 @@ export class WorkController {
     })
 
     try {
-      if (!Number.isInteger(conversation.tabId)) {
-        throw new Error('worker strength normalization failed: allocated child tabId is unavailable')
-      }
-      if (typeof this.conversationHost.shiftTest !== 'function') {
-        throw new Error('worker strength normalization failed: strength control is unavailable')
-      }
-      const shifted = await this.conversationHost.shiftTest(this.workerStrength, null, conversation.tabId)
-      if (
-        shifted?.switched !== true ||
-        shifted?.after !== this.workerStrength ||
-        shifted?.tabId !== conversation.tabId
-      ) {
-        throw new Error(`worker strength normalization failed: expected ${this.workerStrength}`)
+      if (this.workerStrength !== null) {
+        if (!Number.isInteger(conversation.tabId)) {
+          throw new Error('worker strength normalization failed: allocated child tabId is unavailable')
+        }
+        if (typeof this.conversationHost.shiftTest !== 'function') {
+          throw new Error('worker strength normalization failed: strength control is unavailable')
+        }
+        const shifted = await this.conversationHost.shiftTest(this.workerStrength, null, conversation.tabId)
+        if (
+          shifted?.switched !== true ||
+          shifted?.after !== this.workerStrength ||
+          shifted?.tabId !== conversation.tabId
+        ) {
+          throw new Error(`worker strength normalization failed: expected ${this.workerStrength}`)
+        }
       }
 
       this.lastDispatchAt = this.now()

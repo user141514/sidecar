@@ -340,6 +340,7 @@ test('WorkController dispatch creates managed workers inside the configured suba
     }
   ])
   const host = new FakeHost()
+  host.shiftResult = new Error('WebGPT thinking control was not found')
   const controller = new WorkController({
     ledger,
     conversationHost: host,
@@ -352,7 +353,7 @@ test('WorkController dispatch creates managed workers inside the configured suba
   assert.equal(dispatched.worker_kind, 'conversation_worker')
   assert.equal(dispatched.backend, 'sidecar')
   assert.deepEqual(host.created, [{ projectUrl: managedProjectUrl }])
-  assert.deepEqual(host.shifts, [{ target: 'High', targetUrl: null, targetTabId: 101 }])
+  assert.deepEqual(host.shifts, [])
   const dispatchEvents = ledger.events.filter((event) => event.type === 'worker_dispatched')
   assert.equal(dispatchEvents.length, 2)
   assert.ok(dispatchEvents.every((event) => event.payload.worker_kind === 'conversation_worker'))
@@ -416,6 +417,7 @@ test('WorkController refuses to send a worker prompt when strength normalization
     ledger,
     conversationHost: host,
     managedProjectUrl,
+    workerStrength: 'High',
     now: () => FakeLedger.now
   })
 
