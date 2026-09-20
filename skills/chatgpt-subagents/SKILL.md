@@ -1,11 +1,29 @@
 ---
 name: conversation-workers
-description: Use for managed ChatGPT child conversations and verified self-updates of the conversation extension from a local shell on Linux or Windows. This creates conversation_worker tasks through Sidecar/WorkController; do not use it for DevSpace local Codex/Claude/Pi host workers or Orca workers.
+description: This skill should be used when the user asks to use Sidecar, conversation-work, chatgpt-conversation, conversation_worker, the canonical subagents Project, or to create/open/dispatch a real ChatGPT child conversation or child chat. It governs managed ChatGPT child conversations through Sidecar/WorkController and must not be substituted with DevSpace host_worker or Orca workers.
 ---
 
 # ChatGPT Conversation Workers
 
-The installed Runtime Home owns conversation transport, WorkController, WorkLedger and MemoryPool. Git checkouts are source inputs only; after bootstrap, Native Messaging, stable CLI entrypoints and persistent data must not point directly at an arbitrary development checkout. Orca/orca-sub is not required for this runtime.
+The installed Runtime Home owns conversation transport, WorkController, WorkLedger, managed Project identity, pacing state and MemoryPool. Git checkouts/worktrees are source inputs only; after bootstrap, Native Messaging, stable CLI entrypoints and persistent data must not point directly at an arbitrary development checkout. Orca/orca-sub is not required for this runtime.
+
+## Entry gate: establish Runtime Home authority first
+
+Before any managed child creation, manual Sidecar transport, `project-find`, checkout inspection or recovery reasoning, establish the current machine's installed Runtime Home authority.
+
+Prefer the `SIDECAR_RUNTIME_AUTHORITY` block injected by the UserPromptSubmit hook when present. It is derived from the current machine's Runtime Home config and PATH. If the hook is unavailable, read the platform Runtime Home `runtime.json` directly before execution:
+
+- Linux: `${XDG_DATA_HOME:-~/.local/share}/conversation-sidecar/runtime.json`
+- Windows: `%LOCALAPPDATA%\\Conversation Sidecar\\runtime.json`
+
+Require all of the following for managed worker execution:
+
+- `state` is `ready`;
+- `managed_project.name` is `subagents`;
+- `managed_project.url` is a canonical `https://chatgpt.com/g/g-p-.../project` URL;
+- stable `conversation-work` and `chatgpt-conversation` commands resolve from the installed user PATH.
+
+Treat these as authority. Do **not** use a Git checkout/worktree path, a path remembered from another host, or a browser-search result as runtime authority. `project-find subagents` is diagnostic only; failure to parse the browser project list does not invalidate a ready Runtime Home canonical Project, and success does not outrank Runtime Home config. Never reconstruct the managed Project URL from memory and never fall back to root `https://chatgpt.com/`.
 
 ## Setup
 
@@ -19,13 +37,22 @@ If bootstrap detects an existing working Native Messaging registration outside R
 
 ## Managed conversation workers
 
-Managed coordinator conversation workers use `conversation-work` / the `work_*` MCP tools. Their machine-readable worker kind is `conversation_worker` and backend is `sidecar`. `WorkController.dispatch()` is required to create every managed child inside the canonical `subagents` Project stored in Runtime Home config; missing Project identity is a hard error and must never fall back to root `https://chatgpt.com/`. Do not substitute DevSpace local provider workers (`host_worker`) or Orca workers for this route.
+Managed coordinator conversation workers use the stable Runtime Home `conversation-work` CLI or the equivalent `work_*` MCP tools. Their machine-readable worker kind is `conversation_worker` and backend is `sidecar`. Do not substitute DevSpace local provider workers (`host_worker`) or Orca workers for this route.
 
-Manual transport remains available through `chatgpt-conversation create [--project <project_url>]`, `send`, and `read`. Do not use manual root conversations as a substitute for managed worker dispatch.
+Use the normal managed flow:
+
+1. `conversation-work create <goal>`
+2. `conversation-work decide <work_id> '<decision-json>'`
+3. `conversation-work dispatch <work_id> <frontier_id>`
+4. `conversation-work collect <work_id>`
+
+Do not run `project-find` before this flow. `WorkController.dispatch()` obtains the canonical `subagents` Project from Runtime Home and creates the child there. Missing/invalid Project identity is a hard error and must never fall back to root ChatGPT.
+
+Creation pacing is owned by Sidecar transport, not by task decomposition. Multiple independent frontiers may exist and previously created children may keep running, but new physical ChatGPT conversation allocations are admission-controlled. On `reason: "pacing"`, respect `retryAfterMs`; do not bypass the gate with manual `chatgpt-conversation create`, another checkout, another CLI copy, or a root conversation.
+
+Manual transport remains available through `chatgpt-conversation create [--project <project_url>]`, `send`, and `read` only when manual transport is actually intended. When `--project` is needed, take the URL from the current Runtime Home config, never from memory or a stale cross-host path. Do not use manual root conversations as a substitute for managed worker dispatch.
 
 `send` acknowledges submission, not completion. Use `chatgpt-conversation read <conversation_id>` later or `conversation-work collect <work_id>` for managed work. Keep conversation and turn IDs; do not substitute tab/window IDs. A repeated `generating` ledger snapshot does not establish either live progress or a fault. Never infer failure from model latency or unchanged visible text alone.
-
-For multi-worker use, preserve the controller's pacing contract. Do not bypass WorkController to burst-create child conversations.
 
 ## Verified extension updates
 
