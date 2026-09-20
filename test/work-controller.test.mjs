@@ -388,6 +388,43 @@ test('WorkController allows an explicit managed worker strength override', async
   assert.deepEqual(host.shifts, [{ target: 'Medium', targetUrl: null, targetTabId: 101 }])
 })
 
+test('WorkController retries transient strength UI readiness on the same allocated child', async () => {
+  const { WorkController } = await loadModule()
+  const ledger = new FakeLedger([
+    { at: '2026-09-03T08:00:00.000Z', type: 'goal', payload: { goal: 'inspect system' } },
+    {
+      at: '2026-09-03T08:01:00.000Z',
+      type: 'decision',
+      payload: {
+        action: 'SPLIT',
+        reason: 'one managed frontier',
+        frontiers: [{ id: 'f1', task: 'inspect recovery', depends_on: [] }]
+      }
+    }
+  ])
+  const host = new FakeHost()
+  let attempts = 0
+  host.shiftTest = async (target, targetUrl = null, targetTabId = null) => {
+    host.shifts.push({ target, targetUrl, targetTabId })
+    attempts += 1
+    if (attempts < 3) throw new Error('WebGPT thinking control was not found')
+    return { switched: true, before: 'Medium', after: target, tabId: targetTabId }
+  }
+  const delays = []
+  const controller = new WorkController({
+    ledger,
+    conversationHost: host,
+    managedProjectUrl,
+    sleep: async (ms) => { delays.push(ms) }
+  })
+
+  const dispatched = await controller.dispatch('work_test', 'f1')
+  assert.equal(dispatched.dispatched, true)
+  assert.equal(host.shifts.length, 3)
+  assert.deepEqual(delays, [250, 250])
+  assert.equal(host.sent.length, 1)
+})
+
 test('WorkController rejects Extra High as a managed worker strength', async () => {
   const { WorkController } = await loadModule()
   assert.throws(

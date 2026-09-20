@@ -3,6 +3,8 @@ const ORCHESTRATION_MODES = new Set(['EXPLORE', 'EXECUTE', 'ADVERSARIAL', 'SYNTH
 const WORKER_KIND = 'conversation_worker'
 const WORKER_BACKEND = 'sidecar'
 const DEFAULT_WORKER_STRENGTH = 'High'
+const STRENGTH_READY_RETRY_ATTEMPTS = 20
+const STRENGTH_READY_RETRY_MS = 250
 const WORKER_STRENGTHS = new Map([
   ['instant', 'Instant'],
   ['medium', 'Medium'],
@@ -15,6 +17,11 @@ function normalizeWorkerStrength(value = DEFAULT_WORKER_STRENGTH) {
   const normalized = WORKER_STRENGTHS.get(value.trim().toLowerCase())
   if (!normalized) throw new TypeError(`unsupported workerStrength: ${value}`)
   return normalized
+}
+
+function isTransientStrengthUiError(error) {
+  const message = error instanceof Error ? error.message : String(error)
+  return /thinking control was not found|thinking option was not found|did not read back target/i.test(message)
 }
 
 function requireString(value, message) {
@@ -299,11 +306,12 @@ function isWatchdogContinuation(conversation, ancestorTurnId) {
 }
 
 export class WorkController {
-  constructor({ ledger, conversationHost, managedProjectUrl = null, workerStrength = DEFAULT_WORKER_STRENGTH }) {
+  constructor({ ledger, conversationHost, managedProjectUrl = null, workerStrength = DEFAULT_WORKER_STRENGTH, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
     this.ledger = ledger
     this.conversationHost = conversationHost
     this.managedProjectUrl = normalizeManagedProjectUrl(managedProjectUrl)
     this.workerStrength = normalizeWorkerStrength(workerStrength)
+    this.sleep = sleep
     this.decisionQueue = Promise.resolve()
     this.dispatchQueue = Promise.resolve()
     this.collectQueues = new Map()
@@ -366,6 +374,33 @@ export class WorkController {
     return run
   }
 
+  async #normalizeManagedWorkerStrength(conversation) {
+    if (this.workerStrength === null) return
+    if (!Number.isInteger(conversation.tabId)) {
+      throw new Error('worker strength normalization failed: allocated child tabId is unavailable')
+    }
+    if (typeof this.conversationHost.shiftTest !== 'function') {
+      throw new Error('worker strength normalization failed: strength control is unavailable')
+    }
+
+    for (let attempt = 0; attempt < STRENGTH_READY_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        const shifted = await this.conversationHost.shiftTest(this.workerStrength, null, conversation.tabId)
+        if (
+          shifted?.switched !== true ||
+          shifted?.after !== this.workerStrength ||
+          shifted?.tabId !== conversation.tabId
+        ) {
+          throw new Error(`worker strength normalization failed: expected ${this.workerStrength}`)
+        }
+        return
+      } catch (error) {
+        if (!isTransientStrengthUiError(error) || attempt === STRENGTH_READY_RETRY_ATTEMPTS - 1) throw error
+        await this.sleep(STRENGTH_READY_RETRY_MS)
+      }
+    }
+  }
+
   async #dispatch(workId, frontierId) {
     const state = await this.state(workId)
     if (state.stopped || state.completed) throw new Error('work is stopped')
@@ -408,22 +443,7 @@ export class WorkController {
     })
 
     try {
-      if (this.workerStrength !== null) {
-        if (!Number.isInteger(conversation.tabId)) {
-          throw new Error('worker strength normalization failed: allocated child tabId is unavailable')
-        }
-        if (typeof this.conversationHost.shiftTest !== 'function') {
-          throw new Error('worker strength normalization failed: strength control is unavailable')
-        }
-        const shifted = await this.conversationHost.shiftTest(this.workerStrength, null, conversation.tabId)
-        if (
-          shifted?.switched !== true ||
-          shifted?.after !== this.workerStrength ||
-          shifted?.tabId !== conversation.tabId
-        ) {
-          throw new Error(`worker strength normalization failed: expected ${this.workerStrength}`)
-        }
-      }
+      await this.#normalizeManagedWorkerStrength(conversation)
 
       const sent = await this.conversationHost.send(conversation.id, workerPrompt(frontier, state), { preAdmitted: true })
       await this.ledger.append(workId, 'worker_dispatched', {
