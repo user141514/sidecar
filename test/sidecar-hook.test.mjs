@@ -22,6 +22,8 @@ test('Sidecar prompt injects runtime authority context', () => {
   assert.match(context, /conversation-workers Skill/)
   assert.match(context, /project-find as managed Project authority/)
   assert.match(context, /conversation-work create -> decide -> dispatch -> collect/)
+  assert.match(context, /Thinking-strength ceiling.*High/)
+  assert.match(context, /Extra High \/ 极高.*forbidden/)
 })
 
 test('ordinary prompt produces no hook output', () => {

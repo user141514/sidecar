@@ -50,6 +50,12 @@ Do not run `project-find` before this flow. `WorkController.dispatch()` obtains 
 
 Creation pacing is owned by Sidecar transport, not by task decomposition. Multiple independent frontiers may exist and previously created children may keep running, but new physical ChatGPT conversation allocations are admission-controlled. On `reason: "pacing"`, respect `retryAfterMs`; do not bypass the gate with manual `chatgpt-conversation create`, another checkout, another CLI copy, or a root conversation.
 
+### Thinking-strength ceiling
+
+Treat ChatGPT model mode and thinking strength as separate dimensions. `Pro` is a model mode; it is not a thinking-strength level. The maximum permitted thinking strength for any Sidecar-managed child is `High` / `高`.
+
+Allowed thinking-strength settings are `Instant`, `Medium`, and `High`. Never select, request, infer, or auto-upgrade a managed child to `Extra High` / `极高` or to any future option stronger than `High`. If a requested or discovered strength exceeds `High`, clamp/refuse it rather than silently using the higher setting. Do not reinterpret `Pro` as permission to exceed the `High` ceiling.
+
 Manual transport remains available through `chatgpt-conversation create [--project <project_url>]`, `send`, and `read` only when manual transport is actually intended. When `--project` is needed, take the URL from the current Runtime Home config, never from memory or a stale cross-host path. Do not use manual root conversations as a substitute for managed worker dispatch.
 
 `send` acknowledges submission, not completion. Use `chatgpt-conversation read <conversation_id>` later or `conversation-work collect <work_id>` for managed work. Keep conversation and turn IDs; do not substitute tab/window IDs. A repeated `generating` ledger snapshot does not establish either live progress or a fault. Never infer failure from model latency or unchanged visible text alone.
