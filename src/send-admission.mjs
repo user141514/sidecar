@@ -24,8 +24,8 @@ async function writeState(statePath, state) {
   await rename(temporary, statePath)
 }
 
-export class SendAdmission {
-  constructor({ statePath, intervalMs = 120_000, now = () => Date.now() }) {
+class IntervalAdmission {
+  constructor({ statePath, intervalMs, now = () => Date.now() }) {
     if (typeof statePath !== 'string' || !statePath) throw new TypeError('statePath is required')
     if (!Number.isFinite(intervalMs) || intervalMs <= 0) throw new TypeError('intervalMs must be > 0')
     this.statePath = statePath
@@ -44,7 +44,7 @@ export class SendAdmission {
 
   async #admit(source, target) {
     const current = Number(this.now())
-    if (!Number.isFinite(current)) throw new Error('send admission clock returned an invalid time')
+    if (!Number.isFinite(current)) throw new Error('admission clock returned an invalid time')
     const previous = await readState(this.statePath)
     if (previous) {
       const elapsed = current - previous.lastAdmittedAt
@@ -65,5 +65,17 @@ export class SendAdmission {
     }
     await writeState(this.statePath, state)
     return { admitted: true, admittedAt: current }
+  }
+}
+
+export class SendAdmission extends IntervalAdmission {
+  constructor(options) {
+    super({ intervalMs: 120_000, ...options })
+  }
+}
+
+export class ConversationCreationAdmission extends IntervalAdmission {
+  constructor(options) {
+    super({ intervalMs: 150_000, ...options })
   }
 }

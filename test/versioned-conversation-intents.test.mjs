@@ -75,7 +75,7 @@ async function setupNew(t, { admitted = true, sendUncertain = false } = {}) {
   const host = new ChatGptConversationHost({
     bridge,
     store,
-    sendAdmission: admission,
+    creationAdmission: admission,
     writerMode: 'managed',
     writerEpoch: 3,
     managedProjectUrl

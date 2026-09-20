@@ -11,7 +11,7 @@ import { WorkLedger } from './work-ledger.mjs'
 import { WorkController } from './work-controller.mjs'
 import { MemoryPool } from './memory-pool.mjs'
 import { MemorySyncBridge } from './memory-sync-bridge.mjs'
-import { SendAdmission } from './send-admission.mjs'
+import { ConversationCreationAdmission, SendAdmission } from './send-admission.mjs'
 import { claimWriterLease } from './writer-authority.mjs'
 
 const TOOLS = [
@@ -637,6 +637,7 @@ const defaultConversationRoot = fileURLToPath(new URL('../data/conversations/', 
 const defaultWorkRoot = fileURLToPath(new URL('../data/works/', import.meta.url))
 const defaultMemoryRoot = fileURLToPath(new URL('../data/memory/', import.meta.url))
 const defaultSendAdmissionPath = fileURLToPath(new URL('../data/send-admission.json', import.meta.url))
+const defaultCreationAdmissionPath = fileURLToPath(new URL('../data/conversation-creation-admission.json', import.meta.url))
 const defaultMymemRepo = resolve(fileURLToPath(new URL('../', import.meta.url)), '..', 'mymem')
 
 export async function runtimeWriterLease(dataRoot, claim = claimWriterLease) {
@@ -666,7 +667,8 @@ export function createRuntimeComponents({
 } = {}) {
   const store = new ConversationStore(dataRoot ? join(dataRoot, 'conversations') : legacyConversationRoot)
   const sendAdmission = new SendAdmission({ statePath: dataRoot ? join(dataRoot, 'send-admission.json') : defaultSendAdmissionPath })
-  const conversationHost = new ChatGptConversationHost({ bridge, store, sendAdmission, managedProjectUrl, writerEpoch })
+  const creationAdmission = new ConversationCreationAdmission({ statePath: dataRoot ? join(dataRoot, 'conversation-creation-admission.json') : defaultCreationAdmissionPath })
+  const conversationHost = new ChatGptConversationHost({ bridge, store, sendAdmission, creationAdmission, managedProjectUrl, writerEpoch })
   const workLedger = new WorkLedger(dataRoot ? join(dataRoot, 'works') : defaultWorkRoot)
   const workController = new WorkController({ ledger: workLedger, conversationHost, managedProjectUrl })
   const memoryRoot = dataRoot ? join(dataRoot, 'memory') : defaultMemoryRoot
@@ -676,7 +678,7 @@ export function createRuntimeComponents({
     workLedger,
     onPublished: () => memorySyncBridge.kick()
   })
-  return { store, conversationHost, workLedger, workController, memoryPool, memorySyncBridge, sendAdmission }
+  return { store, conversationHost, workLedger, workController, memoryPool, memorySyncBridge, sendAdmission, creationAdmission }
 }
 
 async function startDefault() {

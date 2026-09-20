@@ -16,13 +16,16 @@ async function fixture(t, start = 1_000_000) {
   const dir = await mkdtemp(join(tmpdir(), 'sidecar-send-admission-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   let current = start
-  const { SendAdmission } = await loadModule()
+  const { SendAdmission, ConversationCreationAdmission } = await loadModule()
   assert.equal(typeof SendAdmission, 'function')
+  assert.equal(typeof ConversationCreationAdmission, 'function')
   return {
     statePath: join(dir, 'send-admission.json'),
+    creationStatePath: join(dir, 'conversation-creation-admission.json'),
     now: () => current,
     setNow(value) { current = value },
-    SendAdmission
+    SendAdmission,
+    ConversationCreationAdmission
   }
 }
 
@@ -61,6 +64,23 @@ test('concurrent admissions serialize so only one caller receives the grant', as
 
   assert.equal([a, b].filter((result) => result.admitted).length, 1)
   assert.equal([a, b].filter((result) => !result.admitted).length, 1)
+})
+
+test('new conversation creation is globally spaced by 150 seconds and survives owner restart', async (t) => {
+  const f = await fixture(t)
+  const firstOwner = new f.ConversationCreationAdmission({ statePath: f.creationStatePath, now: f.now })
+  const first = await firstOwner.admit({ source: 'conversation_create', target: 'https://chatgpt.com/g/g-p-test/project' })
+  assert.equal(first.admitted, true)
+
+  f.setNow(1_149_999)
+  const restartedOwner = new f.ConversationCreationAdmission({ statePath: f.creationStatePath, now: f.now })
+  const blocked = await restartedOwner.admit({ source: 'conversation_create', target: 'https://chatgpt.com/g/g-p-test/project' })
+  assert.deepEqual(blocked, { admitted: false, retryAfterMs: 1, lastAdmittedAt: 1_000_000 })
+
+  f.setNow(1_150_000)
+  const next = await restartedOwner.admit({ source: 'conversation_create', target: 'https://chatgpt.com/g/g-p-test/project' })
+  assert.equal(next.admitted, true)
+  assert.equal(next.admittedAt, 1_150_000)
 })
 
 test('a fresh admission owner preserves the window across process-style restart', async (t) => {

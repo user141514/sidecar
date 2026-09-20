@@ -251,6 +251,29 @@ test('create can target a specific ChatGPT Project home', async () => {
   assert.equal(bridge.requests[0].params.url, projectUrl)
 })
 
+test('conversation creation pacing blocks browser allocation before conversation_create', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  const bridge = new FakeBridge()
+  const store = new MemoryStore()
+  const host = new ChatGptConversationHost({
+    bridge,
+    store,
+    creationAdmission: {
+      async admit(request) {
+        assert.equal(request.source, 'conversation_create')
+        assert.equal(request.target, 'https://chatgpt.com/g/g-p-project123-agent/project')
+        return { admitted: false, retryAfterMs: 150_000, lastAdmittedAt: 1 }
+      }
+    }
+  })
+
+  await assert.rejects(
+    host.create({ projectUrl: 'https://chatgpt.com/g/g-p-project123-agent/project' }),
+    (error) => error?.code === 'CONVERSATION_CREATION_PACING' && error.retryAfterMs === 150_000
+  )
+  assert.equal(bridge.requests.some((request) => request.method === 'conversation_create'), false)
+})
+
 test('a pinned Project becomes the default target for later conversation_create calls', async () => {
   const { ChatGptConversationHost } = await loadChatGptModule()
   assert.equal(typeof ChatGptConversationHost, 'function')

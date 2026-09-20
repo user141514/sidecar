@@ -1,6 +1,5 @@
 const DECISION_ACTIONS = new Set(['CONTINUE', 'SPLIT', 'PRUNE', 'REVISE', 'STOP'])
 const ORCHESTRATION_MODES = new Set(['EXPLORE', 'EXECUTE', 'ADVERSARIAL', 'SYNTHESIZE'])
-const MIN_DISPATCH_INTERVAL_MS = 120_000
 const WORKER_KIND = 'conversation_worker'
 const WORKER_BACKEND = 'sidecar'
 const DEFAULT_WORKER_STRENGTH = null
@@ -301,14 +300,11 @@ function isWatchdogContinuation(conversation, ancestorTurnId) {
 }
 
 export class WorkController {
-  constructor({ ledger, conversationHost, managedProjectUrl = null, now = () => Date.now(), minDispatchIntervalMs = MIN_DISPATCH_INTERVAL_MS, workerStrength = DEFAULT_WORKER_STRENGTH }) {
+  constructor({ ledger, conversationHost, managedProjectUrl = null, workerStrength = DEFAULT_WORKER_STRENGTH }) {
     this.ledger = ledger
     this.conversationHost = conversationHost
     this.managedProjectUrl = normalizeManagedProjectUrl(managedProjectUrl)
-    this.now = now
-    this.minDispatchIntervalMs = minDispatchIntervalMs
     this.workerStrength = normalizeWorkerStrength(workerStrength)
-    this.lastDispatchAt = null
     this.decisionQueue = Promise.resolve()
     this.dispatchQueue = Promise.resolve()
     this.collectQueues = new Map()
@@ -382,47 +378,27 @@ export class WorkController {
     const incomplete = frontier.depends_on.filter((id) => byId.get(id)?.status !== 'completed')
     if (incomplete.length > 0) throw new Error(`frontier dependencies are not complete: ${incomplete.join(', ')}`)
 
-    const lastDispatch = [...state.events].reverse().find((event) => event.type === 'worker_dispatched')
-    const recordedDispatchAt = lastDispatch ? Date.parse(lastDispatch.at) : null
-    const lastDispatchAt = Math.max(recordedDispatchAt ?? 0, this.lastDispatchAt ?? 0)
-    if (lastDispatchAt > 0) {
-      const elapsed = this.now() - lastDispatchAt
-      if (elapsed < this.minDispatchIntervalMs) {
-        return {
-          dispatched: false,
-          worker_kind: WORKER_KIND,
-          backend: WORKER_BACKEND,
-          reason: 'pacing',
-          retryAfterMs: this.minDispatchIntervalMs - Math.max(0, elapsed)
-        }
-      }
-    }
-
     if (!this.managedProjectUrl) {
       const error = new Error('managed_project_unresolved')
       error.code = 'MANAGED_PROJECT_UNRESOLVED'
       throw error
     }
 
-    let preAdmitted = false
-    if (typeof this.conversationHost.admitSend === 'function') {
-      const admission = await this.conversationHost.admitSend({
-        source: 'work_dispatch',
-        target: this.managedProjectUrl
-      })
-      if (admission?.admitted !== true) {
+    let conversation
+    try {
+      conversation = await this.conversationHost.create({ projectUrl: this.managedProjectUrl })
+    } catch (error) {
+      if (error?.code === 'CONVERSATION_CREATION_PACING') {
         return {
           dispatched: false,
           worker_kind: WORKER_KIND,
           backend: WORKER_BACKEND,
           reason: 'pacing',
-          retryAfterMs: admission?.retryAfterMs ?? null
+          retryAfterMs: error.retryAfterMs ?? null
         }
       }
-      preAdmitted = true
+      throw error
     }
-
-    const conversation = await this.conversationHost.create({ projectUrl: this.managedProjectUrl })
     await this.ledger.append(workId, 'worker_dispatched', {
       frontierId,
       conversationId: conversation.id,
@@ -450,8 +426,7 @@ export class WorkController {
         }
       }
 
-      this.lastDispatchAt = this.now()
-      const sent = await this.conversationHost.send(conversation.id, workerPrompt(frontier, state), { preAdmitted })
+      const sent = await this.conversationHost.send(conversation.id, workerPrompt(frontier, state), { preAdmitted: true })
       await this.ledger.append(workId, 'worker_dispatched', {
         frontierId,
         conversationId: conversation.id,

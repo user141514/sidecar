@@ -68,10 +68,11 @@ function normalizeProjectHomeUrl(value) {
 }
 
 export class ChatGptConversationHost {
-  constructor({ bridge, store, sendAdmission = null, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), writerMode = 'managed', writerEpoch = 0, managedProjectUrl = null }) {
+  constructor({ bridge, store, sendAdmission = null, creationAdmission = null, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), writerMode = 'managed', writerEpoch = 0, managedProjectUrl = null }) {
     this.bridge = bridge
     this.store = store
     this.sendAdmission = sendAdmission
+    this.creationAdmission = creationAdmission
     this.sleep = sleep
     this.writer = { mode: writerMode, epoch: writerEpoch }
     this.managedProjectUrl = managedProjectUrl ? normalizeProjectHomeUrl(managedProjectUrl) : null
@@ -174,6 +175,17 @@ export class ChatGptConversationHost {
         threadCreated: false,
         windowId: attached.windowId,
         tabId: attached.tabId
+      }
+    }
+    if (this.creationAdmission) {
+      const admission = await this.creationAdmission.admit({ source: 'conversation_create', target: createUrl })
+      if (admission?.admitted !== true) {
+        const error = new Error('new conversation creation is paced')
+        error.code = 'CONVERSATION_CREATION_PACING'
+        error.retryAfterMs = admission?.retryAfterMs ?? null
+        error.lastAdmittedAt = admission?.lastAdmittedAt ?? null
+        error.conversationId = created.id
+        throw error
       }
     }
     try {
@@ -347,19 +359,17 @@ export class ChatGptConversationHost {
       }
     }
 
-    const admission = await this.admitSend({ source: 'conversation_send', target: this.managedProjectUrl })
-    if (admission?.admitted !== true) {
-      return {
-        accepted: false,
-        reason: 'pacing',
-        retryAfterMs: admission?.retryAfterMs ?? null,
-        conversationId: allocated.id
-      }
-    }
-
     try {
       await this.#attachConversation(allocated, this.managedProjectUrl)
-    } catch {
+    } catch (error) {
+      if (error?.code === 'CONVERSATION_CREATION_PACING') {
+        return {
+          accepted: false,
+          reason: 'pacing',
+          retryAfterMs: error.retryAfterMs ?? null,
+          conversationId: allocated.id
+        }
+      }
       return { accepted: false, reason: 'allocation_unavailable', conversationId: allocated.id }
     }
 

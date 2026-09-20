@@ -46,16 +46,11 @@ class FakeHost {
     this.states = new Map()
     this.authoritativeStates = new Map()
     this.terminalListeners = new Map()
-    this.admissions = []
-    this.admitResult = { admitted: true, admittedAt: FakeLedger.now }
-  }
-
-  async admitSend(request) {
-    this.admissions.push(request)
-    return this.admitResult
+    this.createError = null
   }
 
   async create(options = {}) {
+    if (this.createError) throw this.createError
     this.created.push(options)
     const index = this.created.length
     return {
@@ -456,7 +451,7 @@ test('WorkController refuses managed dispatch before Project identity is resolve
   assert.equal(host.created.length, 0)
 })
 
-test('WorkController blocks dependent frontiers and enforces 120 second dispatch pacing', async () => {
+test('WorkController blocks dependent frontiers but does not own new-conversation pacing', async () => {
   const { WorkController } = await loadModule()
   assert.equal(typeof WorkController, 'function')
   if (typeof WorkController !== 'function') return
@@ -490,26 +485,20 @@ test('WorkController blocks dependent frontiers and enforces 120 second dispatch
   assert.match(host.sent[0].text, /human action, authorization, login, UI interaction, or missing input/i)
   assert.match(host.sent[0].text, /\[SUPERVISOR_STATE: NEED_INPUT\]/)
 
-  FakeLedger.now += 60_000
-  const paced = await controller.dispatch('work_test', 'f3')
-  assert.equal(paced.dispatched, false)
-  assert.equal(paced.worker_kind, 'conversation_worker')
-  assert.equal(paced.backend, 'sidecar')
-  assert.equal(paced.reason, 'pacing')
-  assert.equal(paced.retryAfterMs, 60_000)
-
-  FakeLedger.now += 60_000
   const second = await controller.dispatch('work_test', 'f3')
   assert.equal(second.dispatched, true)
   assert.equal(host.created.length, 2)
 })
 
-test('WorkController asks the shared admission owner before allocating a worker', async () => {
+test('WorkController reports creation pacing from the conversation owner without owning the timer', async () => {
   const { WorkController } = await loadModule()
   const ledger = new FakeLedger()
   const host = new FakeHost()
-  host.admitResult = { admitted: false, retryAfterMs: 45_000, lastAdmittedAt: 1 }
-  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
+  const error = new Error('new conversation pacing')
+  error.code = 'CONVERSATION_CREATION_PACING'
+  error.retryAfterMs = 45_000
+  host.createError = error
+  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl })
   await controller.decide('work_test', {
     action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', depends_on: [] }]
   })
@@ -521,25 +510,6 @@ test('WorkController asks the shared admission owner before allocating a worker'
   assert.equal(result.retryAfterMs, 45_000)
   assert.deepEqual(host.created, [])
   assert.deepEqual(host.sent, [])
-  assert.equal(host.admissions.length, 1)
-  assert.equal(host.admissions[0].source, 'work_dispatch')
-  assert.equal(host.admissions[0].target, managedProjectUrl)
-})
-
-test('WorkController passes a successful shared admission into the managed send', async () => {
-  const { WorkController } = await loadModule()
-  const ledger = new FakeLedger()
-  const host = new FakeHost()
-  const controller = new WorkController({ ledger, conversationHost: host, managedProjectUrl, now: () => FakeLedger.now })
-  await controller.decide('work_test', {
-    action: 'SPLIT', reason: 'bounded test', frontiers: [{ id: 'f1', task: 'one task', depends_on: [] }]
-  })
-
-  const result = await controller.dispatch('work_test', 'f1')
-
-  assert.equal(result.dispatched, true)
-  assert.equal(host.admissions.length, 1)
-  assert.equal(host.sent[0].options.preAdmitted, true)
 })
 
 test('WorkController includes the latest revised plan in depth-1 worker prompts', async () => {
@@ -952,7 +922,7 @@ test('WorkController treats STOP as terminal for later dispatch', async () => {
   assert.equal(host.created.length, 0)
 })
 
-test('WorkController serializes concurrent dispatch admission and applies pacing globally in-process', async () => {
+test('WorkController serializes dispatch execution without imposing its own pacing policy', async () => {
   const { WorkController } = await loadModule()
   assert.equal(typeof WorkController, 'function')
   if (typeof WorkController !== 'function') return
@@ -980,11 +950,9 @@ test('WorkController serializes concurrent dispatch admission and applies pacing
     controller.dispatch('work_test', 'f1'),
     controller.dispatch('work_test', 'f2')
   ])
-  assert.equal([a, b].filter((item) => item.dispatched).length, 1)
-  const blocked = [a, b].find((item) => !item.dispatched)
-  assert.equal(blocked.reason, 'pacing')
-  assert.equal(blocked.retryAfterMs, 120_000)
-  assert.equal(host.created.length, 1)
+  assert.equal(a.dispatched, true)
+  assert.equal(b.dispatched, true)
+  assert.equal(host.created.length, 2)
 })
 
 test('WorkController checkpoint commits one decision against an exact state revision and evidence set', async () => {
