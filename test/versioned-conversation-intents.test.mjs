@@ -147,6 +147,23 @@ function newIntent(over = {}) {
   }
 }
 
+function stopIntent(conversationId, over = {}) {
+  return {
+    contractVersion: 1,
+    intentId: 'intent-v1-stop',
+    source: 'watchdog',
+    conversationId,
+    target,
+    expectedStateVersion: 9,
+    expectedWriterEpoch: 3,
+    action: 'stop',
+    allocation: null,
+    text: null,
+    expected: { userMessageId: 'user-1', assistantMessageId: null },
+    ...over
+  }
+}
+
 test('v1 stale state and writer epoch reject before any browser effect', async t => {
   const { host, conversation, bridge, admission } = await setup(t)
   const current = state(conversation.id)
@@ -180,6 +197,122 @@ test('v1 gate delivery and progress preconditions fail closed', async t => {
     assert.equal(result.reason, reason)
   }
   assert.equal(bridge.calls.some(call => call.method === 'conversation_send'), false)
+  assert.equal(admission.calls, 0)
+})
+
+test('v1 stop interrupts exactly one active generation and records recoverable need_continue', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'versioned-stop-intents-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new ConversationStore(root)
+  const conversation = await store.create({ backend: 'chatgpt-web-extension', externalUrl: target })
+  await store.append(conversation.id, { type: 'send_intent', turnId: 'root-turn', requestId: 'root-request', text: 'root task' })
+  await store.append(conversation.id, { type: 'generation_started', turnId: 'root-turn', externalUrl: target })
+
+  const bridge = new EventEmitter()
+  bridge.calls = []
+  bridge.request = async (method, params) => {
+    bridge.calls.push({ method, params })
+    if (method === 'conversation_stop') {
+      return { accepted: true, url: target, userMessageId: 'user-1', assistantMessageId: null }
+    }
+    assert.fail(`unexpected browser effect: ${method}`)
+  }
+  const admission = { calls: 0, async admit() { this.calls += 1; return { admitted: true } } }
+  const host = new ChatGptConversationHost({ bridge, store, sendAdmission: admission, writerMode: 'managed', writerEpoch: 3 })
+  host.stateByTarget = async () => ({ found: true, state: state(conversation.id, {
+    progress: 'active', body: 'empty',
+    turn: { assistantMessageId: null }
+  }) })
+
+  const payload = stopIntent(conversation.id)
+  const first = await host.proposeContinuation(payload)
+  const replay = await host.proposeContinuation(payload)
+
+  assert.equal(first.accepted, true)
+  assert.equal(replay.accepted, true)
+  assert.equal(bridge.calls.filter(call => call.method === 'conversation_stop').length, 1)
+  assert.equal(bridge.calls.some(call => call.method === 'conversation_send'), false)
+  assert.equal(admission.calls, 0)
+
+  const stored = await store.read(conversation.id)
+  assert.equal(stored.status, 'need_continue')
+  const blocked = stored.events.find(event => event.type === 'need_continue' && event.turnId === 'root-turn')
+  assert.equal(blocked.reason, 'watchdog_stall')
+})
+
+test('v1 stop reconciles lost acknowledgement from durable browser effect receipt without stopping twice', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'versioned-stop-reconcile-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new ConversationStore(root)
+  const conversation = await store.create({ backend: 'chatgpt-web-extension', externalUrl: target })
+  await store.append(conversation.id, { type: 'send_intent', turnId: 'root-turn', requestId: 'root-request', text: 'root task' })
+  await store.append(conversation.id, { type: 'generation_started', turnId: 'root-turn', externalUrl: target })
+
+  const bridge = new EventEmitter()
+  bridge.calls = []
+  let stopEffects = 0
+  bridge.request = async (method, params) => {
+    bridge.calls.push({ method, params })
+    if (method === 'conversation_stop') {
+      stopEffects += 1
+      const error = new Error('native acknowledgement lost after stop')
+      error.code = 'DELIVERY_UNCERTAIN'
+      throw error
+    }
+    if (method === 'conversation_effect_receipt') {
+      if (stopEffects === 0) return { found: false }
+      return {
+        found: true,
+        receipt: {
+          requestId: 'intent-v1-stop',
+          action: 'stop',
+          conversationId: conversation.id,
+          turnId: 'root-turn',
+          userMessageId: 'user-1',
+          assistantMessageId: null,
+          expectedStateVersion: 9,
+          expectedWriterEpoch: 3,
+          externalUrl: target
+        }
+      }
+    }
+    assert.fail(`unexpected browser effect: ${method}`)
+  }
+  const host = new ChatGptConversationHost({ bridge, store, writerMode: 'managed', writerEpoch: 3 })
+  host.stateByTarget = async () => ({ found: true, state: state(conversation.id, {
+    progress: 'active', body: 'empty', turn: { assistantMessageId: null }
+  }) })
+
+  const payload = stopIntent(conversation.id)
+  const first = await host.proposeContinuation(payload)
+  assert.equal(first.accepted, false)
+  assert.equal(first.reason, 'delivery_uncertain')
+
+  const reconciled = await host.proposeContinuation(payload)
+  assert.equal(reconciled.accepted, true)
+  assert.equal(reconciled.reconciled, true)
+  assert.equal(stopEffects, 1)
+
+  const stored = await store.read(conversation.id)
+  assert.equal(stored.status, 'need_continue')
+  assert.equal(stored.events.filter(event => event.type === 'need_continue' && event.turnId === 'root-turn').length, 1)
+})
+
+test('v1 stop fails closed unless the exact authoritative turn is active and delivered', async t => {
+  const { host, conversation, bridge, admission } = await setup(t)
+  const cases = [
+    [state(conversation.id, { progress: 'terminal', body: 'substantive', turn: { assistantMessageId: null } }), 'state_not_stoppable'],
+    [state(conversation.id, { progress: 'active', body: 'empty', delivery: 'uncertain', turn: { assistantMessageId: null } }), 'state_delivery_uncertain'],
+    [state(conversation.id, { progress: 'active', body: 'empty', gate: 'human_required', turn: { assistantMessageId: null } }), 'need_input']
+  ]
+  let index = 0
+  for (const [current, reason] of cases) {
+    host.stateByTarget = async () => ({ found: true, state: current })
+    const result = await host.proposeContinuation(stopIntent(conversation.id, { intentId: `intent-v1-stop-deny-${index++}` }))
+    assert.equal(result.accepted, false)
+    assert.equal(result.reason, reason)
+  }
+  assert.equal(bridge.calls.some(call => call.method === 'conversation_stop'), false)
   assert.equal(admission.calls, 0)
 })
 

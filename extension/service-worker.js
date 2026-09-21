@@ -711,6 +711,83 @@ async function ensureContentScriptForAttachment(state, reloadOnReadinessFailure)
   }
 }
 
+async function stopConversation(params) {
+  const id = params.conversationId
+  if (typeof id !== 'string' || !id) throw new TypeError('conversationId is required')
+  if (typeof params.turnId !== 'string' || !params.turnId) throw new TypeError('turnId is required')
+  if (typeof params.requestId !== 'string' || !params.requestId) throw new TypeError('requestId is required')
+  const expected = params.expected
+  if (!expected || typeof expected !== 'object' || typeof expected.userMessageId !== 'string' || !expected.userMessageId) {
+    throw new TypeError('stop requires expected user message identity')
+  }
+
+  const prior = await loadEffectReceipt(params.requestId)
+  if (prior) {
+    const expectedAssistant = typeof expected.assistantMessageId === 'string' && expected.assistantMessageId
+      ? expected.assistantMessageId : null
+    const priorAssistant = typeof prior.assistantMessageId === 'string' && prior.assistantMessageId
+      ? prior.assistantMessageId : null
+    if (
+      prior.action !== 'stop' ||
+      prior.conversationId !== id ||
+      prior.turnId !== params.turnId ||
+      prior.userMessageId !== expected.userMessageId ||
+      priorAssistant !== expectedAssistant ||
+      prior.expectedStateVersion !== params.expectedStateVersion ||
+      prior.expectedWriterEpoch !== params.writerEpoch
+    ) {
+      throw new Error('effect receipt identity conflict')
+    }
+    return {
+      accepted: true,
+      reconciled: true,
+      userMessageId: prior.userMessageId,
+      assistantMessageId: priorAssistant,
+      url: prior.externalUrl || params.externalUrl || CHATGPT_URL
+    }
+  }
+
+  const { state } = await resolveConversationAttachment(id, params.externalUrl, true)
+  await ensureContentScriptForAttachment(state, false)
+  let stopped
+  try {
+    stopped = await boundedMessage(state.tabId, {
+      type: 'conversation_stop',
+      expected
+    }, 5_000)
+  } catch (error) {
+    throw deliveryUncertain(error)
+  }
+  if (stopped?.deliveryUncertain === true) {
+    throw deliveryUncertain(stopped.error || 'Stop outcome unknown')
+  }
+  if (stopped?.accepted !== true) {
+    throw new Error(stopped?.error || 'ChatGPT content script rejected stop')
+  }
+
+  const externalUrl = chooseConversationUrl(stopped.url, state.url)
+  const assistantMessageId = typeof stopped.assistantMessageId === 'string' && stopped.assistantMessageId
+    ? stopped.assistantMessageId : null
+  const receipt = await saveEffectReceipt({
+    requestId: params.requestId,
+    action: 'stop',
+    conversationId: id,
+    turnId: params.turnId,
+    userMessageId: stopped.userMessageId,
+    assistantMessageId,
+    expectedStateVersion: params.expectedStateVersion,
+    expectedWriterEpoch: params.writerEpoch,
+    externalUrl
+  })
+  return {
+    accepted: true,
+    userMessageId: receipt.userMessageId,
+    assistantMessageId: receipt.assistantMessageId,
+    assistantText: typeof stopped.assistantText === 'string' ? stopped.assistantText : '',
+    url: externalUrl
+  }
+}
+
 async function sendConversation(params) {
   const id = params.conversationId
   if (typeof params.requestId === 'string' && params.requestId) {
@@ -1163,6 +1240,9 @@ async function executeRequest(message) {
   }
   if (message.method === 'conversation_send') {
     return runWriterMutation(message.params ?? {}, () => sendConversation(message.params ?? {}))
+  }
+  if (message.method === 'conversation_stop') {
+    return runWriterMutation(message.params ?? {}, () => stopConversation(message.params ?? {}))
   }
   throw new Error(`Unknown native request method: ${message.method}`)
 }
