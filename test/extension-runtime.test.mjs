@@ -101,6 +101,10 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     scripting: {
       async executeScript(options) {
         scriptingCalls.push(options)
+        if (Array.isArray(options?.files) && options.files.includes('content-script.js')) {
+          const tabId = options?.target?.tabId
+          if (Number.isInteger(tabId)) staleContentScriptTabs.delete(tabId)
+        }
         return [{ result: webGptDiagnostic }]
       }
     },
@@ -173,7 +177,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         sentToTabs.push({ tabId, message, storageSnapshot: structuredClone(storageState) })
         if (message.type === 'sidecar_ping') {
           if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
-          return { ready: true, url: tab.url, composerPresent: tab.composerPresent === true }
+          return { ready: true, url: tab.url, buildId: 'a'.repeat(64), composerPresent: tab.composerPresent === true }
         }
         if (message.type === 'conversation_state_observe') {
           const readable = tab.stateReadable !== false && tab.userMessageId === message.expectedUserMessageId
@@ -378,6 +382,21 @@ const adoptionParams = { conversationId: 'conv_adopt', turnId: 'adopted-turn', r
   externalUrl: adoptionTarget, expectedUserMessageId: adoptionUser, writerEpoch: 3 }
 const adoptionTab = { id: 61, windowId: 6, url: adoptionTarget, userMessageId: adoptionUser,
   generating: true, body: 'empty' }
+
+test('explicit adoption reinjects a stale content script into only the exact target without reload or navigation', async () => {
+  const h = makeHarness({ tabs: [adoptionTab], windows: [{ id: 6 }], staleContentScriptTabIds: [61] })
+  await h.request('writer_epoch_claim', { writerEpoch: 3 })
+
+  const adopted = await h.request('conversation_adopt', adoptionParams)
+
+  assert.equal(adopted.ok, true)
+  assert.equal(adopted.result.accepted, true)
+  assert.equal(h.scriptingCalls.length, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(h.scriptingCalls[0].target)), { tabId: 61, frameIds: [0] })
+  assert.deepEqual(JSON.parse(JSON.stringify(h.scriptingCalls[0].files)), ['build-info.js', 'content-script.js'])
+  assert.deepEqual(h.reloadedTabs, [])
+  assert.equal(h.createdTabs.length + h.createdWindows.length, 0)
+})
 
 test('existing-tab inspection is read-only and explicit adoption binds without creation, navigation, or send', async () => {
   const h = makeHarness({ tabs: [adoptionTab], windows: [{ id: 6 }] })
