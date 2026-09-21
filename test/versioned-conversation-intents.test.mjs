@@ -353,6 +353,106 @@ test('v1 stop reconciles lost acknowledgement from durable browser effect receip
   assert.equal(stored.events.filter(event => event.type === 'need_continue' && event.turnId === 'root-turn').length, 1)
 })
 
+test('later blocked state reconciles an older uncertain stop before one new continuation effect', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'versioned-stop-postcondition-reconcile-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new ConversationStore(root)
+  const conversation = await store.create({ backend: 'chatgpt-web-extension', externalUrl: target })
+  await store.append(conversation.id, { type: 'send_intent', turnId: 'root-turn', requestId: 'root-request', text: 'root task' })
+  await store.append(conversation.id, { type: 'generation_started', turnId: 'root-turn', externalUrl: target })
+
+  const bridge = new EventEmitter()
+  bridge.calls = []
+  let stopEffects = 0
+  let sendEffects = 0
+  bridge.request = async (method, params) => {
+    bridge.calls.push({ method, params })
+    if (method === 'conversation_effect_receipt') return { found: false }
+    if (method === 'conversation_stop') {
+      stopEffects += 1
+      throw new Error('Stop effect could not be confirmed')
+    }
+    if (method === 'conversation_observe') {
+      return {
+        found: true,
+        allowed: true,
+        url: target,
+        userMessageId: 'user-1',
+        assistantMessageId: 'assistant-stopped'
+      }
+    }
+    if (method === 'conversation_send') {
+      sendEffects += 1
+      return { accepted: true, url: target, userMessageId: 'user-continue' }
+    }
+    assert.fail(`unexpected browser effect: ${method}`)
+  }
+  const admission = { calls: 0, async admit() { this.calls += 1; return { admitted: true } } }
+  const host = new ChatGptConversationHost({ bridge, store, sendAdmission: admission, writerMode: 'managed', writerEpoch: 3 })
+
+  let current = state(conversation.id, {
+    progress: 'active', body: 'empty', turn: { assistantMessageId: null }
+  })
+  host.stateByTarget = async () => ({ found: true, state: current })
+
+  const first = await host.proposeContinuation(stopIntent(conversation.id))
+  assert.equal(first.accepted, false)
+  assert.equal(first.reason, 'delivery_uncertain')
+  assert.equal(stopEffects, 1)
+
+  current = state(conversation.id, {
+    stateVersion: 10,
+    progress: 'blocked',
+    body: 'incomplete',
+    turn: { assistantMessageId: 'assistant-stopped' }
+  })
+  const continued = await host.proposeContinuation(intent(conversation.id, {
+    intentId: 'intent-after-uncertain-stop',
+    expectedStateVersion: 10,
+    expected: { userMessageId: 'user-1', assistantMessageId: 'assistant-stopped' }
+  }))
+
+  assert.equal(continued.accepted, true)
+  assert.equal(stopEffects, 1)
+  assert.equal(sendEffects, 1)
+  assert.equal(admission.calls, 1)
+  assert.equal(await host.mailbox.pendingEffect(target), null)
+  const stored = await store.read(conversation.id)
+  assert.equal(stored.events.filter(event => event.type === 'need_continue' && event.turnId === 'root-turn').length, 1)
+})
+
+test('later active state cannot settle or replay an older uncertain stop', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'versioned-stop-active-uncertain-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new ConversationStore(root)
+  const conversation = await store.create({ backend: 'chatgpt-web-extension', externalUrl: target })
+  await store.append(conversation.id, { type: 'send_intent', turnId: 'root-turn', requestId: 'root-request', text: 'root task' })
+  await store.append(conversation.id, { type: 'generation_started', turnId: 'root-turn', externalUrl: target })
+
+  const bridge = new EventEmitter()
+  let stopEffects = 0
+  bridge.request = async method => {
+    if (method === 'conversation_effect_receipt') return { found: false }
+    if (method === 'conversation_stop') {
+      stopEffects += 1
+      throw new Error('Stop effect could not be confirmed')
+    }
+    assert.fail(`unexpected browser effect: ${method}`)
+  }
+  const host = new ChatGptConversationHost({ bridge, store, writerMode: 'managed', writerEpoch: 3 })
+  const active = state(conversation.id, {
+    progress: 'active', body: 'empty', turn: { assistantMessageId: null }
+  })
+  host.stateByTarget = async () => ({ found: true, state: active })
+
+  const first = await host.proposeContinuation(stopIntent(conversation.id))
+  const second = await host.proposeContinuation(stopIntent(conversation.id, { intentId: 'new-stop-after-uncertain' }))
+
+  assert.equal(first.reason, 'delivery_uncertain')
+  assert.equal(second.reason, 'delivery_uncertain')
+  assert.equal(stopEffects, 1)
+})
+
 test('v1 stop fails closed unless the exact authoritative turn is active and delivered', async t => {
   const { host, conversation, bridge, admission } = await setup(t)
   const cases = [

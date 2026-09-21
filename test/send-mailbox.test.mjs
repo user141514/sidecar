@@ -61,6 +61,23 @@ test('uncertain effect blocks both replay and a fresh request after restart', as
   }
 })
 
+test('pendingEffect exposes one unresolved effect without mutating the journal', async t => {
+  const { box, rootDir } = await fixture(t)
+  await box.run(url, 'lost', { text: 'once' }, async dispatch => {
+    await dispatch({ action: 'stop', conversationId: 'conv-1', turnId: 'turn-1' })
+    throw new Error('response lost after browser effect')
+  })
+
+  const before = await box.pendingEffect(url)
+  const afterRestart = await new mod.SendMailbox({ rootDir }).pendingEffect(url)
+
+  assert.equal(before.requestId, 'lost')
+  assert.equal(before.effect.action, 'stop')
+  assert.equal(before.effect.conversationId, 'conv-1')
+  assert.equal(before.effect.turnId, 'turn-1')
+  assert.deepEqual(afterRestart, before)
+})
+
 test('authoritative effect receipt settles an uncertain pending request without replay', async t => {
   const { box, rootDir } = await fixture(t)
   let sends = 0
