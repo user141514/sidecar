@@ -183,6 +183,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           return { ready: true, url: tab.url, buildId: 'a'.repeat(64), composerPresent: tab.composerPresent === true }
         }
         if (message.type === 'conversation_state_observe') {
+          if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
           const readable = tab.stateReadable !== false && tab.userMessageId === message.expectedUserMessageId
           return {
             ready: true,
@@ -425,6 +426,22 @@ test('existing-tab inspection is read-only and explicit adoption binds without c
     externalUrl: adoptionTarget.replace('/c/', '/g/g-p-example/c/'), expectedUserMessageId: adoptionUser
   })
   assert.equal(aliased.result.readable, true)
+})
+
+test('explicit adoption preflight re-injects only the exact unowned tab observer after extension reload', async () => {
+  const h = makeHarness({ tabs: [adoptionTab], windows: [{ id: 6 }], staleContentScriptTabIds: [61] })
+  await h.request('writer_epoch_claim', { writerEpoch: 3 })
+  const stale = await h.request('conversation_adoption_inspect', { ...adoptionParams, writerEpoch: 2 })
+  assert.equal(stale.ok, false)
+  assert.equal(h.scriptingCalls.length, 0)
+  const inspected = await h.request('conversation_adoption_inspect', adoptionParams)
+  assert.equal(inspected.ok, true)
+  assert.equal(inspected.result.found, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(h.scriptingCalls)), [
+    { target: { tabId: 61, frameIds: [0] }, files: ['build-info.js', 'content-script.js'] }
+  ])
+  assert.equal(h.storageState['conversation:conv_adopt'], undefined)
+  assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length, 0)
 })
 
 test('adoption fails closed on missing target, ambiguous exact tabs, wrong UUID and stale user anchor', async () => {
