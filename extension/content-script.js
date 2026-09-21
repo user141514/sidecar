@@ -879,12 +879,13 @@ function nullableMessageId(value) {
 async function handleStop(message) {
   const expected = message?.expected
   if (!expected || typeof expected !== 'object') throw new Error('stop requires expected message identity')
-  const observation = writerObservation(null, false, false)
-  const userMessageId = nullableMessageId(observation.userMessageId)
-  const assistantMessageId = nullableMessageId(observation.assistantMessageId)
   const expectedUserMessageId = nullableMessageId(expected.userMessageId)
   const expectedAssistantMessageId = nullableMessageId(expected.assistantMessageId)
-  if (!expectedUserMessageId || userMessageId !== expectedUserMessageId || assistantMessageId !== expectedAssistantMessageId) {
+  const observation = readConversationStateObservation(expectedUserMessageId)
+  const userMessageId = nullableMessageId(observation.userMessageId)
+  const assistantMessageId = nullableMessageId(observation.assistantMessageId)
+  if (observation.humanGate === true) throw new Error('need_input')
+  if (observation.readable !== true || !expectedUserMessageId || userMessageId !== expectedUserMessageId || assistantMessageId !== expectedAssistantMessageId) {
     throw new Error('stale_intent')
   }
 
@@ -896,13 +897,18 @@ async function handleStop(message) {
 
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (!isGenerating()) {
-      const after = writerObservation(null, false, false)
+      const after = readConversationStateObservation(expectedUserMessageId)
+      if (after.readable !== true) {
+        const error = new Error('stop completed but exact current turn is no longer observable')
+        error.deliveryUncertain = true
+        throw error
+      }
       return {
         accepted: true,
         url: location.href,
         userMessageId: nullableMessageId(after.userMessageId),
         assistantMessageId: nullableMessageId(after.assistantMessageId),
-        assistantText: nodeText(assistantMessages().at(-1))
+        assistantText: after.assistantText || ''
       }
     }
     await sleep(50)
