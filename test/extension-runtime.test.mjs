@@ -238,6 +238,17 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           if (submitNavigatesTo) tab.url = submitNavigatesTo
           return { accepted: true, userMessageId: `user-${message.turnId}`, url: responseUrl }
         }
+        if (message.type === 'conversation_stop') {
+          if (tab.generating !== true) return { accepted: false, error: 'generation is not stoppable' }
+          tab.generating = false
+          return {
+            accepted: true,
+            url: tab.url,
+            userMessageId: tab.userMessageId ?? message.expected?.userMessageId ?? null,
+            assistantMessageId: tab.assistantMessageId ?? null,
+            assistantText: tab.assistantText ?? ''
+          }
+        }
         if (message.type === 'conversation_send') {
           return { accepted: true, url: tab.url, baselineAssistantCount: 0 }
         }
@@ -417,6 +428,59 @@ test('accepted browser effect persists a request-to-user-turn receipt before nat
   const lookup = await harness.request('conversation_effect_receipt', { requestId: 'request-receipt' })
   assert.equal(lookup.ok, true)
   assert.deepEqual(JSON.parse(JSON.stringify(lookup.result)), { found: true, receipt })
+})
+
+test('conversation_stop persists an effect receipt and duplicate request never clicks Stop twice', async () => {
+  const externalUrl = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000096'
+  const harness = makeHarness({
+    storage: {
+      window0: { windowId: 10 },
+      'conversation:conv_stop': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{
+      id: 20, windowId: 10, url: externalUrl, generating: true,
+      userMessageId: 'user-stop', assistantMessageId: null, assistantText: ''
+    }]
+  })
+  assert.equal((await harness.request('writer_epoch_claim', { writerEpoch: 3 })).ok, true)
+  const params = {
+    conversationId: 'conv_stop',
+    turnId: 'turn_stop',
+    requestId: 'request-stop',
+    externalUrl,
+    expectedStateVersion: 9,
+    writerEpoch: 3,
+    expected: { userMessageId: 'user-stop', assistantMessageId: null },
+    authoritativeState: true
+  }
+
+  const first = await harness.request('conversation_stop', params)
+  assert.equal(first.ok, true)
+  assert.equal(first.result.accepted, true)
+  assert.equal(harness.sentToTabs.filter(entry => entry.message.type === 'conversation_stop').length, 1)
+  const receipt = JSON.parse(JSON.stringify(harness.storageState['effect-receipt:request-stop']))
+  assert.deepEqual(receipt, {
+    requestId: 'request-stop',
+    action: 'stop',
+    conversationId: 'conv_stop',
+    turnId: 'turn_stop',
+    userMessageId: 'user-stop',
+    assistantMessageId: null,
+    expectedStateVersion: 9,
+    expectedWriterEpoch: 3,
+    externalUrl
+  })
+
+  const duplicate = await harness.request('conversation_stop', params)
+  assert.equal(duplicate.ok, true)
+  assert.equal(duplicate.result.reconciled, true)
+  assert.equal(harness.sentToTabs.filter(entry => entry.message.type === 'conversation_stop').length, 1)
+
+  const conflict = await harness.request('conversation_stop', { ...params, turnId: 'turn-other' })
+  assert.equal(conflict.ok, false)
+  assert.match(conflict.error, /receipt.*conflict|identity.*conflict/i)
+  assert.equal(harness.sentToTabs.filter(entry => entry.message.type === 'conversation_stop').length, 1)
 })
 
 test('duplicate request identity is deduplicated at the Extension before a second browser mutation', async () => {

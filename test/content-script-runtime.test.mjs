@@ -90,6 +90,123 @@ async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = f
   })
 }
 
+async function runStopFixture({ expectedUserMessageId = 'user-active', expectedAssistantMessageId = null } = {}) {
+  let runtimeListener = null
+  let generating = true
+  let clicks = 0
+  const user = {
+    textContent: 'active task',
+    innerText: 'active task',
+    getAttribute(name) { return name === 'data-message-id' ? 'user-active' : null },
+    compareDocumentPosition(other) { return other === assistant ? 4 : 0 }
+  }
+  const turn = {
+    getAttribute() { return null },
+    querySelector(selector) {
+      if (selector === '[aria-busy="true"]') return generating ? {} : null
+      return null
+    }
+  }
+  const assistant = {
+    textContent: 'Thinking',
+    innerText: 'Thinking',
+    getAttribute(name) {
+      if (name === 'data-message-id') return null
+      if (name === 'aria-busy') return generating ? 'true' : 'false'
+      return null
+    },
+    closest(selector) {
+      return selector.startsWith('[data-testid^="conversation-turn-"]') ? turn : null
+    },
+    querySelector(selector) {
+      return selector === '[aria-busy="true"]' && generating ? {} : null
+    }
+  }
+  const stopButton = {
+    disabled: false,
+    textContent: 'Stop response',
+    getAttribute(name) {
+      if (name === 'data-testid') return 'stop-button'
+      if (name === 'aria-label') return 'Stop response'
+      return null
+    },
+    click() {
+      clicks += 1
+      generating = false
+    }
+  }
+  const document = {
+    querySelector(selector) {
+      if (selector === '[data-testid="stop-button"]') return generating ? stopButton : null
+      if (selector === '[data-testid="tool-approval-card"]') return null
+      if (selector === '#prompt-textarea') return { textContent: '', getAttribute() { return null } }
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="user"]') return [user]
+      if (selector === '[data-message-author-role="assistant"]') return [assistant]
+      if (selector === 'button') return generating ? [stopButton] : []
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[role="alert"]') return []
+      return []
+    },
+    execCommand() { return true }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000041' },
+    chrome: {
+      runtime: {
+        async sendMessage() { return null },
+        onMessage: {
+          addListener(listener) { runtimeListener = listener },
+          removeListener() {}
+        }
+      }
+    },
+    HTMLTextAreaElement: class {},
+    HTMLInputElement: class {},
+    InputEvent: class {},
+    Date,
+    Promise,
+    Object,
+    URL,
+    console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+  const response = await new Promise((resolve) => {
+    const keepOpen = runtimeListener({
+      type: 'conversation_stop',
+      expected: {
+        userMessageId: expectedUserMessageId,
+        assistantMessageId: expectedAssistantMessageId
+      }
+    }, {}, resolve)
+    assert.equal(keepOpen, true)
+  })
+  return { response, clicks, generating }
+}
+
+test('conversation_stop verifies exact identity and observes generation exit before accepting', async () => {
+  const { response, clicks, generating } = await runStopFixture()
+  assert.equal(response.accepted, true)
+  assert.equal(response.userMessageId, 'user-active')
+  assert.equal(response.assistantMessageId, null)
+  assert.equal(clicks, 1)
+  assert.equal(generating, false)
+})
+
+test('conversation_stop rejects stale identity without clicking Stop', async () => {
+  const { response, clicks, generating } = await runStopFixture({ expectedUserMessageId: 'user-stale' })
+  assert.equal(response.accepted, false)
+  assert.match(response.error, /stale/i)
+  assert.equal(clicks, 0)
+  assert.equal(generating, true)
+})
+
 test('conversation_submit rejects a click that leaves the prompt draft untouched', async () => {
   const response = await runSubmitFixture({ clickTakesEffect: false })
   assert.equal(response.accepted, false)

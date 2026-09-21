@@ -27,7 +27,7 @@ function newAllocationIntentDigest(intent) {
   ])).digest('hex')
 }
 
-function versionedIntentDenial(intent, state) {
+function versionedIdentityDenial(intent, state) {
   const meta = versionedIntentMeta(state)
   if (state.writer.mode !== 'managed') return { accepted: false, reason: 'writer_mode_mismatch', ...meta }
   if (state.writer.epoch !== intent.expectedWriterEpoch) return { accepted: false, reason: 'writer_epoch_mismatch', ...meta }
@@ -40,6 +40,22 @@ function versionedIntentDenial(intent, state) {
   }
   if (state.gate === 'human_required') return { accepted: false, reason: 'need_input', ...meta }
   if (state.delivery === 'uncertain') return { accepted: false, reason: 'state_delivery_uncertain', ...meta }
+  return null
+}
+
+function versionedStopDenial(intent, state) {
+  const denial = versionedIdentityDenial(intent, state)
+  if (denial) return denial
+  const meta = versionedIntentMeta(state)
+  if (state.delivery !== 'delivered') return { accepted: false, reason: 'state_not_stoppable', ...meta }
+  if (!state.turn.userMessageId || state.progress !== 'active') return { accepted: false, reason: 'state_not_stoppable', ...meta }
+  return null
+}
+
+function versionedIntentDenial(intent, state) {
+  const denial = versionedIdentityDenial(intent, state)
+  if (denial) return denial
+  const meta = versionedIntentMeta(state)
   if (intent.action === 'open_child' && intent.allocation === 'REUSE') {
     if (state.delivery !== 'delivered' || state.progress !== 'terminal' || state.body !== 'substantive') {
       return { accepted: false, reason: 'state_not_reusable', ...meta }
@@ -237,6 +253,7 @@ export class ChatGptConversationHost {
 
   async #proposeVersionedContinuation(intent) {
     if (intent.action === 'open_child' && intent.allocation === 'NEW') return this.#proposeVersionedNew(intent)
+    if (intent.action === 'stop') return this.#proposeVersionedStop(intent)
     const reusable = intent.action === 'open_child' && intent.allocation === 'REUSE'
     if (intent.action !== 'continue' && !reusable) return { accepted: false, reason: 'unsupported_action' }
     const requestId = intent.intentId
@@ -302,6 +319,132 @@ export class ChatGptConversationHost {
         preAdmitted: true,
         authoritativeState: true
       })
+    }, intent.conversationId)
+  }
+
+  async #recordWatchdogStop(conversationId, turnId, target, assistantText = '') {
+    const stored = await this.store.read(conversationId)
+    if (!stored.events.some(event => event.type === 'need_continue' && event.turnId === turnId)) {
+      await this.store.append(conversationId, {
+        type: 'need_continue',
+        turnId,
+        text: typeof assistantText === 'string' ? assistantText : '',
+        reason: 'watchdog_stall',
+        externalUrl: target
+      })
+    }
+  }
+
+  async #reconcileVersionedStop(intent) {
+    let lookup
+    try {
+      lookup = await this.bridge.request('conversation_effect_receipt', { requestId: intent.intentId })
+    } catch {
+      return null
+    }
+    const receipt = lookup?.found === true ? lookup.receipt : null
+    const receiptAssistant = typeof receipt?.assistantMessageId === 'string' && receipt.assistantMessageId
+      ? receipt.assistantMessageId : null
+    const expectedAssistant = typeof intent.expected.assistantMessageId === 'string' && intent.expected.assistantMessageId
+      ? intent.expected.assistantMessageId : null
+    if (
+      !receipt ||
+      receipt.requestId !== intent.intentId ||
+      receipt.action !== 'stop' ||
+      receipt.conversationId !== intent.conversationId ||
+      typeof receipt.turnId !== 'string' || !receipt.turnId ||
+      receipt.userMessageId !== intent.expected.userMessageId ||
+      receiptAssistant !== expectedAssistant ||
+      receipt.expectedStateVersion !== intent.expectedStateVersion ||
+      receipt.expectedWriterEpoch !== intent.expectedWriterEpoch ||
+      typeof receipt.externalUrl !== 'string' ||
+      canonicalTarget(receipt.externalUrl) !== canonicalTarget(intent.target)
+    ) {
+      return null
+    }
+
+    let settled
+    try {
+      settled = await this.mailbox.reconcile(intent.target, intent.intentId, {
+        conversationId: intent.conversationId,
+        turnId: receipt.turnId,
+        accepted: true,
+        userMessageId: receipt.userMessageId,
+        assistantMessageId: receiptAssistant,
+        currentStateVersion: intent.expectedStateVersion,
+        currentWriterEpoch: intent.expectedWriterEpoch
+      }, intent.conversationId)
+    } catch {
+      return null
+    }
+    if (settled?.accepted !== true) return null
+    await this.#recordWatchdogStop(intent.conversationId, receipt.turnId, intent.target, receipt.assistantText)
+    return { ...settled, reconciled: true }
+  }
+
+  async #proposeVersionedStop(intent) {
+    const reconciled = await this.#reconcileVersionedStop(intent)
+    if (reconciled) return reconciled
+    const requestId = intent.intentId
+    const mailboxPayload = {
+      contractVersion: 1,
+      action: intent.action,
+      source: intent.source,
+      conversationId: intent.conversationId,
+      expectedStateVersion: intent.expectedStateVersion,
+      expectedWriterEpoch: intent.expectedWriterEpoch,
+      userMessageId: intent.expected.userMessageId,
+      assistantMessageId: intent.expected.assistantMessageId
+    }
+    return this.mailbox.run(intent.target, requestId, mailboxPayload, async markDispatching => {
+      const current = await this.stateByTarget(intent.target)
+      if (current?.found !== true) return { accepted: false, reason: current?.reason || 'target_unavailable' }
+      const denial = versionedStopDenial(intent, current.state)
+      if (denial) return denial
+
+      const matches = await this.store.findByExternalUrl(intent.target)
+      if (matches.length === 0) return { accepted: false, reason: 'target_unavailable', ...versionedIntentMeta(current.state) }
+      if (matches.length > 1) return { accepted: false, reason: 'ambiguous_local_binding', ...versionedIntentMeta(current.state) }
+      const conversation = matches[0]
+      if (conversation.id !== intent.conversationId || conversation.status !== 'generating') {
+        return { accepted: false, reason: 'state_not_stoppable', ...versionedIntentMeta(current.state) }
+      }
+
+      await markDispatching({
+        action: 'stop',
+        conversationId: conversation.id,
+        turnId: current.state.turn.turnId,
+        expectedStateVersion: current.state.stateVersion,
+        expectedWriterEpoch: current.state.writer.epoch
+      })
+      const stopped = await this.bridge.request('conversation_stop', {
+        conversationId: conversation.id,
+        turnId: current.state.turn.turnId,
+        requestId,
+        externalUrl: intent.target,
+        expectedStateVersion: current.state.stateVersion,
+        writerEpoch: current.state.writer.epoch,
+        expected: intent.expected,
+        authoritativeState: true
+      })
+      if (stopped?.accepted !== true) {
+        const error = new Error(stopped?.reason || 'browser stop rejected')
+        error.definiteRejection = stopped?.deliveryUncertain !== true
+        throw error
+      }
+
+      await this.#recordWatchdogStop(
+        conversation.id,
+        current.state.turn.turnId,
+        intent.target,
+        stopped.assistantText
+      )
+      return {
+        conversationId: conversation.id,
+        turnId: current.state.turn.turnId,
+        accepted: true,
+        ...versionedIntentMeta(current.state)
+      }
     }, intent.conversationId)
   }
 

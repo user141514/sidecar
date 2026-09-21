@@ -853,9 +853,10 @@ function readConversationStateObservation(expectedUserMessageId) {
   }
 }
 
-function isGenerating() {
-  if (document.querySelector('[data-testid="stop-button"]')) return true
-  return [...document.querySelectorAll('button')].some((button) => {
+function findStopButton() {
+  const direct = document.querySelector('[data-testid="stop-button"]')
+  if (direct) return direct
+  return [...document.querySelectorAll('button')].find((button) => {
     const label = (button.getAttribute('aria-label') || button.textContent || '').trim().toLowerCase()
     return label.includes('stop streaming') ||
       label.includes('stop generating') ||
@@ -864,7 +865,51 @@ function isGenerating() {
       label.includes('停止生成') ||
       label.includes('停止回答') ||
       label === 'stop'
-  })
+  }) ?? null
+}
+
+function isGenerating() {
+  return Boolean(findStopButton())
+}
+
+function nullableMessageId(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+async function handleStop(message) {
+  const expected = message?.expected
+  if (!expected || typeof expected !== 'object') throw new Error('stop requires expected message identity')
+  const observation = writerObservation(null, false, false)
+  const userMessageId = nullableMessageId(observation.userMessageId)
+  const assistantMessageId = nullableMessageId(observation.assistantMessageId)
+  const expectedUserMessageId = nullableMessageId(expected.userMessageId)
+  const expectedAssistantMessageId = nullableMessageId(expected.assistantMessageId)
+  if (!expectedUserMessageId || userMessageId !== expectedUserMessageId || assistantMessageId !== expectedAssistantMessageId) {
+    throw new Error('stale_intent')
+  }
+
+  const stop = findStopButton()
+  if (!stop || stop.disabled === true || stop.getAttribute?.('aria-disabled') === 'true') {
+    throw new Error('generation is not stoppable')
+  }
+  stop.click()
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (!isGenerating()) {
+      const after = writerObservation(null, false, false)
+      return {
+        accepted: true,
+        url: location.href,
+        userMessageId: nullableMessageId(after.userMessageId),
+        assistantMessageId: nullableMessageId(after.assistantMessageId),
+        assistantText: nodeText(assistantMessages().at(-1))
+      }
+    }
+    await sleep(50)
+  }
+  const error = new Error('Stop effect could not be confirmed')
+  error.deliveryUncertain = true
+  throw error
 }
 
 function getComposerMode() {
@@ -1230,6 +1275,17 @@ function onSidecarMessage(message, _sender, sendResponse) {
 
   if (message?.type === 'conversation_submit') {
     void handleSubmit(message)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({
+        accepted: false,
+        deliveryUncertain: error.deliveryUncertain === true,
+        error: error instanceof Error ? error.message : String(error)
+      }))
+    return true
+  }
+
+  if (message?.type === 'conversation_stop') {
+    void handleStop(message)
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({
         accepted: false,
