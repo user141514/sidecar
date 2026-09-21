@@ -240,6 +240,61 @@ test('v1 stop interrupts exactly one active generation and records recoverable n
   assert.equal(blocked.reason, 'watchdog_stall')
 })
 
+test('v1 stop converges to blocked state with stable assistant identity for the next continuation', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'versioned-stop-state-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new ConversationStore(root)
+  const conversation = await store.create({ backend: 'chatgpt-web-extension', externalUrl: target })
+  await store.append(conversation.id, { type: 'send_intent', turnId: 'root-turn', requestId: 'root-request', text: 'root task' })
+  await store.append(conversation.id, { type: 'generation_started', turnId: 'root-turn', externalUrl: target })
+
+  const bridge = new EventEmitter()
+  let stopped = false
+  bridge.request = async (method, params) => {
+    if (method === 'conversation_effect_receipt') {
+      if (params.requestId === 'root-request') return { found: true, receipt: {
+        requestId: 'root-request', conversationId: conversation.id, turnId: 'root-turn',
+        userMessageId: 'user-1', externalUrl: target
+      } }
+      return { found: false }
+    }
+    if (method === 'conversation_state_observe') return {
+      contractVersion: 1, source: 'browser', conversationId: conversation.id, target,
+      observedAt: '2099-09-21T03:00:00.000Z', turnId: 'root-turn', userMessageId: 'user-1',
+      assistantMessageId: stopped ? 'assistant-stopped' : null,
+      assistantText: stopped ? 'partial after stop' : '', readable: true,
+      generating: !stopped, terminal: false, body: stopped ? 'incomplete' : 'empty',
+      humanGate: false, delivery: 'unknown', requestId: null
+    }
+    if (method === 'conversation_stop') {
+      stopped = true
+      return { accepted: true, url: target, userMessageId: 'user-1', assistantMessageId: 'assistant-stopped', assistantText: 'partial after stop' }
+    }
+    assert.fail(`unexpected browser effect: ${method}`)
+  }
+  const host = new ChatGptConversationHost({ bridge, store, writerMode: 'managed', writerEpoch: 3 })
+
+  const before = await host.state(conversation.id)
+  assert.equal(before.stateVersion, 1, JSON.stringify(before))
+  assert.equal(before.progress, 'active')
+  assert.equal(before.turn.assistantMessageId, null)
+  const stableBeforeStop = await host.state(conversation.id)
+  assert.equal(stableBeforeStop.stateVersion, before.stateVersion, JSON.stringify(stableBeforeStop))
+
+  const result = await host.proposeContinuation(stopIntent(conversation.id, {
+    expectedStateVersion: before.stateVersion,
+    expectedWriterEpoch: before.writer.epoch,
+    expected: { userMessageId: 'user-1', assistantMessageId: null }
+  }))
+  assert.equal(result.accepted, true, JSON.stringify(result))
+
+  const after = await host.state(conversation.id)
+  assert.equal(after.progress, 'blocked')
+  assert.equal(after.body, 'incomplete')
+  assert.equal(after.turn.userMessageId, 'user-1')
+  assert.equal(after.turn.assistantMessageId, 'assistant-stopped')
+})
+
 test('v1 stop reconciles lost acknowledgement from durable browser effect receipt without stopping twice', async t => {
   const root = await mkdtemp(join(tmpdir(), 'versioned-stop-reconcile-'))
   t.after(() => rm(root, { recursive: true, force: true }))
