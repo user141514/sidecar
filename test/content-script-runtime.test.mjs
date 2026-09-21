@@ -90,7 +90,7 @@ async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = f
   })
 }
 
-async function runStopFixture({ expectedUserMessageId = 'user-active', expectedAssistantMessageId = null } = {}) {
+async function runStopFixture({ expectedUserMessageId = 'user-active', expectedAssistantMessageId = null, previousAssistant = false, humanGate = false } = {}) {
   let runtimeListener = null
   let generating = true
   let clicks = 0
@@ -98,7 +98,7 @@ async function runStopFixture({ expectedUserMessageId = 'user-active', expectedA
     textContent: 'active task',
     innerText: 'active task',
     getAttribute(name) { return name === 'data-message-id' ? 'user-active' : null },
-    compareDocumentPosition(other) { return other === assistant ? 4 : 0 }
+    compareDocumentPosition(other) { return other === assistant ? (previousAssistant ? 2 : 4) : 0 }
   }
   const turn = {
     getAttribute() { return null },
@@ -111,7 +111,7 @@ async function runStopFixture({ expectedUserMessageId = 'user-active', expectedA
     textContent: 'Thinking',
     innerText: 'Thinking',
     getAttribute(name) {
-      if (name === 'data-message-id') return null
+      if (name === 'data-message-id') return previousAssistant ? 'assistant-old' : null
       if (name === 'aria-busy') return generating ? 'true' : 'false'
       return null
     },
@@ -138,7 +138,7 @@ async function runStopFixture({ expectedUserMessageId = 'user-active', expectedA
   const document = {
     querySelector(selector) {
       if (selector === '[data-testid="stop-button"]') return generating ? stopButton : null
-      if (selector === '[data-testid="tool-approval-card"]') return null
+      if (selector === '[data-testid="tool-approval-card"]') return humanGate ? {} : null
       if (selector === '#prompt-textarea') return { textContent: '', getAttribute() { return null } }
       return null
     },
@@ -197,6 +197,20 @@ test('conversation_stop verifies exact identity and observes generation exit bef
   assert.equal(response.assistantMessageId, null)
   assert.equal(clicks, 1)
   assert.equal(generating, false)
+})
+
+test('conversation_stop anchors to the adopted current user, not an older assistant still mounted in the page', async () => {
+  const { response, clicks } = await runStopFixture({ previousAssistant: true })
+  assert.equal(response.accepted, true)
+  assert.equal(response.userMessageId, 'user-active')
+  assert.equal(response.assistantMessageId, null)
+  assert.equal(clicks, 1)
+})
+
+test('conversation_stop cannot ignore a live human gate at the final effect boundary', async () => {
+  const { response, clicks } = await runStopFixture({ humanGate: true })
+  assert.equal(response.accepted, false)
+  assert.equal(clicks, 0)
 })
 
 test('conversation_stop rejects stale identity without clicking Stop', async () => {
