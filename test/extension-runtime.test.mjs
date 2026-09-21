@@ -375,6 +375,91 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
   }
 }
 
+const adoptionTarget = 'https://chatgpt.com/c/00000000-0000-4000-8000-000000000061'
+const adoptionUser = '10000000-0000-4000-8000-000000000061'
+const adoptionParams = { conversationId: 'conv_adopt', turnId: 'adopted-turn', requestId: 'adopt-request',
+  externalUrl: adoptionTarget, expectedUserMessageId: adoptionUser, writerEpoch: 3 }
+const adoptionTab = { id: 61, windowId: 6, url: adoptionTarget, userMessageId: adoptionUser,
+  generating: true, body: 'empty' }
+
+test('existing-tab inspection is read-only and explicit adoption binds without creation, navigation, or send', async () => {
+  const h = makeHarness({ tabs: [adoptionTab], windows: [{ id: 6 }] })
+  await h.request('writer_epoch_claim', { writerEpoch: 3 })
+  const inspected = await h.request('conversation_adoption_inspect', adoptionParams)
+  assert.equal(inspected.ok, true)
+  assert.equal(inspected.result.found, true)
+  assert.equal(h.storageState['conversation:conv_adopt'], undefined)
+  const adopted = await h.request('conversation_adopt', adoptionParams)
+  assert.equal(adopted.ok, true)
+  assert.equal(adopted.result.accepted, true)
+  assert.equal(h.storageState['conversation:conv_adopt'].tabId, 61)
+  assert.equal(h.storageState['conversation:conv_adopt'].adopted, true)
+  assert.equal(h.storageState['effect-receipt:adopt-request'].action, 'adopt')
+  assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length, 0)
+  assert.equal(h.sentToTabs.some(c => ['conversation_prepare', 'conversation_submit', 'conversation_stop'].includes(c.message.type)), false)
+  const replay = await h.request('conversation_adopt', adoptionParams)
+  assert.equal(replay.result.accepted, true)
+  assert.equal(replay.result.reconciled, true)
+  assert.equal(Object.keys(h.storageState).filter(k => k.startsWith('conversation:')).length, 1)
+  const aliased = await h.request('conversation_state_observe', {
+    conversationId: 'conv_adopt', turnId: 'adopted-turn',
+    externalUrl: adoptionTarget.replace('/c/', '/g/g-p-example/c/'), expectedUserMessageId: adoptionUser
+  })
+  assert.equal(aliased.result.readable, true)
+})
+
+test('adoption fails closed on missing target, ambiguous exact tabs, wrong UUID and stale user anchor', async () => {
+  for (const tabs of [[], [adoptionTab, { ...adoptionTab, id: 62 }],
+    [{ ...adoptionTab, url: adoptionTarget.replace('0061', '0062') }],
+    [{ ...adoptionTab, userMessageId: 'another-message' }]]) {
+    const h = makeHarness({ tabs, windows: [{ id: 6 }] })
+    await h.request('writer_epoch_claim', { writerEpoch: 3 })
+    const r = await h.request('conversation_adopt', adoptionParams)
+    assert.equal(r.ok === true && r.result?.accepted === true, false)
+    assert.equal(h.storageState['conversation:conv_adopt'], undefined)
+    assert.equal(h.createdTabs.length, 0)
+  }
+})
+
+test('adoption rejects another persisted browser owner and stale writer epoch', async () => {
+  const h = makeHarness({ tabs: [adoptionTab], windows: [{ id: 6 }], storage: {
+    'conversation:conv_other': { tabId: 61, windowId: 6, url: adoptionTarget }
+  } })
+  await h.request('writer_epoch_claim', { writerEpoch: 3 })
+  const conflict = await h.request('conversation_adopt', adoptionParams)
+  assert.equal(conflict.ok === true && conflict.result?.accepted === true, false)
+  const stale = await h.request('conversation_adopt', { ...adoptionParams, writerEpoch: 2 })
+  assert.equal(stale.ok, false)
+  assert.equal(h.storageState['conversation:conv_adopt'], undefined)
+})
+
+test('adopted binding survives extension restart and closed/navigated target is never reopened', async () => {
+  const first = makeHarness({ tabs: [adoptionTab], windows: [{ id: 6 }] })
+  await first.request('writer_epoch_claim', { writerEpoch: 3 })
+  assert.equal((await first.request('conversation_adopt', adoptionParams)).result.accepted, true)
+  const restarted = makeHarness({ storage: structuredClone(first.storageState), tabs: [adoptionTab], windows: [{ id: 6 }] })
+  const read = await restarted.request('conversation_state_observe', { conversationId: 'conv_adopt', turnId: 'adopted-turn',
+    externalUrl: adoptionTarget, expectedUserMessageId: adoptionUser })
+  assert.equal(read.result.readable, true)
+  await restarted.updateTab(61, { url: 'https://example.com/' })
+  const unavailable = await restarted.request('conversation_state_observe', { conversationId: 'conv_adopt', turnId: 'adopted-turn',
+    externalUrl: adoptionTarget, expectedUserMessageId: adoptionUser })
+  assert.equal(unavailable.result.readable, false)
+  const replay = await restarted.request('conversation_adopt', adoptionParams)
+  assert.equal(replay.ok === true && replay.result?.accepted === true, false)
+  assert.equal(restarted.createdTabs.length, 0)
+})
+
+test('concurrent adoption cannot create two owners of an exact tab', async () => {
+  const h = makeHarness({ tabs: [adoptionTab], windows: [{ id: 6 }] })
+  await h.request('writer_epoch_claim', { writerEpoch: 3 })
+  await Promise.all([h.request('conversation_adopt', adoptionParams), h.request('conversation_adopt', {
+    ...adoptionParams, conversationId: 'conv_contender', requestId: 'adopt-contender'
+  })])
+  assert.equal(Object.keys(h.storageState).filter(k => k.startsWith('conversation:')).length, 1)
+  assert.equal(h.createdTabs.length, 0)
+})
+
 test('Project slug redirect preserves the existing tab', async () => {
   const home = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
   const alias = home.replace('/project', '-subagents/project')

@@ -41,7 +41,8 @@ function has(ledger, turnId, ...types) {
 function baseDelivery(ledger, turnId) {
   if (!turnId) return 'none'
   if (ledger.status === 'delivery_uncertain' || has(ledger, turnId, 'delivery_uncertain')) return 'uncertain'
-  if (has(ledger, turnId, 'generation_started', 'response_completed', 'need_continue')) return 'delivered'
+  // Adoption proves an existing persisted user message, not a send effect.
+  if (has(ledger, turnId, 'conversation_adopted', 'generation_started', 'response_completed', 'need_continue')) return 'delivered'
   if (has(ledger, turnId, 'send_intent', 'prompt_sent')) return 'pending'
   return 'none'
 }
@@ -98,7 +99,7 @@ export function reduceConversationProjection({ ledger, observations = [], writer
   let assistantMessageId = prior?.turn.turnId === turnId ? prior.turn.assistantMessageId : null
   let target = ledger.externalUrl
 
-  const receiptAccepted = Boolean(receipt?.requestId === intent?.requestId && receipt.delivery === 'delivered')
+  const receiptAccepted = Boolean(receipt && intent && receipt.requestId === intent.requestId && receipt.delivery === 'delivered')
   if (receiptAccepted) {
     delivery = 'delivered'
     userMessageId = receipt.userMessageId ?? userMessageId

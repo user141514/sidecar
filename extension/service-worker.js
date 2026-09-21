@@ -739,6 +739,78 @@ async function ensureContentScriptForAttachment(state, reloadOnReadinessFailure)
   }
 }
 
+function exactAdoptionUuid(value) {
+  try {
+    const url = new URL(value)
+    const match = url.pathname.match(/^\/(?:g\/g-p-[^/]+\/)?c\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/?$/i)
+    return url.origin === 'https://chatgpt.com' && !url.username && !url.password && !url.search && !url.hash && match
+      ? match[1].toLowerCase() : null
+  } catch { return null }
+}
+
+async function inspectAdoption(params) {
+  const uuid = exactAdoptionUuid(params.externalUrl)
+  if (!uuid) throw new Error('exact conversation UUID required for adoption')
+  if (typeof params.expectedUserMessageId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(params.expectedUserMessageId)) {
+    throw new Error('explicit persistent user message UUID required')
+  }
+  const tabs = (await chrome.tabs.query({})).filter(tab => exactAdoptionUuid(tabPageUrl(tab)) === uuid)
+  if (tabs.length !== 1) return { found: false, reason: tabs.length ? 'ambiguous_target_tabs' : 'exact_tab_unavailable' }
+  const tab = tabs[0]
+  const snapshot = await boundedMessage(tab.id, { type: 'conversation_state_observe', expectedUserMessageId: params.expectedUserMessageId }, 2000)
+  if (snapshot?.ready !== true || snapshot?.readable !== true || snapshot.userMessageId !== params.expectedUserMessageId ||
+      exactAdoptionUuid(snapshot.url) !== uuid) return { found: false, reason: 'adoption_identity_mismatch' }
+  return { found: true, url: snapshot.url, tabId: tab.id, windowId: tab.windowId,
+    userMessageId: snapshot.userMessageId, assistantMessageId: snapshot.assistantMessageId ?? null,
+    readable: true, generating: snapshot.generating, terminal: snapshot.terminal,
+    body: snapshot.body, humanGate: snapshot.humanGate }
+}
+
+async function adoptConversation(params) {
+  for (const key of ['conversationId', 'turnId', 'requestId']) {
+    if (typeof params[key] !== 'string' || !params[key] || params[key].length > 256) throw new Error(`adoption requires ${key}`)
+  }
+  const live = await inspectAdoption(params)
+  if (live.found !== true) return { accepted: false, reason: live.reason }
+  const uuid = exactAdoptionUuid(live.url)
+  if (tabOwners.has(live.tabId)) return { accepted: false, reason: 'busy' }
+  tabOwners.set(live.tabId, params.conversationId)
+  try {
+    const all = await chrome.storage.local.get(null)
+    const conflict = Object.entries(all).some(([key, value]) =>
+      key.startsWith(STORAGE_PREFIX) && key !== storageKey(params.conversationId) &&
+      (value?.tabId === live.tabId || exactAdoptionUuid(value?.url) === uuid))
+    if (conflict) return { accepted: false, reason: 'browser_binding_conflict' }
+    if (Object.entries(all).some(([key, value]) => key.startsWith(PENDING_PREFIX) && value?.tabId === live.tabId)) {
+      return { accepted: false, reason: 'pending_browser_operation' }
+    }
+    const prior = all[effectReceiptKey(params.requestId)]
+    if (prior) {
+      if (prior.action !== 'adopt' || prior.conversationId !== params.conversationId || prior.turnId !== params.turnId ||
+          prior.userMessageId !== params.expectedUserMessageId || exactAdoptionUuid(prior.externalUrl) !== uuid) {
+        throw new Error('adoption receipt identity conflict')
+      }
+      const binding = all[storageKey(params.conversationId)]
+      if (binding?.tabId !== live.tabId || exactAdoptionUuid(binding?.url) !== uuid) return { accepted: false, reason: 'binding_reconciliation_required' }
+      return { accepted: true, reconciled: true, receipt: prior }
+    }
+    // Re-observe after asynchronous storage inspection; no guessed tab fallback.
+    const fresh = await inspectAdoption(params)
+    if (fresh.found !== true || fresh.tabId !== live.tabId) return { accepted: false, reason: 'adoption_target_changed' }
+    const binding = { tabId: fresh.tabId, windowId: fresh.windowId, url: fresh.url, adopted: true }
+    const receipt = { requestId: params.requestId, action: 'adopt', conversationId: params.conversationId,
+      turnId: params.turnId, externalUrl: fresh.url, userMessageId: fresh.userMessageId,
+      assistantMessageId: fresh.assistantMessageId, generating: fresh.generating,
+      tabId: fresh.tabId, windowId: fresh.windowId, expectedWriterEpoch: params.writerEpoch }
+    // One atomic storage operation: browser binding is a rebuildable attachment;
+    // the Sidecar ledger alone owns the adopted conversation and its lifecycle.
+    await chrome.storage.local.set({ [storageKey(params.conversationId)]: binding, [effectReceiptKey(params.requestId)]: receipt })
+    return { accepted: true, receipt }
+  } finally {
+    if (tabOwners.get(live.tabId) === params.conversationId) tabOwners.delete(live.tabId)
+  }
+}
+
 async function stopConversation(params) {
   const id = params.conversationId
   if (typeof id !== 'string' || !id) throw new TypeError('conversationId is required')
@@ -1188,12 +1260,21 @@ async function readConversationStateObservation(params) {
   const stored = await loadConversation(conversationId)
   const expectedUrl = chooseConversationUrl(params?.externalUrl, stored?.url)
   if (!stored || !stableConversationUrl(expectedUrl)) return unreadableStateObservation(conversationId, expectedUrl || CHATGPT_URL, turnId)
-  let tab = await findRegisteredLiveTab(stored, expectedUrl)
-  if (!tab && Number.isInteger(stored.windowId)) tab = await findMatchingConversationTab(stored.windowId, expectedUrl)
+  let tab
+  if (stored.adopted === true) {
+    const exact = (await chrome.tabs.query({})).filter(item => exactAdoptionUuid(tabPageUrl(item)) === exactAdoptionUuid(expectedUrl))
+    if (exact.length === 1) tab = exact[0]
+  } else {
+    tab = await findRegisteredLiveTab(stored, expectedUrl)
+    if (!tab && Number.isInteger(stored.windowId)) tab = await findMatchingConversationTab(stored.windowId, expectedUrl)
+  }
   if (!tab || !Number.isInteger(tab.id)) return unreadableStateObservation(conversationId, expectedUrl, turnId)
   const snapshot = await boundedMessage(tab.id, { type: 'conversation_state_observe', expectedUserMessageId }, 2000)
   const actualUrl = stableConversationUrl(snapshot?.url)
-  if (!actualUrl || pageIdentity(actualUrl) !== pageIdentity(expectedUrl) || snapshot?.ready !== true || snapshot?.readable !== true || snapshot?.userMessageId !== expectedUserMessageId) {
+  const sameIdentity = stored.adopted === true
+    ? exactAdoptionUuid(actualUrl) !== null && exactAdoptionUuid(actualUrl) === exactAdoptionUuid(expectedUrl)
+    : pageIdentity(actualUrl) === pageIdentity(expectedUrl)
+  if (!actualUrl || !sameIdentity || snapshot?.ready !== true || snapshot?.readable !== true || snapshot?.userMessageId !== expectedUserMessageId) {
     return unreadableStateObservation(conversationId, actualUrl || expectedUrl, turnId)
   }
   return {
@@ -1267,6 +1348,8 @@ async function executeRequest(message) {
     if (snapshot?.ready !== true || !tabMatchesExpectedUrl({ url: snapshot.url }, expectedUrl)) return { found: false }
     return { ...snapshot, found: true }
   }
+  if (message.method === 'conversation_adoption_inspect') return inspectAdoption(message.params ?? {})
+  if (message.method === 'conversation_adopt') return runWriterMutation(message.params ?? {}, () => adoptConversation(message.params ?? {}))
   if (message.method === 'conversation_snapshot') return readConversationSnapshot(message.params ?? {})
   if (message.method === 'conversation_state_observe') return readConversationStateObservation(message.params ?? {})
   if (message.method === 'conversation_effect_receipt') {
