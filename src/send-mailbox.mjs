@@ -102,6 +102,36 @@ export class SendMailbox {
     return run
   }
 
+  pendingEffect(target, fallbackId = '') {
+    const key = canonicalTarget(target, fallbackId)
+    const previous = this.queues.get(key) ?? Promise.resolve()
+    return previous.then(() => this.readPendingEffect(key))
+  }
+
+  async readPendingEffect(key) {
+    const file = this.rootDir ? join(this.rootDir, `${hash(key)}.json`) : null
+    let state
+    if (file) {
+      try { state = JSON.parse(await readFile(file, 'utf8')) } catch (error) {
+        if (error.code === 'ENOENT') return null
+        throw error
+      }
+    } else state = this.memory.get(key)
+    if (!state) return null
+    if (state.version !== 1 || state.key !== key || !Number.isInteger(state.revision) || !state.receipts) {
+      throw new Error('invalid mailbox journal')
+    }
+    if (!state.pending) return null
+    return structuredClone({
+      requestId: state.pending.requestId,
+      digest: state.pending.digest,
+      revision: state.pending.revision,
+      effect: state.pending.effect || {},
+      at: state.pending.at,
+      ...(state.pending.outcome ? { outcome: state.pending.outcome } : {})
+    })
+  }
+
   reconcile(target, requestId, result, fallbackId = '') {
     if (typeof requestId !== 'string' || !requestId || requestId.length > 256) throw new TypeError('invalid request id')
     if (result?.accepted !== true) throw new TypeError('authoritative receipt must prove accepted effect')

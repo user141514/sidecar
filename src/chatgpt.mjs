@@ -251,7 +251,9 @@ export class ChatGptConversationHost {
   async proposeContinuation(payload) {
     if (payload && typeof payload === 'object' && !Array.isArray(payload) &&
         Object.prototype.hasOwnProperty.call(payload, 'contractVersion')) {
-      return this.#proposeVersionedContinuation(parseIntentEnvelope(payload))
+      const intent = parseIntentEnvelope(payload)
+      await this.#reconcilePendingStopPostcondition(intent)
+      return this.#proposeVersionedContinuation(intent)
     }
     return this.#proposeLegacyContinuation(payload)
   }
@@ -325,6 +327,46 @@ export class ChatGptConversationHost {
         authoritativeState: true
       })
     }, intent.conversationId)
+  }
+
+  async #reconcilePendingStopPostcondition(intent) {
+    if (!intent?.target || !intent.conversationId) return null
+    const pending = await this.mailbox.pendingEffect(intent.target, intent.conversationId)
+    if (!pending || pending.effect?.action !== 'stop') return null
+    const effect = pending.effect
+    if (effect.conversationId !== intent.conversationId || typeof effect.turnId !== 'string' || !effect.turnId) return null
+
+    const current = await this.stateByTarget(intent.target)
+    if (current?.found !== true) return null
+    const state = current.state
+    if (
+      state.conversationId !== effect.conversationId ||
+      canonicalTarget(state.target) !== canonicalTarget(intent.target) ||
+      state.turn.turnId !== effect.turnId ||
+      state.writer.mode !== 'managed' ||
+      state.delivery !== 'delivered' ||
+      !['blocked', 'terminal'].includes(state.progress)
+    ) return null
+
+    const settled = await this.mailbox.reconcile(intent.target, pending.requestId, {
+      accepted: true,
+      conversationId: effect.conversationId,
+      turnId: effect.turnId,
+      reconciled: true,
+      reconciliation: 'postcondition_observed',
+      currentStateVersion: state.stateVersion,
+      currentWriterEpoch: state.writer.epoch
+    }, effect.conversationId)
+    if (settled?.accepted !== true) return null
+
+    if (
+      state.progress === 'blocked' &&
+      ['empty', 'incomplete'].includes(state.body) &&
+      state.gate === 'none'
+    ) {
+      await this.#recordWatchdogStop(effect.conversationId, effect.turnId, intent.target)
+    }
+    return settled
   }
 
   async #recordWatchdogStop(conversationId, turnId, target, assistantText = '') {
