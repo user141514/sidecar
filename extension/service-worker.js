@@ -1346,7 +1346,7 @@ async function executeRequest(message) {
     if (snapshot?.ready !== true || !tabMatchesExpectedUrl({ url: snapshot.url }, expectedUrl)) return { found: false }
     return { ...snapshot, found: true }
   }
-  if (message.method === 'conversation_adoption_inspect') return inspectAdoption(message.params ?? {})
+  if (message.method === 'conversation_adoption_inspect') return runWriterMutation(message.params ?? {}, () => inspectAdoption(message.params ?? {}))
   if (message.method === 'conversation_adopt') return runWriterMutation(message.params ?? {}, () => adoptConversation(message.params ?? {}))
   if (message.method === 'conversation_snapshot') return readConversationSnapshot(message.params ?? {})
   if (message.method === 'conversation_state_observe') return readConversationStateObservation(message.params ?? {})

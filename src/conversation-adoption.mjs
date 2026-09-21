@@ -34,7 +34,9 @@ export async function adoptExistingConversation(host, payload) {
   const requestId = hash(['adopt-existing/v1', key, expectedUserMessageId])
   const turnId = `adopted_${hash([uuid, expectedUserMessageId])}`
   const allocationIntentId = `adopt-existing:${uuid}`
-  const inspect = await host.bridge.request('conversation_adoption_inspect', { externalUrl: target, expectedUserMessageId })
+  const inspect = await host.bridge.request('conversation_adoption_inspect', {
+    externalUrl: target, expectedUserMessageId, writerEpoch: host.writer.epoch
+  })
   if (inspect?.found !== true) return { accepted: false, reason: inspect?.reason || 'target_unavailable' }
   if (typeof inspect.url !== 'string' || canonicalTarget(inspect.url) !== key || inspect.readable !== true || inspect.userMessageId !== expectedUserMessageId) {
     return { accepted: false, reason: 'adoption_identity_mismatch' }

@@ -69,7 +69,11 @@ Not exposed in model-facing MCP tools.
 }
 ```
 
-The epoch must be re-read from the current writer. The caller supplies a stable
+The epoch must be re-read from the current writer. An explicitly authorized
+preflight may restore the installed content observer on the unique exact tab
+after extension reload; it verifies the executed build and URL without navigation,
+sending, or creating a ledger/browser owner. Wrong epoch cannot inject the observer.
+The caller supplies a stable
 message UUID, not a title, DOM index, first/last position or fuzzy URL. Repeated
 adoption returns the same logical record and fresh authoritative state. No Project
 pin, WorkController task, memory publication or research state is changed.
