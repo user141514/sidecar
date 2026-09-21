@@ -23,6 +23,7 @@ export const runtimeFiles = [...new Set([
   'src/memory-sync-bridge.mjs',
   'scripts/verify-runtime.mjs',
   'test/conversation-intents.test.mjs',
+  'test/existing-conversation-adoption.test.mjs',
   'test/work-ledger.test.mjs',
   'test/work-controller.test.mjs',
   'test/work-cli.test.mjs',

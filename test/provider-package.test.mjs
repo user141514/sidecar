@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, writeFile, rm, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 test('standalone artifact contains the identical extension, CLI, MCP schemas, Skill and platform links', async (t) => {
   const module = await import('../scripts/export-provider.mjs').catch(() => ({}))
@@ -11,6 +12,11 @@ test('standalone artifact contains the identical extension, CLI, MCP schemas, Sk
   t.after(() => rm(root, { recursive: true, force: true }))
   const output = join(root, 'provider')
   await module.exportProvider(output)
+  // A valid manifest is not sufficient when the Host imports a missing module.
+  const packagedHost = await import(pathToFileURL(join(output, 'src/chatgpt.mjs')).href)
+  assert.equal(typeof packagedHost.ChatGptConversationHost, 'function')
+  await access(join(output, 'src/conversation-adoption.mjs'))
+  await assert.rejects(access(join(output, 'test/existing-conversation-adoption.test.mjs')))
   for (const path of ['extension/manifest.json', 'extension/build-info.js', 'extension/service-worker.js', 'extension/content-script.js', 'extension/lifecycle.js', 'src/cli.mjs', 'src/extension-control.mjs', 'src/conversation-tools.mjs', 'src/conversation-contract.mjs', 'src/conversation-state.mjs', 'test/conversation-contract.test.mjs', 'test/send-mailbox-crash-child.mjs', 'test/fixtures/conversation-runtime-v1.json', 'skills/chatgpt-subagents/SKILL.md', 'install/platform-link.mjs']) {
     assert.equal(await readFile(join(output, path), 'utf8'), await readFile(new URL(`../${path}`, import.meta.url), 'utf8'), path)
   }

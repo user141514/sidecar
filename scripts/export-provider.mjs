@@ -11,7 +11,7 @@ const execFileAsync = promisify(execFile)
 const root = fileURLToPath(new URL('../', import.meta.url))
 export const providerFiles = [
   'extension/manifest.json', 'extension/build-info.js', 'extension/content-script.js', 'extension/service-worker.js', 'extension/lifecycle.js',
-  'src/send-mailbox.mjs', 'src/conversation-contract.mjs', 'src/conversation-state.mjs',
+  'src/send-mailbox.mjs', 'src/conversation-contract.mjs', 'src/conversation-state.mjs', 'src/conversation-adoption.mjs',
   'test/send-mailbox.test.mjs', 'test/send-mailbox-crash-child.mjs', 'test/mailbox-browser-guard.test.mjs', 'test/conversation-contract.test.mjs', 'test/conversation-state.test.mjs', 'test/conversation-state-host.test.mjs', 'test/fixtures/conversation-runtime-v1.json',
   'src/chatgpt.mjs', 'src/store.mjs', 'src/native-messaging.mjs', 'src/mcp-stdio.mjs', 'src/cli.mjs', 'src/extension-control.mjs', 'src/conversation-tools.mjs', 'src/provider-server.mjs',
   'scripts/extension-build.mjs', 'scripts/install-native-host.mjs', 'scripts/test.mjs', 'scripts/verify-provider.mjs',
