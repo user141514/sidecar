@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { SendMailbox, canonicalTarget } from './send-mailbox.mjs'
 import { parseIntentEnvelope } from './conversation-contract.mjs'
 import { reduceConversationProjection } from './conversation-state.mjs'
+import { adoptExistingConversation } from './conversation-adoption.mjs'
 
 const DEFAULT_CHATGPT_URL = 'https://chatgpt.com/'
 
@@ -166,6 +167,10 @@ export class ChatGptConversationHost {
       ...(targetUrl ? { target_url: targetUrl.trim() } : {}),
       writerEpoch: this.writer.epoch
     })
+  }
+
+  adoptExistingConversation(payload) {
+    return adoptExistingConversation(this, payload)
   }
 
   async create({ projectUrl } = {}) {
@@ -653,6 +658,10 @@ export class ChatGptConversationHost {
     const matches = await this.store.findByExternalUrl(target)
     if (matches.length === 0) return { found: false, reason: 'target_unavailable' }
     if (matches.length > 1) return { found: false, reason: 'ambiguous_local_binding' }
+    if (matches[0].allocationIntentId?.startsWith('adopt-existing:') &&
+        !matches[0].events.some(event => event.type === 'conversation_adopted')) {
+      return { found: false, reason: 'adoption_incomplete' }
+    }
     const state = await this.state(matches[0].id)
     try {
       if (canonicalTarget(state.target) !== canonicalTarget(target)) return { found: false, reason: 'target_changed' }
@@ -725,6 +734,10 @@ export class ChatGptConversationHost {
     const previousProjection = [...(stored.events || [])].reverse().find(event => event.type === 'conversation_state' && event.state)?.state ?? null
     const observations = []
     let expectedUserMessageId = previousProjection?.turn?.turnId === turnId ? previousProjection.turn.userMessageId : null
+    if (!expectedUserMessageId) {
+      const adoption = stored.events.find(event => event.type === 'conversation_adopted' && event.turnId === turnId)
+      expectedUserMessageId = adoption?.userMessageId ?? null
+    }
 
     if (intent?.requestId) {
       try {

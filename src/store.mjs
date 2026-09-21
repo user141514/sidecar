@@ -21,6 +21,12 @@ function statusFromEvents(events) {
     if (event.externalUrl && !(status === 'completed' &&
         ['generation_started', 'delivery_uncertain', 'error'].includes(event.type))) externalUrl = event.externalUrl
 
+    if (event.type === 'conversation_adopted' && latestTurnId === null) {
+      latestTurnId = event.turnId
+      status = event.generating === true ? 'generating' : 'adopted'
+      continue
+    }
+
     if (event.type === 'send_intent' || event.type === 'prompt_sent') {
       latestTurnId = event.turnId ?? latestTurnId
       status = event.type === 'send_intent' ? 'sending' : 'submitted'
@@ -219,6 +225,29 @@ export class ConversationStore {
     return this.enqueueWrite(id, async () => {
       await appendFile(join(this.conversationDir(id), 'events.jsonl'), `${JSON.stringify(record)}\n`, 'utf8')
       return record
+    })
+  }
+
+  recordAdoption(id, receipt) {
+    return this.enqueueWrite(id, async () => {
+      const current = await this.read(id)
+      const previous = current.events.find(event => event.type === 'conversation_adopted')
+      if (previous) {
+        if (previous.userMessageId !== receipt.userMessageId || previous.turnId !== receipt.turnId ||
+            canonicalTarget(previous.externalUrl) !== canonicalTarget(receipt.externalUrl)) {
+          throw new Error('adoption identity conflict')
+        }
+        return previous
+      }
+      if (current.latestTurnId) throw new Error('adoption cannot overwrite an owned turn')
+      const event = { at: now(), type: 'conversation_adopted', source: 'human',
+        requestId: receipt.requestId, turnId: receipt.turnId, externalUrl: receipt.externalUrl,
+        userMessageId: receipt.userMessageId, assistantMessageId: receipt.assistantMessageId ?? null,
+        tabId: receipt.tabId, windowId: receipt.windowId, writerEpoch: receipt.expectedWriterEpoch,
+        generating: receipt.generating,
+        provenance: 'explicit adoption of an existing persisted user message; not a Sidecar send' }
+      await appendFile(join(this.conversationDir(id), 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8')
+      return event
     })
   }
 
