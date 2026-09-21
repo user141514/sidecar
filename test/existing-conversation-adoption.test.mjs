@@ -164,6 +164,32 @@ test('duplicate ledger binding is rejected, and an existing owned ledger is not 
   assert.equal(bridge.effects, 0)
 })
 
+test('HTTP adoption immediately makes the exact target authoritative through the state API', async t => {
+  const { host } = await fixture(t)
+  const app = createSidecarServer({ conversationHost: host })
+  const addr = await app.listen({ port: 0 })
+  t.after(() => app.close())
+  const base = `http://127.0.0.1:${addr.port}`
+
+  const adopted = await fetch(`${base}/internal/conversation-adoption`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request())
+  })
+  assert.equal(adopted.status, 200)
+  const adoption = await adopted.json()
+  assert.equal(adoption.accepted, true)
+  assert.equal(adoption.conversationUuid, uuid)
+
+  const stateResponse = await fetch(`${base}/internal/conversation-state`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target })
+  })
+  assert.equal(stateResponse.status, 200)
+  const authoritative = await stateResponse.json()
+  assert.equal(authoritative.found, true)
+  assert.equal(authoritative.state.target, target)
+  assert.equal(authoritative.state.writer.mode, 'managed')
+  assert.equal(authoritative.state.writer.epoch, 3)
+})
+
 test('adoption is explicit, local control-plane only, not an implicit state-read side effect', async t => {
   const { host } = await fixture(t)
   const app = createSidecarServer({ conversationHost: host })
