@@ -748,6 +748,39 @@ function exactAdoptionUuid(value) {
   } catch { return null }
 }
 
+async function ensureAdoptionContentScript(tab, uuid) {
+  const current = await chrome.tabs.get(tab.id)
+  if (exactAdoptionUuid(tabPageUrl(current)) !== uuid) {
+    return { ready: false, reason: 'adoption_target_changed' }
+  }
+
+  let ping = null
+  try { ping = await boundedMessage(tab.id, { type: 'sidecar_ping' }, 2000) } catch {}
+  if (ping?.ready === true && ping.buildId === globalThis.__sidecarBuildId) {
+    if (exactAdoptionUuid(ping.url) !== uuid) return { ready: false, reason: 'adoption_target_changed' }
+    return { ready: true }
+  }
+
+  if (!chrome.scripting?.executeScript) return { ready: false, reason: 'content_script_unavailable' }
+  const beforeInjection = await chrome.tabs.get(tab.id)
+  if (exactAdoptionUuid(tabPageUrl(beforeInjection)) !== uuid) {
+    return { ready: false, reason: 'adoption_target_changed' }
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id, frameIds: [0] },
+      files: ['build-info.js', 'content-script.js']
+    })
+    ping = await boundedMessage(tab.id, { type: 'sidecar_ping' }, 2000)
+  } catch {
+    return { ready: false, reason: 'content_script_unavailable' }
+  }
+  if (ping?.ready !== true || ping.buildId !== globalThis.__sidecarBuildId || exactAdoptionUuid(ping.url) !== uuid) {
+    return { ready: false, reason: 'content_script_unavailable' }
+  }
+  return { ready: true }
+}
+
 async function inspectAdoption(params) {
   const uuid = exactAdoptionUuid(params.externalUrl)
   if (!uuid) throw new Error('exact conversation UUID required for adoption')
@@ -757,6 +790,8 @@ async function inspectAdoption(params) {
   const tabs = (await chrome.tabs.query({})).filter(tab => exactAdoptionUuid(tabPageUrl(tab)) === uuid)
   if (tabs.length !== 1) return { found: false, reason: tabs.length ? 'ambiguous_target_tabs' : 'exact_tab_unavailable' }
   const tab = tabs[0]
+  const content = await ensureAdoptionContentScript(tab, uuid)
+  if (content.ready !== true) return { found: false, reason: content.reason }
   const snapshot = await boundedMessage(tab.id, { type: 'conversation_state_observe', expectedUserMessageId: params.expectedUserMessageId }, 2000)
   if (snapshot?.ready !== true || snapshot?.readable !== true || snapshot.userMessageId !== params.expectedUserMessageId ||
       exactAdoptionUuid(snapshot.url) !== uuid) return { found: false, reason: 'adoption_identity_mismatch' }
