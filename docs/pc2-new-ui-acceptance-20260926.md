@@ -45,8 +45,14 @@ Counterexample: Pro is selected, but data-selected-reasoning-effort says medium.
 - New-UI fixture before patch: 2 failures reproduce missing control; 1 fail-closed case passes.
 - New-UI plus existing content runtime tests after patch: 42/42 pass.
 - Full suite before regenerating extension metadata: build identity failures, not accepted.
-- After extension:build: one remaining bootstrap test failure in dirty source; full suite must be rerun from clean committed source before activation.
-- Real strength switch/read-back: NOT YET VERIFIED.
-- Sidecar remaining capabilities / Watchdog / integration: BLOCKED by strength gate, not accepted from historical evidence.
+- After extension:build: one bootstrap test initially failed on dirty source. A clean local commit a679404b22d58eb71cd6ca801c74a56fb912c37d was created with task-scoped ChatGPT author identity (no global Git identity changes); the complete npm test suite then passed.
+- Verified Runtime Home bootstrap selected release a679404b22d58eb71cd6ca801c74a56fb912c37d.
+- Verified extension update: request b6ea78e8-144f-45db-901b-7c96feda1fbd; old instance b80d300d-3bc5-444d-9fe7-d2e28c61693f -> new instance 924c38b7-303f-46e6-917a-2e6435a3be79; exact build 0c15d40c8e300820333d0a6e5f1d2c5e038ac027b1ba96d8423727c7a8252c78; pending/outbox/activeOperations all 0.
+- Only the task-created empty Project tab PAGE891835759 was reloaded to load the new content script. Other browser tabs and registrations were untouched.
+- Native Sidecar gate call pc2-new-ui-medium-gate-patched-20260926 returned switched=true, before=Pro, after=Medium, tabId=891835759, exact Project URL without slug.
+- Independent OMP relay DOM read on that same tab found slider min=0, max=4, now=1; menu text: 中，第 2 项，共 5 项。 No test prompt was submitted before this read-back.
+- Real strength switch/read-back: PASS on the above PC2 target/runtime instance.
+- The same order is recorded in PC2 C:\Users\Administrator\.codex\AGENTS.md for subsequent Sidecar/Watchdog engineering. This is a workflow rule, not a new runtime enforcement component.
+- Sidecar remaining capabilities / Watchdog / integration: UNVERIFIED. The gate permits their next bounded tests; it does not certify them. Earlier Project draft-readiness failure remains an open frontier and must not be hidden by this strength success.
 
 Why chain: correct trigger/slider observation -> verified Medium gate -> bounded downstream test context -> reliable new-UI Sidecar/Watchdog behavior.
