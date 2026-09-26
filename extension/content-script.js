@@ -193,7 +193,14 @@ function canonicalWebGptStrength(value) {
 }
 
 function webGptStrengthFromNode(node) {
-  return canonicalWebGptStrength(elementLabel(node))
+  // New model-picker triggers have a generic aria-label. The selected level
+  // is visible text; the remembered reasoning-effort attribute is not proof
+  // of the active model (it may still say medium while the UI shows Pro).
+  for (const label of [node?.innerText, node?.textContent, elementLabel(node)]) {
+    const strength = canonicalWebGptStrength(label)
+    if (strength) return strength
+  }
+  return null
 }
 
 function webGptStrengthControlCandidates() {
@@ -212,8 +219,9 @@ function webGptStrengthControlCandidates() {
 function findWebGptStrengthControl() {
   return webGptStrengthControlCandidates().find((control) => {
     if (control.disabled) return false
-    const label = elementLabel(control).toLowerCase()
-    return label.includes('thinking') ||
+    const label = [elementLabel(control), control.innerText, control.textContent].filter(Boolean).join(' ').toLowerCase()
+    return control.getAttribute?.('data-composer-navigation-target') === 'reasoning' ||
+      label.includes('thinking') ||
       label.includes('reasoning') ||
       label.includes('思考强度') ||
       label.includes('推理强度') ||
@@ -259,7 +267,7 @@ function findWebGptStrengthOption(target, control) {
   const wanted = canonicalWebGptStrength(target)
   if (!wanted) return null
   return webGptStrengthOptionCandidates(control)
-    .find((node) => !node.disabled && webGptStrengthFromNode(node) === wanted) || null
+    .find((node) => node !== control && node.getAttribute?.('role') !== 'slider' && !node.disabled && webGptStrengthFromNode(node) === wanted) || null
 }
 
 function webGptStrengthOptionDiagnostics(control) {
@@ -270,7 +278,11 @@ function webGptStrengthOptionDiagnostics(control) {
 }
 
 function findWebGptStrengthSlider(control) {
-  return webGptStrengthOptionCandidates(control).find((node) => {
+  // Radix may portal the new slider without setting aria-controls on its
+  // trigger. Slider nodes are not menuitems and were omitted by the fallback.
+  const candidates = [...webGptStrengthOptionCandidates(control), ...document.querySelectorAll('[role="slider"]')]
+  return candidates.find((node) => {
+    if (typeof node.getBoundingClientRect === 'function' && node.getBoundingClientRect().width === 0) return false
     const role = node?.getAttribute?.('role')
     const rawValue = node?.getAttribute?.('aria-valuenow')
     const value = rawValue === null || rawValue === undefined ? null : Number(rawValue)
@@ -317,8 +329,11 @@ async function driveWebGptStrengthSlider(slider, wanted) {
     const key = targetIndex < currentIndex ? 'ArrowLeft' : 'ArrowRight'
     slider.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key, code: key }))
     slider.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key, code: key }))
-    await Promise.resolve()
-    const nextIndex = Number(slider.getAttribute?.('aria-valuenow'))
+    let nextIndex = currentIndex
+    for (let attempt = 0; attempt < 20 && nextIndex === currentIndex; attempt += 1) {
+      await yieldWebGptUi()
+      nextIndex = Number(slider.getAttribute?.('aria-valuenow'))
+    }
     if (!Number.isInteger(nextIndex) || nextIndex === currentIndex) return false
     currentIndex = nextIndex
   }
@@ -357,16 +372,16 @@ async function runWebGptShiftTest(target) {
       .slice(-20)
     throw new Error(`WebGPT thinking control was not found; candidates=${JSON.stringify(candidates)}`)
   }
-  const before = webGptStrengthFromNode(control) || elementLabel(control)
+  const before = webGptStrengthFromNode(control) || control.innerText?.trim() || elementLabel(control)
   openWebGptStrengthControl(control)
 
   let option = null
   let slider = null
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    option = findWebGptStrengthOption(wanted, control)
-    if (option) break
     slider = findWebGptStrengthSlider(control)
     if (slider) break
+    option = findWebGptStrengthOption(wanted, control)
+    if (option) break
     await yieldWebGptUi()
   }
   if (option) {
