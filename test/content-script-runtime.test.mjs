@@ -1136,6 +1136,56 @@ test('project_open waits for the authoritative Project anchor on an existing Pro
   assert.equal(rowClicked, false)
 })
 
+test('project_open navigates directly from a same-Project conversation when the sidebar anchor is absent', async () => {
+  let runtimeListener = null
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const location = {
+    href: 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-existing',
+    assign(url) { this.href = url }
+  }
+  const document = {
+    querySelector() { return null },
+    querySelectorAll(selector) {
+      if (selector === 'a[href]') return []
+      if (selector === 'button') return []
+      if (selector === 'button,[role="button"]') return []
+      if (selector === '[contenteditable="true"]') return []
+      if (selector === '[data-message-author-role="assistant"]') return []
+      return []
+    },
+    execCommand() { return true }
+  }
+  const context = {
+    document,
+    location,
+    chrome: {
+      runtime: {
+        async sendMessage() { return null },
+        onMessage: { addListener(listener) { runtimeListener = listener } }
+      }
+    },
+    HTMLInputElement: class {},
+    HTMLTextAreaElement: class {},
+    InputEvent: class {},
+    Date, Promise, Object, URL, console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  const response = await new Promise((resolve) => {
+    const keepOpen = runtimeListener({ type: 'project_open', projectUrl }, {}, resolve)
+    assert.equal(keepOpen, true)
+  })
+
+  assert.equal(response.accepted, true)
+  assert.equal(response.projectUrl, projectUrl)
+  assert.equal(response.control?.kind, 'canonical-project-navigation')
+  assert.equal(location.href, projectUrl)
+})
+
 test('project_create opens the New project dialog, submits a name, and acknowledges the UI action', async () => {
   let runtimeListener = null
   let dialogOpen = false

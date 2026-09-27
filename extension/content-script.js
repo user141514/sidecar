@@ -517,7 +517,12 @@ async function handleProjectOpen(message) {
   const projectUrl = canonicalProjectHomeFromHref(message.projectUrl)
   if (!projectUrl) throw new Error('Valid Project URL is required')
   const projectIdentity = projectIdentityFromUrl(projectUrl)
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+
+  const currentProjectMatches = Boolean(
+    projectIdentity && projectIdentityFromUrl(location.href) === projectIdentity
+  )
+  const maxAnchorAttempts = currentProjectMatches ? 8 : 80
+  for (let attempt = 0; attempt < maxAnchorAttempts; attempt += 1) {
     for (const link of document.querySelectorAll('a[href]')) {
       const navigationProjectUrl = canonicalProjectHomeFromHref(link.getAttribute?.('href'))
       if (!navigationProjectUrl) continue
@@ -538,6 +543,25 @@ async function handleProjectOpen(message) {
     }
     await sleep(125)
   }
+
+  // A stable conversation URL is sufficient evidence for the Project identity.
+  // If the new UI omits the sidebar anchor, navigate to the already-authorized
+  // canonical Project home instead of treating presentation markup as authority.
+  if (currentProjectMatches) {
+    if (canonicalProjectHomeFromHref(location.href) !== projectUrl) {
+      if (typeof location.assign === 'function') location.assign(projectUrl)
+      else location.href = projectUrl
+    }
+    return {
+      accepted: true,
+      projectUrl,
+      control: {
+        kind: 'canonical-project-navigation',
+        source: 'current-project-identity'
+      }
+    }
+  }
+
   throw new Error('ChatGPT Project anchor was not found')
 }
 
