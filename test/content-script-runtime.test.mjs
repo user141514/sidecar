@@ -2445,7 +2445,12 @@ test('composer observation distinguishes generating, draft-ready, idle, interrup
     querySelectorAll(selector) {
       if (selector === 'button') return buttonForState()
       if (selector === '[contenteditable="true"]') return []
-      if (selector === '[role="alert"]') return []
+      if (selector === '[role="alert"]') {
+        return state === 'resume-unavailable'
+          ? [{ innerText: 'Resume stream unavailable', textContent: 'Resume stream unavailable' }]
+          : []
+      }
+      if (selector === '[role="status"]') return []
       return []
     }
   }
@@ -2470,8 +2475,111 @@ test('composer observation distinguishes generating, draft-ready, idle, interrup
   assert.equal(context.__sidecarContentRuntime.getComposerMode(), 'GENERATING')
   state = 'interrupted'
   assert.equal(context.__sidecarContentRuntime.getComposerMode(), 'INTERRUPTED')
+  state = 'resume-unavailable'
+  assert.equal(context.__sidecarContentRuntime.getComposerMode(), 'RESUME_UNAVAILABLE')
   state = 'error'
   assert.equal(context.__sidecarContentRuntime.getComposerMode(), 'ERROR')
+})
+
+test('resume stream unavailable becomes a durable need_continue lifecycle event', async () => {
+  const emitted = []
+  let now = 0
+  let poll = 0
+  const promptText = 'continue the bounded task'
+  const editor = { value: '', getAttribute() { return null } }
+  const stopButton = {
+    getAttribute(name) { return name === 'aria-label' ? 'Stop responding' : null },
+    textContent: ''
+  }
+  const alertNode = {
+    innerText: 'Resume stream unavailable',
+    textContent: 'Resume stream unavailable'
+  }
+  const bodyRoot = {
+    innerText: 'Partial useful work',
+    textContent: 'Partial useful work',
+    querySelector(selector) {
+      return selector.includes('p') ? { textContent: 'Partial useful work' } : null
+    }
+  }
+  const turnRoot = {
+    getAttribute(name) { return name === 'data-testid' ? 'conversation-turn-22' : null },
+    querySelector() { return null }
+  }
+  const assistantNode = {
+    innerText: 'Partial useful work',
+    textContent: 'Partial useful work',
+    querySelector(selector) {
+      return /markdown|prose|message-content/.test(selector) ? bodyRoot : null
+    },
+    closest() { return turnRoot },
+    getAttribute(name) { return name === 'data-message-id' ? 'assistant-22' : null }
+  }
+  const userNode = {
+    innerText: promptText,
+    textContent: promptText,
+    closest() { return { getAttribute: (name) => name === 'data-testid' ? 'conversation-turn-21' : null } },
+    getAttribute(name) { return name === 'data-message-id' ? 'user-21' : null },
+    compareDocumentPosition(other) { return other === assistantNode ? 4 : 0 }
+  }
+  const document = {
+    querySelector(selector) {
+      if (selector === '#prompt-textarea') return editor
+      if (selector === '[data-testid="stop-button"]') return poll <= 2 ? stopButton : null
+      if (selector === '[role="alert"]') return poll > 2 ? alertNode : null
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
+      if (selector === '[data-message-author-role="user"]') return [userNode]
+      if (selector === 'button') return []
+      if (selector === '[role="alert"]') return poll > 2 ? [alertNode] : []
+      if (selector === '[role="status"]' || selector === '[contenteditable="true"]') return []
+      return []
+    }
+  }
+  const context = {
+    document,
+    location: { href: 'https://chatgpt.com/c/resume-unavailable' },
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          if (message?.kind === 'conversation_event') {
+            emitted.push(message.event)
+            return { durable: true, eventId: 'terminal:resume-unavailable' }
+          }
+          return null
+        },
+        onMessage: { addListener() {} }
+      }
+    },
+    Date: class extends Date { static now() { return now } },
+    Promise,
+    Object,
+    console,
+    setTimeout(callback, ms) {
+      now += ms
+      poll += 1
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  }
+
+  vm.createContext(context)
+  vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+
+  await context.__sidecarContentRuntime.monitorTurn({
+    conversationId: 'conv_resume_unavailable',
+    turnId: 'turn_resume_unavailable',
+    baselineAssistantCount: 0,
+    promptText
+  })
+
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].type, 'need_continue')
+  assert.equal(emitted[0].reason, 'resume_stream_unavailable')
+  assert.equal(emitted[0].text, 'Partial useful work')
 })
 
 test('monitor recovers a missed generating phase from the anchored current assistant body plus final-turn evidence', async () => {

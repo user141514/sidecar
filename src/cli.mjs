@@ -12,7 +12,7 @@ function usage() {
     'chatgpt-conversation project-find <name...>',
     'chatgpt-conversation project-pin <project_url>',
     'chatgpt-conversation create [--project <project_url>]',
-    'chatgpt-conversation send <conversation_id> [--app <app_name>] <prompt...>',
+    'chatgpt-conversation send <conversation_id> [--app <app_name>] [--request-id <id>] <prompt...>',
     'chatgpt-conversation read <conversation_id>',
     'chatgpt-conversation extension-status',
     'chatgpt-conversation extension-update [--timeout-ms <100..300000>]',
@@ -41,15 +41,34 @@ function commandToCall(argv) {
     const [conversationId, ...rest] = args
     if (!conversationId?.trim()) throw new TypeError('send requires conversation_id and text')
     let app
-    let textParts = rest
-    if (rest[0] === '--app') {
-      if (rest.length < 3 || !rest[1]?.trim()) throw new TypeError('send --app requires app_name and text')
-      app = rest[1].trim()
-      textParts = rest.slice(2)
+    let requestId
+    const textParts = []
+    for (let index = 0; index < rest.length; index += 1) {
+      const value = rest[index]
+      if (value === '--app') {
+        const next = rest[index + 1]
+        if (!next?.trim()) throw new TypeError('send --app requires app_name')
+        app = next.trim()
+        index += 1
+        continue
+      }
+      if (value === '--request-id') {
+        const next = rest[index + 1]
+        if (!next?.trim()) throw new TypeError('send --request-id requires id')
+        requestId = next.trim()
+        index += 1
+        continue
+      }
+      textParts.push(value)
     }
     const text = textParts.join(' ').trim()
     if (!text) throw new TypeError('send requires conversation_id and text')
-    return ['conversation_send', { conversation_id: conversationId, text, ...(app ? { app } : {}) }]
+    return ['conversation_send', {
+      conversation_id: conversationId,
+      text,
+      ...(app ? { app } : {}),
+      ...(requestId ? { request_id: requestId } : {})
+    }]
   }
   if (command === 'read') {
     if (args.length !== 1 || !args[0].trim()) throw new TypeError('read requires conversation_id')
