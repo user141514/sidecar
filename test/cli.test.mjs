@@ -39,14 +39,24 @@ test('CLI maps stock DevSpace-friendly commands to shared provider MCP tools', a
   ])
 })
 
-test('CLI forwards an optional per-message ChatGPT app selection', async () => {
+test('CLI forwards optional app selection and idempotent request identity', async () => {
   const calls = []
   const fetchImpl = fakeFetch(calls)
 
-  await runCli(['send', 'conv_1', '--app', 'DevSpace', 'inspect', 'the', 'repo'], { fetchImpl })
+  await runCli([
+    'send', 'conv_1',
+    '--app', 'DevSpace',
+    '--request-id', 'watchdog:conv_1:turn_7',
+    'inspect', 'the', 'repo'
+  ], { fetchImpl })
 
   assert.deepEqual(calls.map((call) => [call.params.name, call.params.arguments]), [
-    ['conversation_send', { conversation_id: 'conv_1', text: 'inspect the repo', app: 'DevSpace' }]
+    ['conversation_send', {
+      conversation_id: 'conv_1',
+      text: 'inspect the repo',
+      app: 'DevSpace',
+      request_id: 'watchdog:conv_1:turn_7'
+    }]
   ])
 })
 

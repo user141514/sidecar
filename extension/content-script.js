@@ -823,7 +823,7 @@ function readTurnObservation({ baselineAssistantCount = 0, promptText = '' } = {
     bodyText: body.bodyText,
     bodyComplete: body.bodyComplete,
     shellText: body.shellText,
-    continuationAvailable: getComposerMode() === 'INTERRUPTED',
+    continuationAvailable: ['INTERRUPTED', 'RESUME_UNAVAILABLE'].includes(getComposerMode()),
     terminalActionAvailable
   }
 }
@@ -886,7 +886,7 @@ function readConversationStateObservation(expectedUserMessageId) {
     assistantMessageId: assistant?.getAttribute?.('data-message-id') || null,
     assistantText,
     generating,
-    terminal: generating || mode === 'INTERRUPTED' ? false : finalActionAvailable,
+    terminal: generating || ['INTERRUPTED', 'RESUME_UNAVAILABLE'].includes(mode) ? false : finalActionAvailable,
     body: bodyState,
     humanGate
   }
@@ -963,6 +963,14 @@ function getComposerMode() {
     button.getAttribute('aria-label') || button.textContent || ''
   ).trim().toLowerCase())
   const alerts = [...document.querySelectorAll('[role="alert"]')].map(nodeText)
+  const statuses = [...document.querySelectorAll('[role="status"]')].map(nodeText)
+  const frontendNotices = [...alerts, ...statuses]
+  const resumeUnavailable = labels.some((label) =>
+    label.includes('resume stream unavailable') || label.includes('unable to resume stream')
+  ) || frontendNotices.some((text) =>
+    /resume stream unavailable|unable to resume stream/i.test(text)
+  )
+  if (resumeUnavailable) return 'RESUME_UNAVAILABLE'
   const hasError = labels.some((label) =>
     label.includes('try again') || label === 'retry' || label.includes('重试')
   ) || alerts.some((text) => /something went wrong|network error|出了点问题|网络错误/i.test(text))
@@ -1033,7 +1041,8 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
       }
 
       const observation = readTurnObservation({ baselineAssistantCount, promptText })
-      const terminalBoundary = observation.terminalActionAvailable || mode === 'INTERRUPTED'
+      const interrupted = ['INTERRUPTED', 'RESUME_UNAVAILABLE'].includes(mode)
+      const terminalBoundary = observation.terminalActionAvailable || interrupted
       if (observedGenerating) {
         generationExited = true
       } else if (
@@ -1078,7 +1087,7 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
       }
       if (stableSnapshotSince === null || now - stableSnapshotSince < SNAPSHOT_QUIESCENCE_MS) continue
 
-      const complete = mode !== 'INTERRUPTED' && observation.present && observation.bodyComplete
+      const complete = !interrupted && observation.present && observation.bodyComplete
       const event = complete
         ? {
             type: 'response_completed',
@@ -1094,7 +1103,11 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
             turnId,
             monitorVersion,
             text: observation.bodyText || observation.shellText || '',
-            reason: mode === 'INTERRUPTED' ? 'generation_interrupted' : 'assistant_body_incomplete',
+            reason: mode === 'RESUME_UNAVAILABLE'
+              ? 'resume_stream_unavailable'
+              : mode === 'INTERRUPTED'
+                ? 'generation_interrupted'
+                : 'assistant_body_incomplete',
             externalUrl: location.href
           }
       const durable = await emitTerminalEvent(event)
