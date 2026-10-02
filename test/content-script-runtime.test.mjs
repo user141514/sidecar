@@ -27,6 +27,36 @@ test('captured modern persistent units produce native readable body and same-tur
   assert.equal(turn.terminalActionAvailable, true)
 })
 
+test('captured collapsed modern user matches the full owned prompt without Show more shell controls', async t => {
+  const fixture = nativeContentFixture({ submitted: false, collapsedUser: true }); t.after(() => fixture.dispose())
+  const prompt = 'REVIEW 必须原样保留正文：显示更多 和 …\n' + '长内容逐行验证\n'.repeat(90)
+  const prepared = await fixture.call({ type: 'conversation_prepare', guarded: true, authoritativeState: true,
+    turnId: 'collapsed-review', text: prompt.trim() })
+  assert.equal(prepared.prepared, true)
+  const response = await fixture.call({ type: 'conversation_submit', guarded: true, turnId: 'collapsed-review' })
+  assert.equal(fixture.bubble.innerText, prompt.trim() + '\n…\n显示更多')
+  assert.equal(response.accepted, true)
+  assert.equal(response.userMessageId, MODERN_USER_ID)
+  assert.equal(fixture.clicks, 1)
+  const anchored = fixture.runtime.readTurnObservation({ promptText: prompt })
+  assert.equal(anchored.present, true)
+  assert.equal(anchored.userTurnKey, MODERN_USER_ID)
+  assert.equal(anchored.bodyText, 'ACTION_OK')
+})
+
+test('collapsed modern user content ambiguity and foreign preview cannot prove an owned submission', async t => {
+  for (const options of [{ userContentRoots: 2 }, { foreignUserContent: true }, { outsideUserBubble: true }, { userContentRoots: 0 }]) {
+    const fixture = nativeContentFixture({ submitted: false, collapsedUser: true, ...options }); t.after(() => fixture.dispose())
+    const prompt = options.userContentRoots === 0 || options.outsideUserBubble ? '…\n显示更多' : '正文包含 显示更多 和 …'
+    fixture.editor.textContent = prompt
+    const response = await fixture.call({ type: 'conversation_submit' })
+    assert.equal(response.accepted, false, JSON.stringify(options))
+    assert.equal(response.deliveryUncertain, true)
+    assert.equal(fixture.clicks, 1)
+    assert.equal(fixture.runtime.readTurnObservation({ promptText: prompt }).present, false)
+  }
+})
+
 test('modern latest human observation retains the expected anchor and excludes older assistant and controls', async t => {
   const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
   const latestId = '11111111-1111-4111-8111-111111111111'

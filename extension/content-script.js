@@ -876,7 +876,21 @@ function nodeText(node) {
 }
 
 function userMessageText(node) {
-  const content = messageMetadata(node)?.body ?? node?.querySelector?.('[data-testid="collapsible-user-message-content"]')
+  const proof = messageMetadata(node)
+  if (proof) {
+    const candidates = [...node.querySelectorAll('[data-search-result-target]')]
+    if (candidates.length) {
+      if (candidates.length !== 1) return ''
+      const root = candidates[0]
+      if (root.closest('[data-chatgpt-search-unit-key]') !== node ||
+          root.closest('[data-user-message-bubble="true"]') !== proof.body ||
+          root.closest('form, [role="dialog"], [data-testid="tool-approval-card"], [data-composer-body], [data-composer-input]')) return ''
+      return nodeText(root)
+    }
+    if (proof.body.querySelector('[data-thread-find-skip="true"]')) return ''
+    return nodeText(proof.body)
+  }
+  const content = node?.querySelector?.('[data-testid="collapsible-user-message-content"]')
   return nodeText(content || node)
 }
 

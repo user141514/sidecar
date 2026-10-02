@@ -8,7 +8,7 @@ export const MODERN_THREAD_URL = 'https://chatgpt.com/g/g-p-test-subagents/c/6ab
 
 export function nativeContentFixture({ submitted = true, generating = false, ids = MODERN_ASSISTANT_ID + ' ' + MODERN_ASSISTANT_ID,
   selectionId = MODERN_ASSISTANT_ID, turnId = MODERN_USER_ID, userId = MODERN_USER_ID, terminal = true,
-  ambiguousMain = false, foreignUnit = false, dialogUnit = false, conflictingRole = false, replaceBaseline = false, submissionId = MODERN_USER_ID, submissionText = null } = {}) {
+  ambiguousMain = false, foreignUnit = false, dialogUnit = false, conflictingRole = false, replaceBaseline = false, submissionId = MODERN_USER_ID, submissionText = null, collapsedUser = false, userContentRoots = 1, foreignUserContent = false, outsideUserBubble = false } = {}) {
   let listener, transport = async () => ({ durable: true }), submittedHook = null, clock = 0, clicks = 0, focused = null
   const all = []
   const matches = (node, selector) => selector.split(',').some(value => {
@@ -62,7 +62,18 @@ export function nativeContentFixture({ submitted = true, generating = false, ids
   const searchTurn = make('div', { 'data-content-search-turn-key': 'fallback-turn-0' }, turn)
   const user = make('div', { 'data-chatgpt-search-unit-key': 'fallback-turn-0:0:user', 'data-chatgpt-search-message-ids': userId }, searchTurn)
   const contentUnit = make('div', { 'data-content-search-unit-key': 'fallback-turn-0:0:user' }, user)
-  const bubble = make('div', { 'data-user-message-bubble': 'true' }, contentUnit, 'fixture prompt')
+  const bubble = make('div', { 'data-user-message-bubble': 'true' }, contentUnit, collapsedUser ? '' : 'fixture prompt')
+  const userBodies = []
+  if (collapsedUser) {
+    const collapseShell = make('div', {}, make('div', {}, bubble))
+    for (let index = 0; index < userContentRoots; index++) {
+      const parent = outsideUserBubble ? contentUnit : foreignUserContent ? make('div', { role: 'dialog' }, collapseShell) : collapseShell
+      const target = make('div', { 'data-search-result-target': '', class: 'overflow-hidden', style: 'max-height:494px' }, parent)
+      userBodies.push(make('div', { dir: 'auto' }, make('div', {}, target), 'fixture prompt'))
+    }
+    make('span', { 'aria-hidden': 'true' }, collapseShell, '\n…\n')
+    make('button', { 'aria-expanded': 'false', 'data-thread-find-skip': 'true' }, collapseShell, '显示更多')
+  }
   make('button', { 'aria-label': '复制消息' }, user)
   const assistant = make('div', { 'data-content-search-unit-key': 'fallback-turn-0:2:assistant', 'data-chatgpt-search-unit-key': 'fallback-turn-0:2:assistant', 'data-chatgpt-search-message-ids': ids }, searchTurn)
   make('h4', { 'data-conversation-role': 'assistant', class: 'sr-only' }, assistant, 'ChatGPT 说：')
@@ -86,7 +97,10 @@ export function nativeContentFixture({ submitted = true, generating = false, ids
     user.connected = contentUnit.connected = bubble.connected = turn.connected = searchTurn.connected = true
   }
   const submit = () => {
-    clicks++; bubble.textContent = submissionText ?? editor.textContent.trim(); editor.textContent = ''; user.attrs['data-chatgpt-search-message-ids'] = submissionId
+    clicks++; const text = submissionText ?? editor.textContent.trim()
+    if (collapsedUser) for (const body of userBodies) body.textContent = text
+    else bubble.textContent = text
+    editor.textContent = ''; user.attrs['data-chatgpt-search-message-ids'] = submissionId
     turn.attrs['data-turn-key'] = submissionId; setSubmitted(true); submittedHook?.()
   }
   send.click = submit; form.requestSubmit = submit
@@ -105,6 +119,6 @@ export function nativeContentFixture({ submitted = true, generating = false, ids
   vm.runInContext(source, context)
   return { call(message) { return new Promise(resolve => { listener(message, {}, resolve) }) },
     configureRuntimeTransport(fn) { transport = fn }, configureOnSubmit(fn) { submittedHook = fn }, get runtime() { return context.__sidecarContentRuntime },
-    get clicks() { return clicks }, document, location, editor, main, turn, user, assistant, terminalButtons, stop,
+    get clicks() { return clicks }, document, location, editor, main, turn, user, bubble, userBodies, assistant, terminalButtons, stop,
     addNode: make, setSubmitted, setGenerating(value) { generating = value; stop.connected = value }, dispose() { context.__sidecarContentRuntime.dispose() } }
 }
