@@ -1,8 +1,9 @@
 importScripts('build-info.js', 'lifecycle.js')
+const extensionInstanceId = crypto.randomUUID()
 const extensionLifecycle = createSidecarLifecycle({
   chrome,
   buildId: globalThis.__sidecarBuildId,
-  instanceId: crypto.randomUUID(),
+  instanceId: extensionInstanceId,
   matchesTab: tabMatchesExpectedUrl
 })
 const lifecycleReady = extensionLifecycle.restoreAfterReload()
@@ -14,6 +15,9 @@ const PENDING_PREFIX = 'pending:'
 const OUTBOX_PREFIX = 'outbox:'
 const EFFECT_RECEIPT_PREFIX = 'effect-receipt:'
 const WRITER_AUTHORITY_KEY = 'writer:authority'
+const REVOKED_REGISTRATION_PREFIX = 'writer:revoked-registration:'
+const CONTENT_EFFECT_PREFIX = 'content-effect:'
+const CONTENT_EFFECT_METHODS = new Set(['conversation_prepare', 'conversation_submit', 'conversation_stop', 'webgpt_shift_test', 'project_open', 'project_create'])
 const WINDOW0_KEY = 'window0'
 const AUTOMATION_WINDOW_SENTINEL = 'automation-window.html'
 
@@ -26,6 +30,10 @@ const writerDrainWaiters = []
 const sendOwners = new Set()
 const tabOwners = new Map()
 const activeSends = new Map()
+const contentScriptPromises = new Set()
+const refreshRequests = new Map()
+const revokedRegistrations = new Set()
+const contentEffectReservations = new Set()
 
 function finishWriterCommand() {
   activeWriterCommands -= 1
@@ -70,6 +78,89 @@ async function assertWriterEpoch(params = {}) {
   }
 }
 
+function writerRegistrationId(params = {}) {
+  if (params.registrationId === undefined) return null
+  if (typeof params.registrationId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(params.registrationId)) {
+    throw new Error('Valid writer registration UUID required')
+  }
+  return params.registrationId.toLowerCase()
+}
+
+async function assertRegistrationActive(params) {
+  const registrationId = writerRegistrationId(params)
+  if (registrationId === null) return
+  if (revokedRegistrations.has(registrationId)) throw new Error('Writer registration revoked')
+  const key = REVOKED_REGISTRATION_PREFIX + registrationId
+  const stored = await chrome.storage.local.get(key)
+  if (Object.hasOwn(stored, key)) {
+    revokedRegistrations.add(registrationId)
+    throw new Error('Writer registration revoked')
+  }
+}
+
+async function waitForContentScriptDrain() {
+  // A bounded caller timeout is not proof that the remote DOM operation ended.
+  while (contentScriptPromises.size) await Promise.allSettled([...contentScriptPromises])
+}
+
+function contentEffectIdentityMatches(left, right) {
+  return left && right && ['version', 'token', 'tabId', 'documentId', 'registrationId', 'writerEpoch', 'method', 'instanceId']
+    .every(key => Object.hasOwn(left, key) && left[key] === right[key])
+}
+
+function trustedContentSender(sender) {
+  return sender?.id === chrome.runtime.id && Number.isInteger(sender.tab?.id) && sender.frameId === 0 &&
+    typeof sender.documentId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sender.documentId)
+}
+
+async function settleContentEffect(effect, sender) {
+  if (!trustedContentSender(sender) || typeof effect?.token !== 'string' || !effect.token || effect.token.length > 256) {
+    return { settled: false, reason: 'untrusted_content_completion' }
+  }
+  const key = CONTENT_EFFECT_PREFIX + effect.token
+  const record = (await chrome.storage.local.get(key))[key]
+  if (!record) return { settled: true, token: effect.token }
+  if (!contentEffectIdentityMatches(effect, record) || sender.tab.id !== record.tabId || sender.documentId !== record.documentId) {
+    return { settled: false, reason: 'content_completion_identity_mismatch' }
+  }
+  await chrome.storage.local.remove(key)
+  return { settled: true, token: effect.token }
+}
+
+async function assertNoPendingContentEffects() {
+  const stored = await chrome.storage.local.get(null)
+  if (contentScriptPromises.size || Object.entries(stored).some(([key, value]) =>
+      key.startsWith(CONTENT_EFFECT_PREFIX) ||
+      (key.startsWith(EFFECT_RECEIPT_PREFIX) && value?.action === 'refresh' && !['applied', 'denied'].includes(value.phase)))) {
+    throw deliveryUncertain('Extension busy: unresolved browser effect; outcome unknown')
+  }
+}
+
+async function recoverSettledContentEffects() {
+  const stored = await chrome.storage.local.get(null)
+  const pending = Object.entries(stored).filter(([key]) => key.startsWith(CONTENT_EFFECT_PREFIX))
+  await Promise.all(pending.map(async ([, effect]) => {
+    if (!Number.isInteger(effect?.tabId) || typeof effect?.documentId !== 'string' ||
+        !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(effect.documentId)) return
+    try {
+      // This exact-document read retries only already-settled completion
+      // metadata. The trusted runtime completion handler remains the clearer.
+      await boundedMessage(effect.tabId, { type: 'sidecar_ping' }, 2000, undefined, {}, effect.documentId)
+    } catch {}
+  }))
+}
+
+async function assertNoUnsettledEffectsForTab(tabId, ownRefreshRequestId = null) {
+  const stored = await chrome.storage.local.get(null)
+  if (Object.entries(stored).some(([key, record]) =>
+      (record?.tabId === tabId || !Number.isInteger(record?.tabId)) &&
+      (key.startsWith(CONTENT_EFFECT_PREFIX) ||
+       (key.startsWith(EFFECT_RECEIPT_PREFIX) && record?.action === 'refresh' &&
+        !['applied', 'denied'].includes(record.phase) && key !== effectReceiptKey(ownRefreshRequestId))))) {
+    throw deliveryUncertain('Tab has an unsettled browser effect; outcome unknown')
+  }
+}
+
 async function runWriterMutation(params, action) {
   while (pendingWriterClaims > 0) {
     const barrier = writerClaimTail
@@ -78,6 +169,7 @@ async function runWriterMutation(params, action) {
   activeWriterCommands += 1
   try {
     await assertWriterEpoch(params)
+    await assertRegistrationActive(params)
     return await extensionLifecycle.runMutation(action)
   } finally {
     finishWriterCommand()
@@ -87,10 +179,39 @@ async function runWriterMutation(params, action) {
 function runWriterClaim(params) {
   pendingWriterClaims += 1
   const previous = writerClaimTail
-  const run = previous.catch(() => {}).then(async () => {
+  const run = previous.catch(() => {}).then(() => extensionLifecycle.runMutation(async () => {
     await waitForWriterDrain()
-    return extensionLifecycle.runMutation(() => claimWriterEpoch(params))
-  })
+    await waitForContentScriptDrain()
+    await recoverSettledContentEffects()
+    await assertNoPendingContentEffects()
+    return claimWriterEpoch(params)
+  }))
+  writerClaimTail = run
+  return run.finally(() => { pendingWriterClaims -= 1 })
+}
+
+function runWriterQuiesce(params) {
+  pendingWriterClaims += 1
+  const previous = writerClaimTail
+  const run = previous.catch(() => {}).then(() => extensionLifecycle.runMutation(async () => {
+    const registrationId = writerRegistrationId(params)
+    if (!Number.isInteger(params.writerEpoch) || params.writerEpoch <= 0) throw new Error('Valid writer epoch required')
+    await assertWriterEpoch(params)
+    if (registrationId !== null) {
+      // Reject late native arrivals even when the durable write fails. A failed
+      // journal write cannot produce a quiescent acknowledgement.
+      revokedRegistrations.add(registrationId)
+      await chrome.storage.local.set({
+        [REVOKED_REGISTRATION_PREFIX + registrationId]: { version: 1, registrationId, writerEpoch: params.writerEpoch }
+      })
+    }
+    await waitForWriterDrain()
+    await waitForContentScriptDrain()
+    await recoverSettledContentEffects()
+    await assertNoPendingContentEffects()
+    await assertWriterEpoch(params)
+    return { quiescent: true, currentWriterEpoch: params.writerEpoch, ...(registrationId === null ? {} : { registrationId }) }
+  }))
   writerClaimTail = run
   return run.finally(() => { pendingWriterClaims -= 1 })
 }
@@ -99,12 +220,45 @@ function deliveryUncertain(error) {
   return Object.assign(new Error(error instanceof Error ? error.message : String(error)), { code: 'DELIVERY_UNCERTAIN' })
 }
 
-async function boundedMessage(tabId, message, timeoutMs, onLateResponse) {
+async function boundedMessage(tabId, message, timeoutMs, onLateResponse, writerParams = {}, targetDocumentId = null) {
   let timer
   let expired = false
+  let effect = null
+  if (CONTENT_EFFECT_METHODS.has(message.type)) {
+    if (contentEffectReservations.has(tabId)) throw deliveryUncertain('Tab has an unsettled content effect')
+    contentEffectReservations.add(tabId)
+    try {
+      await assertNoUnsettledEffectsForTab(tabId)
+      const token = crypto.randomUUID()
+      const document = await boundedMessage(tabId, { type: 'sidecar_effect_document', token }, 2000)
+      if (document?.token !== token || document.tabId !== tabId ||
+          typeof document.documentId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(document.documentId) ||
+          !webGptShiftPageUrl(document.url)) throw deliveryUncertain('Exact content document unavailable')
+      await assertNoUnsettledEffectsForTab(tabId)
+      effect = {
+        version: 1, token, tabId, documentId: document.documentId,
+        registrationId: writerRegistrationId(writerParams), writerEpoch: writerParams.writerEpoch ?? null,
+        method: message.type, instanceId: extensionInstanceId
+      }
+      await chrome.storage.local.set({ [CONTENT_EFFECT_PREFIX + token]: effect })
+    } finally { contentEffectReservations.delete(tabId) }
+  }
+  const dispatched = chrome.tabs.sendMessage(tabId, effect ? { ...message, contentEffect: effect } : message,
+    effect ? { documentId: effect.documentId } : targetDocumentId ? { documentId: targetDocumentId } : { frameId: 0 })
+  const original = effect ? dispatched.then(async result => {
+    if (contentEffectIdentityMatches(result?.contentEffectSettled, effect)) {
+      await settleContentEffect(effect, { id: chrome.runtime.id, tab: { id: tabId }, frameId: 0, documentId: effect.documentId })
+    }
+    return result
+  }) : dispatched
+  contentScriptPromises.add(original)
+  void original.then(
+    () => contentScriptPromises.delete(original),
+    () => contentScriptPromises.delete(original)
+  )
   try {
     return await Promise.race([
-      chrome.tabs.sendMessage(tabId, message).then(result => {
+      original.then(result => {
         if (expired && onLateResponse) void onLateResponse(result).catch(() => {})
         return result
       }),
@@ -646,10 +800,10 @@ async function createProject(params) {
   }
 
   await waitForContentScript(tab.id)
-  const response = await chrome.tabs.sendMessage(tab.id, {
+  const response = await boundedMessage(tab.id, {
     type: 'project_create',
     name
-  })
+  }, 60_000, undefined, params)
   if (response?.accepted !== true) {
     throw new Error(response?.error || 'ChatGPT content script rejected Project creation')
   }
@@ -703,7 +857,7 @@ async function createConversation(params) {
     await waitForContentScript(tab.id)
     let opened = null
     try {
-      opened = await boundedMessage(tab.id, { type: 'project_open', projectUrl }, 15_000)
+      opened = await boundedMessage(tab.id, { type: 'project_open', projectUrl }, 15_000, undefined, params)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (!/message (?:channel|port) closed.*response/i.test(message)) throw error
@@ -779,6 +933,32 @@ async function ensureAdoptionContentScript(tab, uuid) {
     return { ready: false, reason: 'content_script_unavailable' }
   }
   return { ready: true }
+}
+
+async function inspectSupervision(params) {
+  const uuid = exactAdoptionUuid(params.externalUrl)
+  if (!uuid) throw new Error('exact conversation UUID required for supervision inspection')
+  const tabs = (await chrome.tabs.query({})).filter(tab => exactAdoptionUuid(tabPageUrl(tab)) === uuid)
+  if (tabs.length !== 1) return { found: false, reason: tabs.length ? 'ambiguous_target_tabs' : 'exact_tab_unavailable' }
+  const tab = tabs[0]
+  const content = await ensureAdoptionContentScript(tab, uuid)
+  if (content.ready !== true) return { found: false, reason: content.reason }
+  let snapshot
+  try { snapshot = await boundedMessage(tab.id, { type: 'conversation_observe', authoritativeState: true }, 2000) }
+  catch { return { found: false, reason: 'supervision_unreadable' } }
+  const persistentId = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)
+  const assistantMessageId = snapshot?.assistantMessageId || null
+  if (snapshot?.ready !== true || exactAdoptionUuid(snapshot.url) !== uuid ||
+      pageIdentity(snapshot.url) !== pageIdentity(tabPageUrl(tab)) ||
+      !persistentId(snapshot.userMessageId) || (assistantMessageId !== null && !persistentId(assistantMessageId))) {
+    return { found: false, reason: 'supervision_identity_mismatch' }
+  }
+  let current
+  try { current = await chrome.tabs.get(tab.id) } catch { return { found: false, reason: 'exact_tab_unavailable' } }
+  if (exactAdoptionUuid(tabPageUrl(current)) !== uuid || pageIdentity(tabPageUrl(current)) !== pageIdentity(snapshot.url)) {
+    return { found: false, reason: 'supervision_target_changed' }
+  }
+  return { found: true, url: snapshot.url, userMessageId: snapshot.userMessageId, assistantMessageId }
 }
 
 async function inspectAdoption(params) {
@@ -889,7 +1069,7 @@ async function stopConversation(params) {
     stopped = await boundedMessage(state.tabId, {
       type: 'conversation_stop',
       expected
-    }, 5_000)
+    }, 5_000, undefined, params)
   } catch (error) {
     throw deliveryUncertain(error)
   }
@@ -920,6 +1100,117 @@ async function stopConversation(params) {
     assistantMessageId: receipt.assistantMessageId,
     assistantText: typeof stopped.assistantText === 'string' ? stopped.assistantText : '',
     url: externalUrl
+  }
+}
+
+function refreshReceiptResult(receipt, reconciled = false) {
+  const common = { receipt, ...(reconciled ? { reconciled: true } : {}) }
+  if (receipt.phase === 'applied') return { ...common, accepted: true, refreshed: true }
+  if (receipt.phase === 'denied') return { ...common, accepted: false, refreshed: false, reason: receipt.reason }
+  return { ...common, accepted: false, refreshed: null, deliveryUncertain: true, reason: 'refresh_outcome_unknown' }
+}
+
+async function refreshConversation(params) {
+  const identity = JSON.stringify({
+    conversationId: params.conversationId, externalUrl: params.externalUrl,
+    expectedUserMessageId: params.expectedUserMessageId, expectedAssistantMessageId: params.expectedAssistantMessageId,
+    writerEpoch: params.writerEpoch
+  })
+  const active = refreshRequests.get(params.requestId)
+  if (active) {
+    if (active.identity !== identity) throw new Error('effect receipt identity conflict')
+    return { ...await active.promise, reconciled: true }
+  }
+  const promise = performRefresh(params)
+  refreshRequests.set(params.requestId, { identity, promise })
+  try { return await promise }
+  finally { if (refreshRequests.get(params.requestId)?.promise === promise) refreshRequests.delete(params.requestId) }
+}
+
+async function performRefresh(params) {
+  for (const key of ['requestId', 'conversationId', 'expectedUserMessageId']) {
+    if (typeof params[key] !== 'string' || !params[key] || params[key].length > 256) throw new TypeError(`refresh requires ${key}`)
+  }
+  if (params.expectedAssistantMessageId !== null &&
+      (typeof params.expectedAssistantMessageId !== 'string' || !params.expectedAssistantMessageId || params.expectedAssistantMessageId.length > 256)) {
+    throw new TypeError('refresh requires exact expectedAssistantMessageId or null')
+  }
+  if (!Number.isInteger(params.writerEpoch) || params.writerEpoch <= 0) throw new TypeError('refresh requires writerEpoch')
+  const externalUrl = webGptShiftPageUrl(params.externalUrl)
+  if (!externalUrl || !stableConversationUrl(externalUrl)) throw new TypeError('refresh requires exact conversation externalUrl')
+  const sameUrl = url => pageIdentity(webGptShiftPageUrl(url)) === pageIdentity(externalUrl)
+  const prior = await loadEffectReceipt(params.requestId)
+  if (prior) {
+    if (prior.action !== 'refresh' || prior.conversationId !== params.conversationId ||
+        !sameUrl(prior.externalUrl) || prior.userMessageId !== params.expectedUserMessageId ||
+        prior.assistantMessageId !== params.expectedAssistantMessageId || prior.expectedWriterEpoch !== params.writerEpoch) {
+      throw new Error('effect receipt identity conflict')
+    }
+    return refreshReceiptResult(prior, true)
+  }
+
+  const denied = reason => ({ accepted: false, refreshed: false, reason })
+  const binding = await loadConversation(params.conversationId)
+  if (!Number.isInteger(binding?.tabId) || !sameUrl(binding.url)) return denied('exact_binding_unavailable')
+  if (sendOwners.has(params.conversationId) || tabOwners.has(binding.tabId)) return denied('busy')
+  const owner = {}
+  tabOwners.set(binding.tabId, owner)
+  try {
+    await assertNoUnsettledEffectsForTab(binding.tabId)
+    const all = await chrome.storage.local.get(null)
+    if (Object.entries(all).some(([key, pending]) => key.startsWith(PENDING_PREFIX) && pending?.tabId === binding.tabId &&
+        (pending.phase !== 'submitted' || pending.conversationId !== params.conversationId))) {
+      return denied('pending_browser_operation')
+    }
+    let tab
+    try { tab = await chrome.tabs.get(binding.tabId) } catch { return denied('exact_tab_unavailable') }
+    if (tab.id !== binding.tabId || !sameUrl(tabPageUrl(tab))) return denied('exact_tab_unavailable')
+
+    const receipt = await saveEffectReceipt({
+      requestId: params.requestId, action: 'refresh', phase: 'issued',
+      conversationId: params.conversationId, externalUrl,
+      userMessageId: params.expectedUserMessageId, assistantMessageId: params.expectedAssistantMessageId,
+      expectedWriterEpoch: params.writerEpoch, tabId: binding.tabId
+    })
+    const denyReceipt = async reason => {
+      const completed = { ...receipt, phase: 'denied', reason }
+      await chrome.storage.local.set({ [effectReceiptKey(params.requestId)]: completed })
+      return refreshReceiptResult(completed)
+    }
+
+    // Recheck exact binding and DOM after durable admission. This route never
+    // resolves, navigates, creates, reloads for readiness, or reattaches a tab.
+    const freshBinding = await loadConversation(params.conversationId)
+    if (freshBinding?.tabId !== binding.tabId || !sameUrl(freshBinding.url)) return denyReceipt('exact_binding_changed')
+    try { tab = await chrome.tabs.get(binding.tabId) } catch { return denyReceipt('exact_tab_unavailable') }
+    if (tab.id !== binding.tabId || !sameUrl(tabPageUrl(tab))) return denyReceipt('exact_tab_unavailable')
+    let snapshot
+    try {
+      snapshot = await boundedMessage(binding.tabId, {
+        type: 'conversation_state_observe', expectedUserMessageId: params.expectedUserMessageId
+      }, 2000)
+    } catch { return denyReceipt('unreadable_dom') }
+    if (snapshot?.ready !== true || snapshot.readable !== true || !sameUrl(snapshot.url) ||
+        snapshot.userMessageId !== params.expectedUserMessageId ||
+        snapshot.assistantMessageId !== params.expectedAssistantMessageId) return denyReceipt('dom_identity_mismatch')
+    if (snapshot.humanGate !== false) return denyReceipt('human_gate')
+    if (snapshot.generating !== false) return denyReceipt('active_or_unknown_generation')
+    if (snapshot.terminal !== true && !['empty', 'incomplete'].includes(snapshot.body)) return denyReceipt('not_terminal_or_blocked')
+    // An inactive snapshot cannot prove that an older timed-out command ended.
+    await assertNoUnsettledEffectsForTab(binding.tabId, params.requestId)
+
+    try {
+      await chrome.tabs.reload(binding.tabId)
+      const completed = { ...receipt, phase: 'applied' }
+      await chrome.storage.local.set({ [effectReceiptKey(params.requestId)]: completed })
+      return refreshReceiptResult(completed)
+    } catch {
+      // The issued durable intent survives restart. Its effect is unknown and
+      // the same request is never allowed to issue another reload.
+      return refreshReceiptResult(receipt)
+    }
+  } finally {
+    if (tabOwners.get(binding.tabId) === owner) tabOwners.delete(binding.tabId)
   }
 }
 
@@ -1013,7 +1304,7 @@ async function performSend(params, operation) {
     await saveOutboxEvent({ eventId: terminalEventId(event), event })
     await clearPendingTurn(params.conversationId)
     void flushOutbox()
-  }) } catch (error) { throw deliveryUncertain(error) }
+  }, params) } catch (error) { throw deliveryUncertain(error) }
   if (prepared?.prepared !== true) {
     await clearPendingTurn(params.conversationId)
     throw new Error(prepared?.error || 'ChatGPT content script could not prepare the prompt')
@@ -1042,7 +1333,7 @@ async function performSend(params, operation) {
     turnId: params.turnId,
     guarded: true,
     ...(params.authoritativeState === true ? { authoritativeState: true } : {})
-  }, 15_000) } catch (error) { throw deliveryUncertain(error) }
+  }, 15_000, undefined, params) } catch (error) { throw deliveryUncertain(error) }
   if (submitted?.deliveryUncertain === true) throw deliveryUncertain(submitted.error || 'Submit outcome unknown')
   if (submitted?.accepted !== true) {
     await clearPendingTurn(params.conversationId)
@@ -1206,37 +1497,50 @@ async function webGptStrengthDomDiagnostic(tabId) {
   }
 }
 
+function webGptShiftPageUrl(url) {
+  const page = chatGptPageUrl(url)
+  if (!page) return null
+  const pathname = new URL(page).pathname
+  return /^(?:\/|\/c\/[^/]+|\/g\/g-p-[^/]+\/(?:project|c\/[^/]+))$/.test(pathname) ? page : null
+}
+
 async function webGptShiftTest(params) {
   if (typeof params.target !== 'string' || !params.target.trim()) throw new Error('WebGPT shift target is required')
-  const stored = await chrome.storage.local.get(null)
-  const window0 = stored[WINDOW0_KEY]
-  if (!Number.isInteger(window0?.windowId)) throw new Error('No existing Sidecar window is registered')
-  const tabs = await chrome.tabs.query({ windowId: window0.windowId })
-  const candidates = tabs.filter((tab) => Boolean(chatGptPageUrl(tabPageUrl(tab))))
-  const managedTabIds = new Set(
-    Object.entries(stored)
-      .filter(([key, binding]) => key.startsWith(STORAGE_PREFIX) && Number.isInteger(binding?.tabId))
-      .map(([, binding]) => binding.tabId)
-  )
-  const managedCandidates = candidates.filter((candidate) => managedTabIds.has(candidate.id))
-  const eligible = managedCandidates.length ? managedCandidates : candidates
-  const targetUrl = params.target_url ? stableConversationUrl(params.target_url) : null
-  if (params.target_url && !targetUrl) throw new Error('WebGPT shift target_url must be a ChatGPT conversation URL')
-  const targetTabId = params.target_tab_id === undefined ? null : Number(params.target_tab_id)
-  if (targetTabId !== null && !Number.isInteger(targetTabId)) throw new Error('WebGPT shift target_tab_id must be an integer')
-  const tab = targetTabId !== null
-    ? eligible.find((candidate) => candidate.id === targetTabId)
-    : targetUrl
-      ? eligible.find((candidate) => pageIdentity(stableConversationUrl(tabPageUrl(candidate))) === pageIdentity(targetUrl))
+  const targetTabId = params.target_tab_id === undefined ? null : params.target_tab_id
+  if (targetTabId !== null && (!Number.isInteger(targetTabId) || targetTabId < 0)) throw new Error('WebGPT shift target_tab_id must be an integer')
+  if (params.target_tab_id === null) throw new Error('WebGPT shift target_tab_id must be an integer')
+  const targetUrl = params.target_url === undefined ? null : webGptShiftPageUrl(params.target_url)
+  if (params.target_url !== undefined && !targetUrl) throw new Error('WebGPT shift target_url must be a ChatGPT root, project, or conversation URL')
+  let tab
+  if (targetTabId !== null) {
+    try { tab = await chrome.tabs.get(targetTabId) } catch { throw new Error('No matching ChatGPT tab was found for target_tab_id') }
+    if (tab?.id !== targetTabId || !webGptShiftPageUrl(tabPageUrl(tab))) throw new Error('No matching ChatGPT tab was found for target_tab_id')
+    if (targetUrl && pageIdentity(tabPageUrl(tab)) !== pageIdentity(targetUrl)) throw new Error('WebGPT shift target_tab_id does not match target_url')
+  } else {
+    const stored = await chrome.storage.local.get(null)
+    const window0 = stored[WINDOW0_KEY]
+    if (!Number.isInteger(window0?.windowId)) throw new Error('No existing Sidecar window is registered')
+    const tabs = await chrome.tabs.query({ windowId: window0.windowId })
+    const candidates = tabs.filter((tab) => Boolean(webGptShiftPageUrl(tabPageUrl(tab))))
+    const managedTabIds = new Set(
+      Object.entries(stored)
+        .filter(([key, binding]) => key.startsWith(STORAGE_PREFIX) && Number.isInteger(binding?.tabId))
+        .map(([, binding]) => binding.tabId)
+    )
+    const managedCandidates = candidates.filter((candidate) => managedTabIds.has(candidate.id))
+    const eligible = managedCandidates.length ? managedCandidates : candidates
+    tab = targetUrl
+      ? eligible.find((candidate) => pageIdentity(tabPageUrl(candidate)) === pageIdentity(targetUrl))
       : (eligible.find((candidate) => candidate.active) || eligible[0])
-  if (!tab || !Number.isInteger(tab.id)) {
-    if (targetTabId !== null) throw new Error('No matching ChatGPT tab was found for target_tab_id')
-    throw new Error(targetUrl ? 'No matching ChatGPT conversation tab was found' : 'No existing ChatGPT tab was found')
+    if (!tab || !Number.isInteger(tab.id)) {
+      throw new Error(targetUrl ? 'No matching ChatGPT conversation tab was found' : 'No existing ChatGPT tab was found')
+    }
   }
   let result
   try {
-    result = await boundedMessage(tab.id, { type: 'webgpt_shift_test', target: params.target }, 10_000)
+    result = await boundedMessage(tab.id, { type: 'webgpt_shift_test', target: params.target }, 10_000, undefined, params)
   } catch (error) {
+    if (error?.code === 'DELIVERY_UNCERTAIN') throw error
     const diagnostic = await webGptStrengthDomDiagnostic(tab.id)
     const detail = diagnostic ? `; diagnostic=${JSON.stringify(diagnostic)}` : ''
     throw new Error(`${error instanceof Error ? error.message : String(error)}${detail}`)
@@ -1304,12 +1608,25 @@ async function readConversationStateObservation(params) {
     if (!tab && Number.isInteger(stored.windowId)) tab = await findMatchingConversationTab(stored.windowId, expectedUrl)
   }
   if (!tab || !Number.isInteger(tab.id)) return unreadableStateObservation(conversationId, expectedUrl, turnId)
-  const snapshot = await boundedMessage(tab.id, { type: 'conversation_state_observe', expectedUserMessageId }, 2000)
+  const allowLatestUser = params.allowLatestUser === true
+  const snapshot = await boundedMessage(tab.id, {
+    type: 'conversation_state_observe', expectedUserMessageId,
+    ...(allowLatestUser ? { allowLatestUser: true } : {})
+  }, 2000)
   const actualUrl = stableConversationUrl(snapshot?.url)
   const sameIdentity = stored.adopted === true
     ? exactAdoptionUuid(actualUrl) !== null && exactAdoptionUuid(actualUrl) === exactAdoptionUuid(expectedUrl)
     : pageIdentity(actualUrl) === pageIdentity(expectedUrl)
-  if (!actualUrl || !sameIdentity || snapshot?.ready !== true || snapshot?.readable !== true || snapshot?.userMessageId !== expectedUserMessageId) {
+  if (allowLatestUser && actualUrl && sameIdentity && snapshot?.ready === true && snapshot?.readable === false &&
+      snapshot.reason === 'human_turn_anchor_unavailable') {
+    throw Object.assign(new Error('human_turn_anchor_unavailable'), { code: 'HUMAN_TURN_ANCHOR_UNAVAILABLE' })
+  }
+  const userMatches = allowLatestUser
+    ? typeof snapshot?.userMessageId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(snapshot.userMessageId)
+    : snapshot?.userMessageId === expectedUserMessageId
+  const assistantMatches = !allowLatestUser || snapshot?.assistantMessageId == null ||
+    (typeof snapshot.assistantMessageId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(snapshot.assistantMessageId))
+  if (!actualUrl || !sameIdentity || snapshot?.ready !== true || snapshot?.readable !== true || !userMatches || !assistantMatches) {
     return unreadableStateObservation(conversationId, actualUrl || expectedUrl, turnId)
   }
   return {
@@ -1362,10 +1679,14 @@ async function executeRequest(message) {
     }))
     return { ...await extensionLifecycle.status(), writerEpoch: writerAuthority?.epoch ?? null, operations: [...activeSends.values()], managedTabs }
   }
-  if (message.method === 'extension_reload') return extensionLifecycle.requestReload(message.params)
+  if (message.method === 'extension_reload') {
+    await assertNoPendingContentEffects()
+    return extensionLifecycle.requestReload(message.params)
+  }
   if (message.method === 'writer_epoch_claim') {
     return runWriterClaim(message.params ?? {})
   }
+  if (message.method === 'writer_quiesce') return runWriterQuiesce(message.params ?? {})
   if (message.method === 'webgpt_shift_test') return runWriterMutation(message.params ?? {}, () => webGptShiftTest(message.params ?? {}))
   if (message.method === 'project_find') return findProject(message.params ?? {})
   if (message.method === 'project_create') return runWriterMutation(message.params ?? {}, () => createProject(message.params ?? {}))
@@ -1383,6 +1704,7 @@ async function executeRequest(message) {
     if (snapshot?.ready !== true || !tabMatchesExpectedUrl({ url: snapshot.url }, expectedUrl)) return { found: false }
     return { ...snapshot, found: true }
   }
+  if (message.method === 'conversation_supervision_inspect') return runWriterMutation(message.params ?? {}, () => inspectSupervision(message.params ?? {}))
   if (message.method === 'conversation_adoption_inspect') return runWriterMutation(message.params ?? {}, () => inspectAdoption(message.params ?? {}))
   if (message.method === 'conversation_adopt') return runWriterMutation(message.params ?? {}, () => adoptConversation(message.params ?? {}))
   if (message.method === 'conversation_snapshot') return readConversationSnapshot(message.params ?? {})
@@ -1398,6 +1720,9 @@ async function executeRequest(message) {
   }
   if (message.method === 'conversation_stop') {
     return runWriterMutation(message.params ?? {}, () => stopConversation(message.params ?? {}))
+  }
+  if (message.method === 'conversation_refresh') {
+    return runWriterMutation(message.params ?? {}, () => refreshConversation(message.params ?? {}))
   }
   throw new Error(`Unknown native request method: ${message.method}`)
 }
@@ -1440,6 +1765,17 @@ async function handleNativeRequest(message) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.kind === 'content_effect_document') {
+    sendResponse(trustedContentSender(sender) && typeof message.token === 'string'
+      ? { token: message.token, tabId: sender.tab.id, documentId: sender.documentId, url: sender.url || sender.tab.url }
+      : { ready: false })
+    return
+  }
+  if (message?.kind === 'content_effect_complete') {
+    void settleContentEffect(message.effect, sender).then(sendResponse)
+      .catch(() => sendResponse({ settled: false, reason: 'storage_error' }))
+    return true
+  }
   if (message?.kind === 'pending_turn_lookup') {
     void extensionLifecycle.runMutation(() => claimPendingTurnForTab(sender.tab))
       .then((pending) => sendResponse(pending))

@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { setTimeout as delay } from 'node:timers/promises'
 import { ChatGptConversationHost } from '../src/chatgpt.mjs'
 import { ConversationStore } from '../src/store.mjs'
 import { createSidecarServer } from '../src/server.mjs'
@@ -51,13 +52,16 @@ async function fixture(t) {
       const receipt = bridge.receipts.get(params.requestId)
       return receipt ? { found: true, receipt } : { found: false }
     }
-    if (method === 'conversation_state_observe') return {
+    if (method === 'conversation_state_observe') {
+      await delay(3)
+      return {
       contractVersion: 1, source: 'browser', conversationId: params.conversationId, target,
-      observedAt: new Date(Date.now() + 1).toISOString(), turnId: params.turnId,
+      observedAt: new Date().toISOString(), turnId: params.turnId,
       userMessageId: userId, assistantMessageId: bridge.snapshot.assistantMessageId,
       assistantText: '', readable: bridge.available, generating: bridge.snapshot.generating,
       terminal: bridge.snapshot.terminal, body: bridge.snapshot.body,
       humanGate: bridge.snapshot.humanGate, delivery: 'unknown', requestId: null
+      }
     }
     assert.fail(`unexpected browser mutation: ${method}`)
   }
@@ -162,6 +166,39 @@ test('duplicate ledger binding is rejected, and an existing owned ledger is not 
   assert.equal(result.reason, 'ambiguous_local_binding')
   assert.equal((await store.findByExternalUrl(target)).length, 2)
   assert.equal(bridge.effects, 0)
+})
+
+test('explicit current-user adoption recovers a known owned record when the old anchor is unavailable', async t => {
+  const { host, store, bridge } = await fixture(t)
+  const record = await store.create({ backend: 'chatgpt-web-extension', externalUrl: target })
+  const oldUser = '10000000-0000-4000-8000-000000000050'
+  await store.append(record.id, { type: 'send_intent', turnId: 'old-owned-turn', requestId: 'old-request', text: 'old action' })
+  await store.append(record.id, { type: 'generation_started', turnId: 'old-owned-turn', effectUserMessageId: oldUser, externalUrl: target })
+  await store.append(record.id, { type: 'conversation_state', state: { contractVersion: 1,
+    conversationId: record.id, target, stateVersion: 5,
+    turn: { turnId: 'old-owned-turn', userMessageId: oldUser, assistantMessageId: 'old-assistant' },
+    progress: 'terminal', body: 'substantive', delivery: 'delivered', gate: 'human_required',
+    writer: { mode: 'managed', epoch: 3 } } })
+  const original = bridge.request
+  bridge.request = async (method, params) => {
+    if (method === 'conversation_state_observe' && params.expectedUserMessageId === oldUser) {
+      throw Object.assign(new Error('old anchor unavailable'), { code: 'HUMAN_TURN_ANCHOR_UNAVAILABLE' })
+    }
+    return original(method, params)
+  }
+  assert.deepEqual(await host.observationByTarget(target), { found: false, reason: 'human_turn_anchor_unavailable' })
+  const adopted = await host.adoptExistingConversation(request())
+  assert.equal(adopted.accepted, true)
+  assert.equal(adopted.conversationId, record.id)
+  const current = await host.observationByTarget(target)
+  assert.equal(current.found, true)
+  assert.equal(current.state.turn.userMessageId, userId)
+  assert.match(current.state.turn.turnId, /^human_/)
+  assert.equal(current.state.gate, 'none')
+  assert.deepEqual(current.lineage, { registrationId: null, intentId: null })
+  assert.equal((await store.findByExternalUrl(target)).length, 1)
+  assert.equal((await store.read(record.id)).events.filter(event => event.type === 'send_intent').length, 1)
+  assert.equal(bridge.effects, 1)
 })
 
 test('HTTP adoption immediately makes the exact target authoritative through the state API', async t => {

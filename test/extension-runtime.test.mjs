@@ -33,7 +33,9 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
   assert.equal(harness.sentToTabs.length, 0)
 })
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null } = {}) {
+let harnessEffectToken = 0
+
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -121,9 +123,17 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           throw new Error(`Unsupported storage.get key: ${String(key)}`)
         },
         async set(values) {
+          if (failRevocationStorage && Object.keys(values).some(key => key.startsWith('writer:revoked-registration:'))) throw new Error('Revocation storage unavailable')
+          if (failContentEffectStorage && Object.keys(values).some(key => key.startsWith('content-effect:'))) throw new Error('Content effect storage unavailable')
           Object.assign(storageState, values)
+          for (const receipt of Object.values(values)) {
+            if (receipt?.action === 'refresh' && receipt.phase === 'issued' && refreshAdmissionTabChanges) {
+              Object.assign(tabMap.get(receipt.tabId), refreshAdmissionTabChanges)
+            }
+          }
         },
         async remove(key) {
+          if (failContentEffectClear && (Array.isArray(key) ? key : [key]).some(item => item.startsWith('content-effect:'))) throw new Error('Content effect clear unavailable')
           for (const item of Array.isArray(key) ? key : [key]) delete storageState[item]
         }
       }
@@ -171,24 +181,54 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         const tab = tabMap.get(tabId)
         if (!tab) throw new Error(`No tab ${tabId}`)
         reloadedTabs.push(tabId)
+        if (reloadTransportFailure) throw new Error('Reload acknowledgement lost')
         staleContentScriptTabs.delete(tabId)
         if (projectDraftRequiresReload) tab.composerPresent = true
       },
-      async sendMessage(tabId, message) {
+      async sendMessage(tabId, message, options = {}) {
         const tab = tabMap.get(tabId)
         if (!tab) throw new Error(`No tab ${tabId}`)
-        sentToTabs.push({ tabId, message, storageSnapshot: structuredClone(storageState) })
+        sentToTabs.push({ tabId, message, options, storageSnapshot: structuredClone(storageState) })
+        const sender = {
+          id: chrome.runtime.id, tab: { ...tab }, frameId: 0,
+          documentId: tab.documentId ?? '30000000-0000-4000-8000-' + String(tabId).padStart(12, '0')
+        }
+        if (options.documentId && options.documentId !== sender.documentId) throw new Error('Exact target document is unavailable')
+        const runtime = async notification => {
+          let response
+          for (const listener of runtimeMessageListeners) listener(notification, sender, value => { response = value })
+          for (let attempt = 0; attempt < 8 && response === undefined; attempt += 1) await new Promise(resolve => setImmediate(resolve))
+          return response
+        }
+        if (message.type === 'sidecar_effect_document') {
+          const result = await runtime({ kind: 'content_effect_document', token: message.token })
+          onContentDocumentProbe?.(storageState)
+          return result
+        }
+        try {
+        const result = await (async () => {
         if (message.type === 'sidecar_ping') {
           if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
+          if (completedEffectOnPing) await runtime({ kind: 'content_effect_complete', effect: completedEffectOnPing })
           return { ready: true, url: tab.url, buildId: 'a'.repeat(64), composerPresent: tab.composerPresent === true }
+        }
+        if (message.type === 'conversation_observe') {
+          if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
+          return {
+            ready: tab.observationReady !== false, url: tab.observedUrl ?? tab.url,
+            allowed: tab.generating !== true, reason: tab.generating === true ? 'assistant_active' : null,
+            userMessageId: tab.userMessageId ?? '', assistantMessageId: tab.assistantMessageId ?? ''
+          }
         }
         if (message.type === 'conversation_state_observe') {
           if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
-          const readable = tab.stateReadable !== false && tab.userMessageId === message.expectedUserMessageId
+          const readable = tab.stateReadable !== false && (message.allowLatestUser === true || tab.userMessageId === message.expectedUserMessageId)
+          onStateObservation?.(storageState)
           return {
             ready: true,
             url: tab.url,
             readable,
+            ...(tab.stateReason ? { reason: tab.stateReason } : {}),
             userMessageId: readable ? tab.userMessageId : null,
             assistantMessageId: readable ? (tab.assistantMessageId ?? null) : null,
             assistantText: readable ? (tab.assistantText ?? '') : null,
@@ -244,6 +284,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           return { accepted: true, userMessageId: `user-${message.turnId}`, url: responseUrl }
         }
         if (message.type === 'conversation_stop') {
+          if (stopGate) await stopGate
           if (tab.generating !== true) return { accepted: false, error: 'generation is not stoppable' }
           tab.generating = false
           return {
@@ -263,6 +304,13 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         }
         if (message.type === 'conversation_monitor_start') return { started: true }
         throw new Error(`Unexpected tab message ${message.type}`)
+        })()
+        if (message.contentEffect && !loseContentCompletion) await runtime({ kind: 'content_effect_complete', effect: message.contentEffect })
+        return message.contentEffect && !loseContentCompletion ? { ...result, contentEffectSettled: message.contentEffect } : result
+        } catch (error) {
+          if (message.contentEffect && !loseContentCompletion) await runtime({ kind: 'content_effect_complete', effect: message.contentEffect })
+          throw error
+        }
       }
     }
   }
@@ -272,9 +320,10 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     return 1
   }
 
+  let uuidCalls = 0
   const context = vm.createContext({
     chrome,
-    crypto: { randomUUID: () => 'test-instance' },
+    crypto: { randomUUID: () => ++uuidCalls === 1 ? 'test-instance' : `test-effect-${++harnessEffectToken}` },
     importScripts(...files) {
       for (const file of files) {
         if (file === 'build-info.js') vm.runInContext(`globalThis.__sidecarBuildId = ${JSON.stringify('a'.repeat(64))}`, context)
@@ -294,6 +343,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
       }
       if (expirePrepare && ms === 60_000) return fastSetTimeout(callback)
       if (fastWebGptShiftTimeout && ms === 10_000) return fastSetTimeout(callback)
+      if (fastStopTimeout && ms === 5_000) return fastSetTimeout(callback)
       if (ms >= 2000) return setTimeout(callback, ms)
       return fastSetTimeout(callback)
     },
@@ -386,6 +436,57 @@ const adoptionParams = { conversationId: 'conv_adopt', turnId: 'adopted-turn', r
   externalUrl: adoptionTarget, expectedUserMessageId: adoptionUser, writerEpoch: 3 }
 const adoptionTab = { id: 61, windowId: 6, url: adoptionTarget, userMessageId: adoptionUser,
   generating: true, body: 'empty' }
+
+test('conversation_supervision_inspect discovers current persistent anchors on one exact active tab without binding or navigation', async () => {
+  const h = makeHarness({
+    storage: { 'writer:authority': { version: 1, epoch: 3 } },
+    tabs: [adoptionTab], windows: [{ id: 6 }], staleContentScriptTabIds: [61]
+  })
+
+  const inspected = await h.request('conversation_supervision_inspect', { externalUrl: adoptionTarget, writerEpoch: 3 })
+
+  assert.equal(inspected.ok, true)
+  assert.equal(inspected.result.found, true)
+  assert.equal(inspected.result.userMessageId, adoptionUser)
+  assert.equal(inspected.result.assistantMessageId, null)
+  assert.equal(inspected.result.url, adoptionTarget)
+  assert.deepEqual(h.sentToTabs.filter(({ message }) => message.type === 'conversation_observe').map(({ tabId }) => tabId), [61])
+  assert.equal(h.sentToTabs.find(({ message }) => message.type === 'conversation_observe').message.authoritativeState, true)
+  assert.equal(Object.keys(h.storageState).some(key => key.startsWith('conversation:')), false)
+  assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length, 0)
+  assert.deepEqual(JSON.parse(JSON.stringify(h.scriptingCalls[0].target)), { tabId: 61, frameIds: [0] })
+})
+
+test('conversation_supervision_inspect fails closed for missing, ambiguous, unreadable, and nonpersistent observations', async () => {
+  for (const tabs of [
+    [], [adoptionTab, { ...adoptionTab, id: 62 }],
+    [{ ...adoptionTab, observationReady: false }],
+    [{ ...adoptionTab, userMessageId: '' }],
+    [{ ...adoptionTab, userMessageId: 'synthetic-user' }],
+    [{ ...adoptionTab, assistantMessageId: 'synthetic-assistant' }],
+    [{ ...adoptionTab, observedUrl: adoptionTarget.replace('0061', '0062') }]
+  ]) {
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, tabs, windows: [{ id: 6 }] })
+    const inspected = await h.request('conversation_supervision_inspect', { externalUrl: adoptionTarget, writerEpoch: 3 })
+    assert.equal(inspected.ok, true)
+    assert.equal(inspected.result.found, false, JSON.stringify(tabs))
+    assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length, 0)
+  }
+})
+
+test('conversation_supervision_inspect requires an exact UUID URL and current writer epoch before inspection', async () => {
+  const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, tabs: [adoptionTab], windows: [{ id: 6 }] })
+  for (const params of [
+    { externalUrl: 'https://chatgpt.com/', writerEpoch: 3 },
+    { externalUrl: adoptionTarget + '?other=1', writerEpoch: 3 },
+    { externalUrl: adoptionTarget, writerEpoch: 2 },
+    { externalUrl: adoptionTarget }
+  ]) {
+    const inspected = await h.request('conversation_supervision_inspect', params)
+    assert.equal(inspected.ok, false)
+  }
+  assert.equal(h.sentToTabs.length, 0)
+})
 
 test('explicit adoption reinjects a stale content script into only the exact target without reload or navigation', async () => {
   const h = makeHarness({ tabs: [adoptionTab], windows: [{ id: 6 }], staleContentScriptTabIds: [61] })
@@ -604,6 +705,211 @@ test('conversation_stop persists an effect receipt and duplicate request never c
   assert.equal(harness.sentToTabs.filter(entry => entry.message.type === 'conversation_stop').length, 1)
 })
 
+const refreshUrl = 'https://chatgpt.com/c/00000000-0000-4000-8000-000000000095'
+const refreshParams = {
+  requestId: 'request-refresh', conversationId: 'conv_refresh', externalUrl: refreshUrl,
+  expectedUserMessageId: 'user-refresh', expectedAssistantMessageId: 'assistant-refresh', writerEpoch: 3
+}
+
+function refreshHarness({ storage = {}, tab = {}, ...options } = {}) {
+  return makeHarness({
+    storage: {
+      'writer:authority': { version: 1, epoch: 3 },
+      'conversation:conv_refresh': { windowId: 10, tabId: 20, url: refreshUrl },
+      ...storage
+    },
+    windows: [{ id: 10 }],
+    tabs: [{
+      id: 20, windowId: 10, url: refreshUrl, userMessageId: 'user-refresh',
+      assistantMessageId: 'assistant-refresh', generating: false, terminal: false,
+      body: 'incomplete', humanGate: false, ...tab
+    }],
+    ...options
+  })
+}
+
+test('conversation_refresh reloads only the exact bound inactive tab and persists a replayable receipt', async () => {
+  const harness = refreshHarness()
+
+  const response = await harness.request('conversation_refresh', refreshParams)
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.accepted, true)
+  assert.equal(response.result.refreshed, true)
+  assert.deepEqual(harness.reloadedTabs, [20])
+  assert.equal(harness.createdTabs.length, 0)
+  assert.equal(harness.createdWindows.length, 0)
+  const receipt = harness.storageState['effect-receipt:request-refresh']
+  assert.equal(receipt.action, 'refresh')
+  assert.equal(receipt.phase, 'applied')
+  assert.equal(receipt.userMessageId, refreshParams.expectedUserMessageId)
+  assert.equal(receipt.assistantMessageId, refreshParams.expectedAssistantMessageId)
+  assert.equal(receipt.externalUrl, refreshUrl)
+  assert.equal(receipt.expectedWriterEpoch, 3)
+
+  const duplicate = await harness.request('conversation_refresh', refreshParams)
+  assert.equal(duplicate.ok, true)
+  assert.equal(duplicate.result.reconciled, true)
+  assert.deepEqual(harness.reloadedTabs, [20])
+
+  const restarted = refreshHarness({ storage: structuredClone(harness.storageState) })
+  const replay = await restarted.request('conversation_refresh', refreshParams)
+  assert.equal(replay.ok, true)
+  assert.equal(replay.result.refreshed, true)
+  assert.deepEqual(restarted.reloadedTabs, [])
+})
+
+test('conversation_refresh concurrent duplicate requests share one effect and reject conflicting targets', async () => {
+  const same = refreshHarness()
+  const [first, duplicate] = await Promise.all([
+    same.request('conversation_refresh', refreshParams),
+    same.request('conversation_refresh', refreshParams)
+  ])
+  assert.equal(first.result?.accepted, true)
+  assert.equal(duplicate.result?.accepted, true)
+  assert.deepEqual(same.reloadedTabs, [20])
+
+  const otherUrl = 'https://chatgpt.com/c/00000000-0000-4000-8000-000000000094'
+  const conflicting = makeHarness({
+    storage: {
+      'writer:authority': { version: 1, epoch: 3 },
+      'conversation:conv_refresh': { windowId: 10, tabId: 20, url: refreshUrl },
+      'conversation:conv_other': { windowId: 10, tabId: 21, url: otherUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [20, 21].map(id => ({
+      id, windowId: 10, url: id === 20 ? refreshUrl : otherUrl,
+      userMessageId: 'user-refresh', assistantMessageId: 'assistant-refresh',
+      generating: false, terminal: false, body: 'incomplete', humanGate: false
+    }))
+  })
+  const [accepted, denied] = await Promise.all([
+    conflicting.request('conversation_refresh', refreshParams),
+    conflicting.request('conversation_refresh', { ...refreshParams, conversationId: 'conv_other', externalUrl: otherUrl })
+  ])
+  assert.equal(accepted.result?.accepted, true)
+  assert.equal(denied.ok, false)
+  assert.match(denied.error, /identity conflict/)
+  assert.deepEqual(conflicting.reloadedTabs, [20])
+})
+
+test('conversation_refresh rejects active, human-gated, unreadable, or mismatched fresh DOM evidence', async () => {
+  for (const tab of [
+    { generating: true, terminal: false },
+    { humanGate: true },
+    { stateReadable: false },
+    { userMessageId: 'other-user' },
+    { assistantMessageId: 'other-assistant' },
+    { body: 'unknown', terminal: false }
+  ]) {
+    const harness = refreshHarness({ tab })
+    const response = await harness.request('conversation_refresh', refreshParams)
+    assert.equal(response.ok, true)
+    assert.equal(response.result.accepted, false, JSON.stringify(tab))
+    assert.deepEqual(harness.reloadedTabs, [])
+    assert.equal(harness.createdTabs.length, 0)
+  }
+})
+
+test('conversation_refresh rechecks fresh DOM after durable admission and denies a newly active turn', async () => {
+  const harness = refreshHarness({ refreshAdmissionTabChanges: { generating: true } })
+
+  const response = await harness.request('conversation_refresh', refreshParams)
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.accepted, false)
+  assert.deepEqual(harness.reloadedTabs, [])
+  assert.equal(harness.storageState['effect-receipt:request-refresh'].phase, 'denied')
+})
+
+test('conversation_refresh never reattaches a missing or changed registered tab', async () => {
+  for (const options of [
+    { storage: { 'conversation:conv_refresh': { windowId: 10, tabId: 99, url: refreshUrl } } },
+    { tab: { url: 'https://chatgpt.com/c/wrong' } },
+    { storage: { 'conversation:conv_refresh': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/wrong' } } }
+  ]) {
+    const harness = refreshHarness(options)
+    const response = await harness.request('conversation_refresh', refreshParams)
+    assert.equal(response.ok, true)
+    assert.equal(response.result.accepted, false)
+    assert.deepEqual(harness.reloadedTabs, [])
+    assert.equal(harness.createdTabs.length, 0)
+  }
+})
+
+test('conversation_refresh binds receipt replay to every caller identity and writer epoch', async () => {
+  const harness = refreshHarness()
+  assert.equal((await harness.request('conversation_refresh', refreshParams)).ok, true)
+  for (const changed of [
+    { conversationId: 'other-conversation' },
+    { externalUrl: 'https://chatgpt.com/c/other' },
+    { expectedUserMessageId: 'other-user' },
+    { expectedAssistantMessageId: null },
+    { writerEpoch: 2 }
+  ]) {
+    const response = await harness.request('conversation_refresh', { ...refreshParams, ...changed })
+    assert.equal(response.ok, false, JSON.stringify(changed))
+  }
+  assert.deepEqual(harness.reloadedTabs, [20])
+})
+
+test('conversation_refresh preserves unknown reload effects and never retries after restart', async () => {
+  const harness = refreshHarness({ reloadTransportFailure: true })
+  const first = await harness.request('conversation_refresh', refreshParams)
+  assert.equal(first.ok, true)
+  assert.equal(first.result.deliveryUncertain, true)
+  assert.equal(first.result.refreshed, null)
+  assert.deepEqual(harness.reloadedTabs, [20])
+
+  const replay = await harness.request('conversation_refresh', refreshParams)
+  assert.equal(replay.ok, true)
+  assert.equal(replay.result.deliveryUncertain, true)
+  assert.deepEqual(harness.reloadedTabs, [20])
+
+  const restarted = refreshHarness({ storage: structuredClone(harness.storageState) })
+  const restored = await restarted.request('conversation_refresh', refreshParams)
+  assert.equal(restored.ok, true)
+  assert.equal(restored.result.deliveryUncertain, true)
+  assert.deepEqual(restarted.reloadedTabs, [])
+})
+
+test('conversation_refresh treats an interrupted durable intent as unknown without issuing reload', async () => {
+  const harness = refreshHarness({
+    storage: { 'effect-receipt:request-refresh': {
+      requestId: refreshParams.requestId, action: 'refresh', phase: 'issued',
+      conversationId: refreshParams.conversationId, externalUrl: refreshUrl,
+      userMessageId: refreshParams.expectedUserMessageId,
+      assistantMessageId: refreshParams.expectedAssistantMessageId,
+      expectedWriterEpoch: 3, tabId: 20
+    } }
+  })
+
+  const response = await harness.request('conversation_refresh', refreshParams)
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.deliveryUncertain, true)
+  assert.deepEqual(harness.reloadedTabs, [])
+})
+
+test('conversation_refresh rejects malformed exact identity and unsafe pre-submit work', async () => {
+  for (const changed of [
+    { requestId: '' }, { conversationId: '' }, { externalUrl: 'https://chatgpt.com/' },
+    { expectedUserMessageId: '' }, { expectedAssistantMessageId: undefined }, { writerEpoch: undefined }
+  ]) {
+    const harness = refreshHarness()
+    const response = await harness.request('conversation_refresh', { ...refreshParams, ...changed })
+    assert.equal(response.ok, false, JSON.stringify(changed))
+    assert.deepEqual(harness.reloadedTabs, [])
+  }
+  const harness = refreshHarness({
+    storage: { 'pending:conv_refresh': { conversationId: 'conv_refresh', tabId: 20, phase: 'preparing' } }
+  })
+  const response = await harness.request('conversation_refresh', refreshParams)
+  assert.equal(response.ok, true)
+  assert.equal(response.result.accepted, false)
+  assert.deepEqual(harness.reloadedTabs, [])
+})
+
 test('duplicate request identity is deduplicated at the Extension before a second browser mutation', async () => {
   const externalUrl = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000097'
   const harness = makeHarness({
@@ -729,14 +1035,17 @@ test('two local conversation IDs cannot mutate the same active browser tab', asy
   assert.equal(harness.sentToTabs.filter(x => x.message.type === 'conversation_prepare').length, 1)
 })
 
-test('a late prepare receipt closes the unsubmitted turn after timeout', async () => {
+test('a late prepare receipt closes the unsubmitted turn after timeout', async (t) => {
   let release
   const harness = makeHarness({ expirePrepare: true, prepareGate: new Promise(resolve => { release = resolve }) })
+  t.after(() => release())
   const result = await harness.request('conversation_send', { conversationId: 'conv_late_prepare', turnId: 'turn_late', text: 'hello' })
   assert.equal(result.errorCode, 'DELIVERY_UNCERTAIN')
   assert.ok(harness.storageState['pending:conv_late_prepare'])
   release()
-  await new Promise(resolve => setImmediate(resolve))
+  for (let attempt = 0; attempt < 40 && harness.storageState['pending:conv_late_prepare']; attempt += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
   assert.equal(harness.storageState['pending:conv_late_prepare'], undefined)
   assert.equal(harness.sentToTabs.filter(x => x.message.type === 'conversation_submit').length, 0)
   assert.equal(harness.storageState['outbox:terminal:conv_late_prepare:turn_late:error'].event.turnId, 'turn_late')
@@ -1199,6 +1508,407 @@ test('writer epoch claim is serialized behind an older in-flight writer command'
   assert.equal(stale.ok, false)
 })
 
+const writerRegistration = '20000000-0000-4000-8000-000000000095'
+
+test('writer_quiesce waits for a content-script promise after caller timeout and blocks queued mutations', async t => {
+  let releasePrepare
+  const prepareGate = new Promise(resolve => { releasePrepare = resolve })
+  t.after(() => releasePrepare())
+  const externalUrl = 'https://chatgpt.com/c/quiesce-late-effect'
+  const harness = makeHarness({
+    prepareGate, expirePrepare: true,
+    storage: {
+      'writer:authority': { version: 1, epoch: 3 },
+      'conversation:conv_quiesce': { windowId: 10, tabId: 20, url: externalUrl }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: externalUrl }]
+  })
+  const failed = await harness.request('conversation_send', {
+    conversationId: 'conv_quiesce', turnId: 'turn_timeout', requestId: 'send-timeout',
+    text: 'held effect', externalUrl, writerEpoch: 3, registrationId: writerRegistration
+  })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.errorCode, 'DELIVERY_UNCERTAIN')
+  assert.equal(harness.sentToTabs.some(({ message }) => message.type === 'conversation_prepare'), true)
+
+  await harness.sendNativeMessage({ kind: 'request', requestId: 'quiesce-held', method: 'writer_quiesce', params: { writerEpoch: 3, registrationId: writerRegistration } })
+  await harness.sendNativeMessage({ kind: 'request', requestId: 'shift-queued', method: 'webgpt_shift_test', params: { target: 'Medium', target_tab_id: 20, writerEpoch: 3 } })
+  assert.equal(harness.nativeMessages.some(message => message.kind === 'response' && message.requestId === 'quiesce-held'), false)
+  assert.equal(harness.storageState['writer:revoked-registration:' + writerRegistration]?.registrationId, writerRegistration)
+  assert.equal(harness.sentToTabs.some(({ message }) => message.type === 'webgpt_shift_test'), false)
+
+  releasePrepare()
+  for (let attempt = 0; attempt < 12; attempt += 1) await new Promise(resolve => setImmediate(resolve))
+  const quiesced = harness.nativeMessages.find(message => message.kind === 'response' && message.requestId === 'quiesce-held')
+  assert.equal(quiesced?.ok, true)
+  assert.equal(quiesced.result.quiescent, true)
+  assert.equal(harness.storageState['writer:authority'].epoch, 3)
+  assert.equal(harness.nativeMessages.find(message => message.requestId === 'shift-queued')?.ok, true)
+  assert.equal(harness.sentToTabs.some(({ message }) => message.type === 'conversation_submit'), false)
+})
+
+test('writer_quiesce persists registration revocation and rejects late native mutations across restart', async () => {
+  const options = {
+    storage: { 'writer:authority': { version: 1, epoch: 3 } },
+    tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/' }]
+  }
+  const harness = makeHarness(options)
+  const quiesced = await harness.request('writer_quiesce', { writerEpoch: 3, registrationId: writerRegistration })
+  assert.equal(quiesced.ok, true)
+  assert.equal(quiesced.result.quiescent, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.storageState['writer:revoked-registration:' + writerRegistration])), {
+    version: 1, registrationId: writerRegistration, writerEpoch: 3
+  })
+
+  await harness.sendNativeMessage({
+    kind: 'request', requestId: 'late-revoked', method: 'webgpt_shift_test',
+    params: { target: 'Medium', target_tab_id: 20, writerEpoch: 3, registrationId: writerRegistration }
+  })
+  const late = harness.nativeMessages.find(message => message.requestId === 'late-revoked')
+  assert.equal(late?.ok, false)
+  assert.match(late.error, /registration.*revoked/i)
+  assert.equal(harness.sentToTabs.length, 0)
+
+  const restarted = makeHarness({ ...options, storage: structuredClone(harness.storageState) })
+  const denied = await restarted.request('webgpt_shift_test', {
+    target: 'Medium', target_tab_id: 20, writerEpoch: 3, registrationId: writerRegistration
+  })
+  assert.equal(denied.ok, false)
+  assert.equal(restarted.sentToTabs.length, 0)
+  const fresh = await restarted.request('webgpt_shift_test', {
+    target: 'Medium', target_tab_id: 20, writerEpoch: 3,
+    registrationId: '20000000-0000-4000-8000-000000000094'
+  })
+  assert.equal(fresh.ok, true)
+  const human = await restarted.request('webgpt_shift_test', { target: 'Medium', target_tab_id: 20, writerEpoch: 3 })
+  assert.equal(human.ok, true)
+  assert.equal(restarted.storageState['writer:authority'].epoch, 3)
+})
+
+test('writer registration fences reject malformed IDs and stale quiesce before revocation or effects', async () => {
+  for (const registrationId of [null, '', 'not-a-uuid', 95]) {
+    const harness = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } } })
+    const quiesced = await harness.request('writer_quiesce', { writerEpoch: 3, registrationId })
+    assert.equal(quiesced.ok, false)
+    const mutation = await harness.request('webgpt_shift_test', { target: 'Medium', target_tab_id: 20, writerEpoch: 3, registrationId })
+    assert.equal(mutation.ok, false)
+    assert.equal(Object.keys(harness.storageState).some(key => key.startsWith('writer:revoked-registration:')), false)
+    assert.equal(harness.sentToTabs.length, 0)
+  }
+  const harness = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } } })
+  assert.equal((await harness.request('writer_quiesce', { writerEpoch: 2, registrationId: writerRegistration })).ok, false)
+  assert.equal(harness.storageState['writer:revoked-registration:' + writerRegistration], undefined)
+})
+
+test('writer epoch claim waits for the actual timed-out content-script promise before migration', async t => {
+  let releasePrepare
+  const harness = makeHarness({
+    prepareGate: new Promise(resolve => { releasePrepare = resolve }), expirePrepare: true,
+    storage: {
+      'writer:authority': { version: 1, epoch: 3 },
+      'conversation:conv_claim_drain': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/claim-drain' }
+    },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/c/claim-drain' }]
+  })
+  t.after(() => releasePrepare())
+  const failed = await harness.request('conversation_send', {
+    conversationId: 'conv_claim_drain', turnId: 'turn_timeout', requestId: 'claim-drain-send',
+    text: 'held old writer', externalUrl: 'https://chatgpt.com/c/claim-drain', writerEpoch: 3
+  })
+  assert.equal(failed.errorCode, 'DELIVERY_UNCERTAIN')
+  await harness.sendNativeMessage({ kind: 'request', requestId: 'claim-drain', method: 'writer_epoch_claim', params: { writerEpoch: 4 } })
+  assert.equal(harness.nativeMessages.some(message => message.requestId === 'claim-drain'), false)
+  assert.equal(harness.storageState['writer:authority'].epoch, 3)
+
+  releasePrepare()
+  for (let attempt = 0; attempt < 12; attempt += 1) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(harness.nativeMessages.find(message => message.requestId === 'claim-drain')?.ok, true)
+  assert.equal(harness.storageState['writer:authority'].epoch, 4)
+  assert.equal(harness.sentToTabs.some(({ message }) => message.type === 'conversation_submit'), false)
+})
+
+test('writer_quiesce revokes in memory when durable storage fails and never acknowledges quiescence', async () => {
+  const options = {
+    storage: { 'writer:authority': { version: 1, epoch: 3 } },
+    tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/' }]
+  }
+  const harness = makeHarness({ ...options, failRevocationStorage: true })
+  const quiesced = await harness.request('writer_quiesce', { writerEpoch: 3, registrationId: writerRegistration })
+  assert.equal(quiesced.ok, false)
+  assert.match(quiesced.error, /storage unavailable/)
+  assert.equal(harness.storageState['writer:revoked-registration:' + writerRegistration], undefined)
+  const late = await harness.request('webgpt_shift_test', {
+    target: 'Medium', target_tab_id: 20, writerEpoch: 3, registrationId: writerRegistration
+  })
+  assert.equal(late.ok, false)
+  assert.match(late.error, /registration.*revoked/i)
+  assert.equal(harness.sentToTabs.length, 0)
+
+  const restarted = makeHarness({ ...options, storage: structuredClone(harness.storageState) })
+  assert.equal((await restarted.request('writer_epoch_claim', { writerEpoch: 4 })).ok, true)
+  const oldEpoch = await restarted.request('webgpt_shift_test', {
+    target: 'Medium', target_tab_id: 20, writerEpoch: 3, registrationId: writerRegistration
+  })
+  assert.equal(oldEpoch.ok, false)
+  assert.match(oldEpoch.error, /epoch mismatch/)
+  assert.equal(restarted.sentToTabs.length, 0)
+})
+
+test('writer quiesce and epoch claim barriers block extension reload while actual content work remains', async t => {
+  for (const method of ['writer_quiesce', 'writer_epoch_claim']) {
+    let releaseStop
+    const harness = makeHarness({
+      stopGate: new Promise(resolve => { releaseStop = resolve }), fastStopTimeout: true,
+      storage: {
+        'writer:authority': { version: 1, epoch: 3 },
+        'conversation:conv_barrier_reload': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/barrier-reload' }
+      },
+      windows: [{ id: 10 }],
+      tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/c/barrier-reload', generating: true, userMessageId: 'user-barrier' }]
+    })
+    t.after(() => releaseStop())
+    assert.equal((await harness.request('conversation_stop', {
+      conversationId: 'conv_barrier_reload', turnId: 'turn_timeout', requestId: 'barrier-reload-stop',
+      expected: { userMessageId: 'user-barrier', assistantMessageId: null },
+      externalUrl: 'https://chatgpt.com/c/barrier-reload', writerEpoch: 3
+    })).errorCode, 'DELIVERY_UNCERTAIN')
+    await harness.sendNativeMessage({
+      kind: 'request', requestId: 'held-barrier', method, params: { writerEpoch: method === 'writer_quiesce' ? 3 : 4 }
+    })
+    assert.equal(harness.nativeMessages.some(message => message.requestId === 'held-barrier'), false)
+    const reload = await harness.request('extension_reload', {
+      requestId: 'reload-during-barrier', expectedInstanceId: 'test-instance', expectedBuildId: 'a'.repeat(64)
+    })
+    assert.equal(reload.ok, false, method)
+    assert.match(reload.error, /busy/)
+    assert.equal(harness.runtimeReloadCount, 0)
+    releaseStop()
+    for (let attempt = 0; attempt < 12; attempt += 1) await new Promise(resolve => setImmediate(resolve))
+    assert.equal(harness.nativeMessages.find(message => message.requestId === 'held-barrier')?.ok, true)
+  }
+})
+
+const effectDocument = '30000000-0000-4000-8000-000000000020'
+const heldContentEffect = {
+  version: 1, token: 'held-effect-token', tabId: 20, documentId: effectDocument,
+  registrationId: writerRegistration, writerEpoch: 3, method: 'conversation_stop', instanceId: 'old-worker'
+}
+
+test('unresolved content effects prevent refresh despite a fresh inactive DOM and preserve read-only observations', async () => {
+  const harness = refreshHarness({ storage: { 'content-effect:held-effect-token': heldContentEffect } })
+  const refresh = await harness.request('conversation_refresh', refreshParams)
+  assert.equal(refresh.ok, false)
+  assert.equal(refresh.errorCode, 'DELIVERY_UNCERTAIN')
+  assert.equal(harness.reloadedTabs.length, 0)
+  assert.equal(harness.storageState['effect-receipt:request-refresh'], undefined)
+  assert.deepEqual(harness.storageState['content-effect:held-effect-token'], heldContentEffect)
+  const observed = await harness.request('conversation_state_observe', { conversationId: 'conv_refresh', externalUrl: refreshUrl,
+    turnId: 'turn_observe', expectedUserMessageId: 'user-refresh' })
+  assert.equal(observed.result.readable, true)
+  assert.equal(observed.result.generating, false)
+})
+
+test('a timed-out same-worker content operation cannot be bypassed by an inactive refresh snapshot', async t => {
+  let release
+  const harness = refreshHarness({ stopGate: new Promise(resolve => { release = resolve }), fastStopTimeout: true,
+    tab: { generating: true } })
+  t.after(() => release())
+  const stop = await harness.request('conversation_stop', { conversationId: 'conv_refresh', externalUrl: refreshUrl,
+    turnId: 'turn_held', requestId: 'stop_held', expected: { userMessageId: 'user-refresh', assistantMessageId: 'assistant-refresh' }, writerEpoch: 3 })
+  assert.equal(stop.errorCode, 'DELIVERY_UNCERTAIN')
+  await harness.updateTab(20, { generating: false })
+  const refresh = await harness.request('conversation_refresh', refreshParams)
+  assert.equal(refresh.ok, false)
+  assert.equal(refresh.errorCode, 'DELIVERY_UNCERTAIN')
+  assert.equal(harness.reloadedTabs.length, 0)
+  release()
+  for (let attempt = 0; attempt < 40 && Object.keys(harness.storageState).some(key => key.startsWith('content-effect:')); attempt += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  const settled = await harness.request('conversation_refresh', refreshParams)
+  assert.equal(settled.result.refreshed, true)
+})
+
+test('refresh checks for an unresolved content effect again after fresh DOM observation', async () => {
+  const harness = refreshHarness({ onStateObservation(storage) { storage['content-effect:held-effect-token'] = heldContentEffect } })
+  const refresh = await harness.request('conversation_refresh', refreshParams)
+  assert.equal(refresh.ok, false)
+  assert.equal(refresh.errorCode, 'DELIVERY_UNCERTAIN')
+  assert.equal(harness.reloadedTabs.length, 0)
+  assert.equal(harness.storageState['content-effect:held-effect-token'].token, heldContentEffect.token)
+})
+
+const unsettledRefresh = { action: 'refresh', phase: 'issued', requestId: 'old-refresh', tabId: 20 }
+
+test('new content dispatch cannot bypass a prior unknown refresh or content journal', async () => {
+  for (const storage of [
+    { 'effect-receipt:old-refresh': unsettledRefresh },
+    { 'content-effect:held-effect-token': heldContentEffect }
+  ]) {
+    const harness = refreshHarness({ storage })
+    const shift = await harness.request('webgpt_shift_test', { target: 'Medium', target_tab_id: 20, writerEpoch: 3 })
+    assert.equal(shift.ok, false)
+    assert.equal(shift.errorCode, 'DELIVERY_UNCERTAIN')
+    assert.equal(harness.sentToTabs.some(({ message }) => message.type === 'webgpt_shift_test'), false)
+    assert.equal(harness.reloadedTabs.length, 0)
+  }
+  const settled = refreshHarness({ storage: { 'effect-receipt:old-refresh': { ...unsettledRefresh, phase: 'applied' } } })
+  assert.equal((await settled.request('webgpt_shift_test', { target: 'Medium', target_tab_id: 20, writerEpoch: 3 })).ok, true)
+})
+
+test('content dispatch rechecks unresolved effects after the read-only document handshake', async () => {
+  const harness = refreshHarness({ onContentDocumentProbe(storage) { storage['effect-receipt:old-refresh'] = unsettledRefresh } })
+  const shift = await harness.request('webgpt_shift_test', { target: 'Medium', target_tab_id: 20, writerEpoch: 3 })
+  assert.equal(shift.ok, false)
+  assert.equal(shift.errorCode, 'DELIVERY_UNCERTAIN')
+  assert.equal(harness.sentToTabs.some(({ message }) => message.type === 'webgpt_shift_test'), false)
+  assert.equal(Object.keys(harness.storageState).some(key => key.startsWith('content-effect:')), false)
+})
+
+test('restarted owner barriers probe only the exact document for already-settled completion before admission', async () => {
+  for (const method of ['writer_quiesce', 'writer_epoch_claim']) {
+    const harness = refreshHarness({ storage: { 'content-effect:held-effect-token': heldContentEffect }, completedEffectOnPing: heldContentEffect })
+    const result = await harness.request(method, { writerEpoch: method === 'writer_quiesce' ? 3 : 4,
+      ...(method === 'writer_quiesce' ? { registrationId: writerRegistration } : {}) })
+    assert.equal(result.ok, true, method)
+    assert.equal(harness.storageState['content-effect:held-effect-token'], undefined)
+    const probes = harness.sentToTabs.filter(({ message }) => message.type === 'sidecar_ping')
+    assert.equal(probes.length, 1)
+    assert.equal(probes[0].tabId, heldContentEffect.tabId)
+    assert.equal(probes[0].options.documentId, heldContentEffect.documentId)
+    assert.equal(harness.sentToTabs.some(({ message }) => message.contentEffect), false)
+    assert.equal(harness.reloadedTabs.length, 0)
+  }
+})
+
+test('restart barrier probes cannot invent settlement for a missing document or mismatched completion', async () => {
+  for (const options of [
+    { tab: { documentId: effectDocument.replace('0020', '0021') }, completedEffectOnPing: heldContentEffect },
+    { completedEffectOnPing: { ...heldContentEffect, writerEpoch: 2 } }
+  ]) {
+    const harness = refreshHarness({ storage: { 'content-effect:held-effect-token': heldContentEffect }, ...options })
+    const result = await harness.request('writer_epoch_claim', { writerEpoch: 4 })
+    assert.equal(result.ok, false)
+    assert.equal(result.errorCode, 'DELIVERY_UNCERTAIN')
+    assert.equal(harness.storageState['content-effect:held-effect-token'].token, heldContentEffect.token)
+    assert.equal(harness.storageState['writer:authority'].epoch, 3)
+    assert.equal(harness.reloadedTabs.length, 0)
+  }
+})
+
+test('content effects persist exact document and writer binding before dispatch and clear only after settlement', async () => {
+  const harness = refreshHarness({ tab: { generating: true }, loseContentCompletion: true })
+  const response = await harness.request('conversation_stop', {
+    conversationId: 'conv_refresh', turnId: 'turn_effect', requestId: 'stop_effect',
+    externalUrl: refreshUrl, expected: { userMessageId: 'user-refresh', assistantMessageId: 'assistant-refresh' },
+    writerEpoch: 3, registrationId: writerRegistration
+  })
+  assert.equal(response.ok, true)
+  const dispatched = harness.sentToTabs.find(({ message }) => message.type === 'conversation_stop')
+  assert.ok(dispatched.message.contentEffect)
+  const effect = dispatched.message.contentEffect
+  assert.deepEqual(JSON.parse(JSON.stringify(dispatched.storageSnapshot['content-effect:' + effect.token])), JSON.parse(JSON.stringify(effect)))
+  assert.equal(effect.tabId, 20)
+  assert.equal(effect.documentId, effectDocument)
+  assert.equal(effect.registrationId, writerRegistration)
+  assert.equal(effect.writerEpoch, 3)
+  assert.equal(dispatched.options.documentId, effectDocument)
+  assert.equal(harness.storageState['content-effect:' + effect.token]?.token, effect.token)
+  const blocked = await harness.request('writer_quiesce', { writerEpoch: 3, registrationId: writerRegistration })
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.errorCode, 'DELIVERY_UNCERTAIN')
+})
+
+test('content journal write failure prevents dispatch and clear failure blocks quiescence', async () => {
+  for (const failure of [{ failContentEffectStorage: true }, { failContentEffectClear: true }]) {
+    const harness = refreshHarness({ tab: { generating: true }, ...failure })
+    const response = await harness.request('conversation_stop', {
+      conversationId: 'conv_refresh', turnId: 'turn_effect', requestId: 'stop_effect',
+      externalUrl: refreshUrl, expected: { userMessageId: 'user-refresh', assistantMessageId: 'assistant-refresh' },
+      writerEpoch: 3, registrationId: writerRegistration
+    })
+    assert.equal(response.ok, false)
+    const dispatched = harness.sentToTabs.filter(({ message }) => message.type === 'conversation_stop')
+    assert.equal(dispatched.length, failure.failContentEffectStorage ? 0 : 1)
+    if (failure.failContentEffectClear) {
+      const blocked = await harness.request('writer_quiesce', { writerEpoch: 3, registrationId: writerRegistration })
+      assert.equal(blocked.ok, false)
+      assert.equal(blocked.errorCode, 'DELIVERY_UNCERTAIN')
+    }
+  }
+})
+
+test('worker restart cannot acknowledge quiescence or claim a new epoch while a durable content effect is unsettled', async () => {
+  for (const method of ['writer_quiesce', 'writer_epoch_claim', 'extension_reload']) {
+    const harness = makeHarness({ storage: {
+      'writer:authority': { version: 1, epoch: 3 },
+      'content-effect:held-effect-token': heldContentEffect
+    } })
+    const params = method === 'extension_reload'
+      ? { requestId: 'restart-reload', expectedInstanceId: 'test-instance', expectedBuildId: 'a'.repeat(64) }
+      : { writerEpoch: method === 'writer_quiesce' ? 3 : 4, registrationId: writerRegistration }
+
+    const result = await harness.request(method, params)
+
+    assert.equal(result.ok, false, method)
+    assert.equal(result.errorCode, 'DELIVERY_UNCERTAIN')
+    assert.equal(harness.storageState['content-effect:held-effect-token'].token, heldContentEffect.token)
+    assert.equal(harness.storageState['writer:authority'].epoch, 3)
+    assert.equal(harness.runtimeReloadCount, 0)
+  }
+})
+
+test('only exact trusted content completion clears a durable effect after worker restart', async () => {
+  const harness = makeHarness({ storage: {
+    'writer:authority': { version: 1, epoch: 3 },
+    'content-effect:held-effect-token': heldContentEffect
+  } })
+  const exactSender = { id: 'cfifihieaffhniimpimnfmignbbdaalb', tab: { id: 20 }, frameId: 0, documentId: effectDocument }
+  for (const [effect, sender] of [
+    [{ ...heldContentEffect, token: 'other-token' }, exactSender],
+    [heldContentEffect, { ...exactSender, tab: { id: 21 } }],
+    [heldContentEffect, { ...exactSender, documentId: effectDocument.replace('0020', '0021') }],
+    [heldContentEffect, { ...exactSender, frameId: 1 }],
+    [{ ...heldContentEffect, registrationId: '20000000-0000-4000-8000-000000000094' }, exactSender],
+    [{ ...heldContentEffect, writerEpoch: 2 }, exactSender]
+  ]) {
+    await harness.emitRuntimeMessage({ kind: 'content_effect_complete', effect }, sender)
+    assert.equal(harness.storageState['content-effect:held-effect-token'].token, heldContentEffect.token)
+  }
+  const settled = await harness.emitRuntimeMessage({ kind: 'content_effect_complete', effect: heldContentEffect }, exactSender)
+  assert.equal(settled?.settled, true)
+  assert.equal(harness.storageState['content-effect:held-effect-token'], undefined)
+  const quiesced = await harness.request('writer_quiesce', { writerEpoch: 3, registrationId: writerRegistration })
+  assert.equal(quiesced.ok, true)
+  assert.equal(quiesced.result.quiescent, true)
+})
+
+test('an issued refresh receipt is unknown across worker restart and cannot pass an owner barrier', async () => {
+  const harness = refreshHarness({ storage: { 'effect-receipt:request-refresh': {
+    action: 'refresh', phase: 'issued', requestId: refreshParams.requestId,
+    conversationId: refreshParams.conversationId, externalUrl: refreshUrl,
+    userMessageId: refreshParams.expectedUserMessageId, assistantMessageId: refreshParams.expectedAssistantMessageId,
+    expectedWriterEpoch: 3, tabId: 20
+  } } })
+  const quiesced = await harness.request('writer_quiesce', { writerEpoch: 3, registrationId: writerRegistration })
+  assert.equal(quiesced.ok, false)
+  assert.equal(quiesced.errorCode, 'DELIVERY_UNCERTAIN')
+})
+
+test('writer_quiesce validates current durable epoch without changing authority', async () => {
+  const harness = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } } })
+  const stale = await harness.request('writer_quiesce', { writerEpoch: 2 })
+  assert.equal(stale.ok, false)
+  assert.match(stale.error, /epoch mismatch/)
+  const current = await harness.request('writer_quiesce', { writerEpoch: 3 })
+  assert.equal(current.ok, true)
+  assert.equal(current.result.quiescent, true)
+  assert.equal(current.result.currentWriterEpoch, 3)
+  assert.equal(harness.storageState['writer:authority'].epoch, 3)
+})
+
 test('writer epoch fences every Sidecar browser mutation command class', async () => {
   const externalUrl = 'https://chatgpt.com/c/writer-epoch-all-mutations'
   const harness = makeHarness({
@@ -1378,6 +2088,75 @@ test('webgpt shift probe targets the exact allocated managed tab when target_tab
   assert.equal(shiftCalls.length, 1)
   assert.equal(shiftCalls[0].tabId, 21)
   assert.equal(shiftCalls[0].message.target, 'High')
+})
+
+test('webgpt shift probe targets an explicit unmanaged tab in a different window without window0', async () => {
+  const harness = makeHarness({
+    storage: { 'conversation:conv_other': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/other' } },
+    windows: [{ id: 10 }, { id: 11 }],
+    tabs: [
+      { id: 20, windowId: 10, url: 'https://chatgpt.com/c/other', active: true },
+      { id: 21, windowId: 11, url: 'https://chatgpt.com/', active: false }
+    ]
+  })
+
+  const response = await harness.request('webgpt_shift_test', { target: 'Medium', target_tab_id: 21 })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.result.tabId, 21)
+  assert.deepEqual(harness.sentToTabs.filter(({ message }) => message.type === 'webgpt_shift_test').map(({ tabId }) => tabId), [21])
+  assert.equal(harness.createdTabs.length, 0)
+})
+
+test('webgpt shift probe never coerces an explicit tab ID', async () => {
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 21, windowId: 10, url: 'https://chatgpt.com/', active: true }]
+  })
+
+  const response = await harness.request('webgpt_shift_test', { target: 'Medium', target_tab_id: '21' })
+
+  assert.equal(response.ok, false)
+  assert.match(response.error, /target_tab_id must be an integer/)
+  assert.equal(harness.sentToTabs.length, 0)
+})
+
+test('webgpt shift probe rejects an explicit tab when target_url names another page', async () => {
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 21, windowId: 10, url: 'https://chatgpt.com/c/actual', active: true }]
+  })
+
+  const response = await harness.request('webgpt_shift_test', {
+    target: 'Medium', target_tab_id: 21, target_url: 'https://chatgpt.com/c/expected'
+  })
+
+  assert.equal(response.ok, false)
+  assert.match(response.error, /target_url/)
+  assert.equal(harness.sentToTabs.length, 0)
+})
+
+test('webgpt shift probe rejects arbitrary ChatGPT routes and a missing explicit tab without fallback', async () => {
+  for (const target of [
+    { id: 21, url: 'https://chatgpt.com/settings' },
+    { id: 21, url: 'https://chatgpt.com/c/actual/extra' },
+    { id: 21, url: 'https://example.com/' },
+    null
+  ]) {
+    const harness = makeHarness({
+      storage: { window0: { windowId: 10 } },
+      windows: [{ id: 10 }],
+      tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/', active: true }, ...(target ? [{ ...target, windowId: 10 }] : [])]
+    })
+
+    const response = await harness.request('webgpt_shift_test', { target: 'Medium', target_tab_id: 21 })
+
+    assert.equal(response.ok, false, target?.url ?? 'closed tab')
+    assert.equal(harness.sentToTabs.length, 0)
+    assert.equal(harness.createdTabs.length, 0)
+  }
 })
 
 test('webgpt shift probe bounds a missing content-script response', async () => {
@@ -1695,6 +2474,64 @@ test('conversation state observation wraps exact bound-tab facts in v1 envelope'
   assert.equal(response.result.requestId, null)
   assert.ok(Number.isFinite(Date.parse(response.result.observedAt)))
   assert.deepEqual(harness.sentToTabs.filter(({ message }) => message.type === 'conversation_state_observe').map(({ tabId }) => tabId), [30])
+})
+
+test('latest human state observation preserves the v1 envelope and forwards the explicit read-only proof request', async () => {
+  const externalUrl = 'https://chatgpt.com/c/exact-latest-state'
+  const latestUser = '40000000-0000-4000-8000-000000000001'
+  const harness = makeHarness({
+    storage: { 'conversation:conv_state': { windowId: 10, tabId: 30, url: externalUrl } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 30, windowId: 10, url: externalUrl, userMessageId: latestUser, assistantMessageId: null, assistantText: '', generating: false, terminal: false, body: 'empty', humanGate: false }]
+  })
+  const before = Date.now()
+  const params = { conversationId: 'conv_state', externalUrl, turnId: 'old-turn', expectedUserMessageId: 'known-old-user' }
+  const legacy = await harness.request('conversation_state_observe', params)
+  assert.equal(legacy.result.readable, false)
+  const latest = await harness.request('conversation_state_observe', { ...params, allowLatestUser: true })
+  assert.equal(latest.ok, true)
+  assert.equal(latest.result.readable, true)
+  assert.equal(latest.result.contractVersion, 1)
+  assert.equal(latest.result.source, 'browser')
+  assert.equal(latest.result.target, externalUrl)
+  assert.equal(latest.result.turnId, 'old-turn')
+  assert.equal(latest.result.userMessageId, latestUser)
+  assert.equal(latest.result.assistantMessageId, null)
+  assert.equal(latest.result.assistantText, '')
+  assert.equal(latest.result.body, 'empty')
+  assert.equal(latest.result.terminal, false)
+  assert.equal(latest.result.humanGate, false)
+  assert.ok(Date.parse(latest.result.observedAt) >= before)
+  const reads = harness.sentToTabs.filter(({ message }) => message.type === 'conversation_state_observe')
+  assert.equal(reads[0].message.allowLatestUser, undefined)
+  assert.equal(reads[1].message.allowLatestUser, true)
+  assert.equal(harness.createdTabs.length, 0)
+  assert.equal(harness.reloadedTabs.length, 0)
+  assert.equal(Object.keys(harness.storageState).some(key => key.startsWith('content-effect:')), false)
+})
+
+test('latest human state observation reports a typed missing-known-anchor diagnostic without extending v1 facts', async () => {
+  const externalUrl = 'https://chatgpt.com/c/exact-latest-anchor-missing'
+  const harness = makeHarness({ storage: { 'conversation:conv_state': { windowId: 10, tabId: 30, url: externalUrl } },
+    windows: [{ id: 10 }], tabs: [{ id: 30, windowId: 10, url: externalUrl, stateReadable: false, stateReason: 'human_turn_anchor_unavailable' }] })
+  const response = await harness.request('conversation_state_observe', { conversationId: 'conv_state', externalUrl,
+    turnId: 'old-turn', expectedUserMessageId: 'known-user', allowLatestUser: true })
+  assert.equal(response.ok, false)
+  assert.equal(response.errorCode, 'HUMAN_TURN_ANCHOR_UNAVAILABLE')
+  assert.equal(response.error, 'human_turn_anchor_unavailable')
+  assert.equal(harness.createdTabs.length, 0)
+  assert.equal(harness.reloadedTabs.length, 0)
+})
+
+test('latest human state observation rejects a synthetic user identity at the worker boundary', async () => {
+  const externalUrl = 'https://chatgpt.com/c/exact-latest-invalid'
+  const harness = makeHarness({ storage: { 'conversation:conv_state': { windowId: 10, tabId: 30, url: externalUrl } },
+    windows: [{ id: 10 }], tabs: [{ id: 30, windowId: 10, url: externalUrl, userMessageId: 'synthetic-new-user', body: 'empty' }] })
+  const response = await harness.request('conversation_state_observe', { conversationId: 'conv_state', externalUrl,
+    turnId: 'old-turn', expectedUserMessageId: 'old-user', allowLatestUser: true })
+  assert.equal(response.ok, true)
+  assert.equal(response.result.readable, false)
+  assert.equal(response.result.userMessageId, null)
 })
 
 test('conversation state observation fails closed when expected user identity is absent', async () => {

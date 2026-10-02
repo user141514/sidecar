@@ -171,7 +171,7 @@ test('old Watchdog pacing-only admission cannot retain direct write authority', 
   assert.equal(admission.calls, 0)
 })
 
-test('localhost intent endpoint executes proposal, rejects browser Origin, and validates input', async t => {
+test('localhost intent endpoint rejects unversioned legacy supervision, browser Origin, and invalid target', async t => {
   const { host } = await setup(t)
   const app = createSidecarServer({ conversationHost: host })
   const addr = await app.listen({ port: 0 })
@@ -181,6 +181,6 @@ test('localhost intent endpoint executes proposal, rejects browser Origin, and v
   assert.equal((await post(intent, { origin: 'https://evil.example' })).status, 403)
   assert.equal((await post({ ...intent, target: 'https://chatgpt.com/' })).status, 400)
   const result = await post(intent)
-  assert.equal(result.status, 200)
-  assert.equal((await result.json()).accepted, true)
+  assert.equal(result.status, 400)
+  assert.equal((await result.json()).reason, 'watchdog_registration_required')
 })

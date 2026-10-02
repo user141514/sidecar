@@ -687,7 +687,7 @@ test('runtime wiring gives the conversation host the canonical managed Project u
   assert.equal(components.conversationHost.managedProjectUrl, managedProjectUrl)
 })
 
-test('localhost intent endpoint accepts v1 and rejects future contract versions', async t => {
+test('localhost generic intent endpoint accepts explicit human v1 and rejects future contract versions', async t => {
   const { host, conversation, bridge } = await setup(t)
   host.stateByTarget = async () => ({ found: true, state: state(conversation.id) })
   const app = createSidecarServer({ conversationHost: host })
@@ -700,11 +700,11 @@ test('localhost intent endpoint accepts v1 and rejects future contract versions'
     body: JSON.stringify(body)
   })
 
-  const accepted = await post(intent(conversation.id, { intentId: 'intent-v1-http' }))
+  const accepted = await post(intent(conversation.id, { intentId: 'intent-v1-http', source: 'human' }))
   assert.equal(accepted.status, 200)
   assert.equal((await accepted.json()).accepted, true)
 
-  const future = await post(intent(conversation.id, { contractVersion: 2, intentId: 'intent-v2-http' }))
+  const future = await post(intent(conversation.id, { contractVersion: 2, intentId: 'intent-v2-http', source: 'human' }))
   assert.equal(future.status, 400)
   assert.equal(bridge.calls.filter(call => call.method === 'conversation_send').length, 1)
 })

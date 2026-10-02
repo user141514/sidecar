@@ -42,7 +42,7 @@ function baseDelivery(ledger, turnId) {
   if (!turnId) return 'none'
   if (ledger.status === 'delivery_uncertain' || has(ledger, turnId, 'delivery_uncertain')) return 'uncertain'
   // Adoption proves an existing persisted user message, not a send effect.
-  if (has(ledger, turnId, 'conversation_adopted', 'generation_started', 'response_completed', 'need_continue')) return 'delivered'
+  if (has(ledger, turnId, 'conversation_adopted', 'human_turn_observed', 'generation_started', 'response_completed', 'need_continue')) return 'delivered'
   if (has(ledger, turnId, 'send_intent', 'prompt_sent')) return 'pending'
   return 'none'
 }
@@ -94,9 +94,11 @@ export function reduceConversationProjection({ ledger, observations = [], writer
     event.assistantMessageId === prior.turn.assistantMessageId
   ) : null
   const humanGateCleared = Boolean(humanGateClear)
-  let gate = humanGateCleared ? 'none' : (prior?.gate ?? 'none')
-  let userMessageId = prior?.turn.turnId === turnId ? prior.turn.userMessageId : null
-  let assistantMessageId = prior?.turn.turnId === turnId ? prior.turn.assistantMessageId : null
+  let gate = humanGateCleared ? 'none' : (prior?.turn.turnId === turnId ? prior.gate : 'none')
+  const observedTurn = revFind(ledger.events, event => event.turnId === turnId &&
+    ['conversation_adopted', 'human_turn_observed'].includes(event.type))
+  let userMessageId = prior?.turn.turnId === turnId ? prior.turn.userMessageId : observedTurn?.userMessageId ?? null
+  let assistantMessageId = prior?.turn.turnId === turnId ? prior.turn.assistantMessageId : observedTurn?.assistantMessageId ?? null
   let target = ledger.externalUrl
 
   const receiptAccepted = Boolean(receipt && intent && receipt.requestId === intent.requestId && receipt.delivery === 'delivered')

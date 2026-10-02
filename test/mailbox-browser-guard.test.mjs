@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
-function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, interrupted = false, finalized = true, needsInputText = false } = {}) {
+function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, interrupted = false, finalized = true, needsInputText = false, latestUserId = 'u-later', latestAssistantId = 'a-later', latestAssistantPresent = true } = {}) {
   let listener, clicks = 0, pending = false, active = false, gate = false, submitted = false
   class Editor {
     _value = ''
@@ -27,8 +27,8 @@ function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, 
   }
   const user = { innerText: 'task', getAttribute(n) { return n === 'data-message-id' ? (pending ? 'u2' : 'u1') : null }, compareDocumentPosition() { return pending ? 0 : 4 }, querySelector() { return null } }
   const submittedUser = { innerText: 'submitted command', getAttribute(n) { return n === 'data-message-id' ? 'u-submit' : null }, querySelector() { return null } }
-  const laterUser = { innerText: 'later task', getAttribute(n) { return n === 'data-message-id' ? 'u-later' : null }, compareDocumentPosition() { return 4 }, querySelector() { return null } }
-  const laterAssistant = { innerText: 'later answer', getAttribute(n) { return n === 'data-message-id' ? 'a-later' : null }, closest() { return turn }, compareDocumentPosition() { return 0 } }
+  const laterUser = { innerText: 'later task', getAttribute(n) { return n === 'data-message-id' ? latestUserId : null }, compareDocumentPosition(node) { return node === laterAssistant ? 4 : 2 }, querySelector() { return null } }
+  const laterAssistant = { innerText: 'later answer', getAttribute(n) { return n === 'data-message-id' ? latestAssistantId : null }, closest() { return turn }, compareDocumentPosition() { return 0 }, querySelector(s) { return /data-message-content|assistant-message-content|markdown|prose/.test(s) ? { innerText: 'later answer', querySelector(selector) { return /p, li, pre, code/.test(selector) ? {} : null } } : null } }
   const button = { disabled: false, getAttribute() { return null }, click() { clicks++; editor.value = ''; submitted = true } }
   const document = {
     querySelector(s) {
@@ -39,7 +39,7 @@ function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, 
       return null
     },
     querySelectorAll(s) {
-      if (s === '[data-message-author-role="assistant"]') return laterTurn ? [assistant, laterAssistant] : [assistant]
+      if (s === '[data-message-author-role="assistant"]') return laterTurn && latestAssistantPresent ? [assistant, laterAssistant] : [assistant]
       if (s === '[data-message-author-role="user"]') {
         const base = submitted ? [user, submittedUser] : [user]
         return laterTurn ? [...base, laterUser] : base
@@ -88,6 +88,48 @@ test('state observation fails closed when a newer user turn supersedes the expec
   assert.equal(state.userMessageId, 'u1')
   assert.equal(state.assistantMessageId, null)
   assert.equal(state.terminal, null)
+})
+
+const latestUserUuid = '40000000-0000-4000-8000-000000000001'
+const latestAssistantUuid = '40000000-0000-4000-8000-000000000002'
+
+test('latest human observation returns only the assistant following the proven newest persistent user', async () => {
+  const f = fixture({ bodyMode: 'substantive', laterTurn: true, needsInputText: true, latestUserId: latestUserUuid, latestAssistantId: latestAssistantUuid })
+  f.gate = true
+  const state = await f.call({ type: 'conversation_state_observe', expectedUserMessageId: 'u1', allowLatestUser: true })
+  assert.equal(state.readable, true)
+  assert.equal(state.userMessageId, latestUserUuid)
+  assert.equal(state.assistantMessageId, latestAssistantUuid)
+  assert.equal(state.assistantText, 'later answer')
+  assert.equal(state.body, 'substantive')
+  assert.equal(state.terminal, true)
+  assert.equal(state.humanGate, false)
+  assert.equal(f.clicks, 0)
+  assert.equal((await f.call({ type: 'conversation_state_observe', expectedUserMessageId: 'u1' })).readable, false)
+})
+
+test('latest human without a following assistant cannot inherit older response or human-gate evidence', async () => {
+  const f = fixture({ bodyMode: 'substantive', laterTurn: true, needsInputText: true, latestUserId: latestUserUuid, latestAssistantPresent: false })
+  f.gate = true
+  const state = await f.call({ type: 'conversation_state_observe', expectedUserMessageId: 'u1', allowLatestUser: true })
+  assert.equal(state.readable, true)
+  assert.equal(state.userMessageId, latestUserUuid)
+  assert.equal(state.assistantMessageId, null)
+  assert.equal(state.assistantText, '')
+  assert.equal(state.body, 'empty')
+  assert.equal(state.terminal, false)
+  assert.equal(state.humanGate, false)
+  assert.equal(f.clicks, 0)
+})
+
+test('latest human observation rejects synthetic user identity and an unproven historical viewport', async () => {
+  const synthetic = fixture({ laterTurn: true })
+  assert.equal((await synthetic.call({ type: 'conversation_state_observe', expectedUserMessageId: 'u1', allowLatestUser: true })).readable, false)
+  const historical = fixture({ laterTurn: true, latestUserId: latestUserUuid })
+  const state = await historical.call({ type: 'conversation_state_observe', expectedUserMessageId: 'missing-known-user', allowLatestUser: true })
+  assert.equal(state.readable, false)
+  assert.equal(state.userMessageId, null)
+  assert.equal(state.reason, 'human_turn_anchor_unavailable')
 })
 
 test('interrupted substantive response is explicitly incomplete for continuation policy', async () => {

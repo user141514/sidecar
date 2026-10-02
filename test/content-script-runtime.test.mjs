@@ -90,10 +90,13 @@ async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = f
   })
 }
 
-async function runStopFixture({ expectedUserMessageId = 'user-active', expectedAssistantMessageId = null, previousAssistant = false, humanGate = false } = {}) {
+async function runStopFixture({ expectedUserMessageId = 'user-active', expectedAssistantMessageId = null, previousAssistant = false, humanGate = false, contentEffect = null, completionInitiallyUnavailable = false, reinjectAfterCompletionFailure = false, dropOriginalResponse = false, probeAfterCompletionFailure = null } = {}) {
   let runtimeListener = null
   let generating = true
   let clicks = 0
+  const completionMessages = []
+  const successfulCompletions = []
+  let completionAvailable = !completionInitiallyUnavailable
   const user = {
     textContent: 'active task',
     innerText: 'active task',
@@ -157,7 +160,19 @@ async function runStopFixture({ expectedUserMessageId = 'user-active', expectedA
     location: { href: 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000041' },
     chrome: {
       runtime: {
-        async sendMessage() { return null },
+        async sendMessage(message) {
+          if (message.kind === 'content_effect_document') return {
+            token: message.token, tabId: 20, documentId: '30000000-0000-4000-8000-000000000020',
+            url: 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000041'
+          }
+          if (message.kind === 'content_effect_complete') {
+            completionMessages.push(message)
+            if (!completionAvailable) throw new Error('Old worker disconnected')
+            successfulCompletions.push(message)
+            return { settled: true, token: message.effect.token }
+          }
+          return null
+        },
         onMessage: {
           addListener(listener) { runtimeListener = listener },
           removeListener() {}
@@ -177,18 +192,96 @@ async function runStopFixture({ expectedUserMessageId = 'user-active', expectedA
   }
   vm.createContext(context)
   vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+  if (contentEffect) await new Promise(resolve => {
+    const keepOpen = runtimeListener({ type: 'sidecar_effect_document', token: contentEffect.token }, {}, resolve)
+    if (keepOpen !== true) resolve(null)
+  })
   const response = await new Promise((resolve) => {
     const keepOpen = runtimeListener({
       type: 'conversation_stop',
+      ...(contentEffect ? { contentEffect } : {}),
       expected: {
         userMessageId: expectedUserMessageId,
         assistantMessageId: expectedAssistantMessageId
       }
-    }, {}, resolve)
+    }, {}, result => {
+      resolve(result)
+      if (dropOriginalResponse) throw new Error('Original response channel lost')
+    })
     assert.equal(keepOpen, true)
   })
-  return { response, clicks, generating }
+  for (let attempt = 0; attempt < 12; attempt += 1) await new Promise(resolve => setImmediate(resolve))
+  const completionAttemptsBeforeRecovery = completionMessages.length
+  if (probeAfterCompletionFailure) {
+    completionAvailable = true
+    await new Promise(resolve => {
+      const keepOpen = runtimeListener({ type: probeAfterCompletionFailure, token: contentEffect.token, expectedUserMessageId: 'user-active' }, {}, resolve)
+      if (keepOpen !== true) resolve(null)
+    })
+    for (let attempt = 0; attempt < 12; attempt += 1) await new Promise(resolve => setImmediate(resolve))
+  }
+  if (reinjectAfterCompletionFailure) {
+    completionAvailable = true
+    vm.runInContext(source, context, { filename: 'extension/content-script.js' })
+    for (let attempt = 0; attempt < 12; attempt += 1) await new Promise(resolve => setImmediate(resolve))
+  }
+  return { response, clicks, generating, completionMessages, successfulCompletions, completionAttemptsBeforeRecovery }
 }
+
+const journalEffect = {
+  version: 1, token: 'content-stop-token', tabId: 20, documentId: '30000000-0000-4000-8000-000000000020',
+  registrationId: '20000000-0000-4000-8000-000000000095', writerEpoch: 3, method: 'conversation_stop', instanceId: 'old-worker'
+}
+
+test('content effect completion reports exact identity only after the guarded DOM operation settles', async () => {
+  const result = await runStopFixture({ contentEffect: journalEffect })
+  assert.equal(result.clicks, 1)
+  assert.equal(result.generating, false)
+  assert.deepEqual(JSON.parse(JSON.stringify(result.response.contentEffectSettled)), journalEffect)
+  assert.deepEqual(JSON.parse(JSON.stringify(result.successfulCompletions[0]?.effect)), journalEffect)
+})
+
+test('definite content rejection still reports settlement without any DOM effect', async () => {
+  const result = await runStopFixture({ contentEffect: journalEffect, expectedUserMessageId: 'stale-user' })
+  assert.equal(result.response.accepted, false)
+  assert.equal(result.clicks, 0)
+  assert.deepEqual(JSON.parse(JSON.stringify(result.successfulCompletions[0]?.effect)), journalEffect)
+})
+
+test('content completion retained after a disconnected worker is replayed by reinjection without repeating the effect', async () => {
+  const result = await runStopFixture({
+    contentEffect: journalEffect, completionInitiallyUnavailable: true, reinjectAfterCompletionFailure: true
+  })
+  assert.equal(result.clicks, 1)
+  assert.ok(result.completionMessages.length >= 2)
+  assert.equal(result.successfulCompletions.length, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(result.successfulCompletions[0].effect)), journalEffect)
+})
+
+test('a later read-only probe flushes settled completion after retries and the original response channel are exhausted', async () => {
+  for (const probe of ['sidecar_ping', 'sidecar_effect_document', 'conversation_state_observe']) {
+    const result = await runStopFixture({ contentEffect: journalEffect, completionInitiallyUnavailable: true,
+      dropOriginalResponse: true, probeAfterCompletionFailure: probe })
+    assert.equal(result.completionAttemptsBeforeRecovery, 8, probe)
+    assert.equal(result.clicks, 1, probe)
+    assert.equal(result.successfulCompletions.length, 1, probe)
+    assert.deepEqual(JSON.parse(JSON.stringify(result.successfulCompletions[0].effect)), journalEffect)
+  }
+})
+
+test('independent content completion survives a throwing original response channel', async () => {
+  const result = await runStopFixture({ contentEffect: journalEffect, dropOriginalResponse: true })
+  assert.equal(result.clicks, 1)
+  assert.equal(result.successfulCompletions.length, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(result.successfulCompletions[0].effect)), journalEffect)
+})
+
+test('a journaled content request for another document cannot mutate the current DOM', async () => {
+  const result = await runStopFixture({ contentEffect: { ...journalEffect, documentId: journalEffect.documentId.replace('0020', '0021') } })
+  assert.equal(result.response.accepted, false)
+  assert.equal(result.clicks, 0)
+  assert.equal(result.successfulCompletions.length, 0)
+})
 
 test('conversation_stop verifies exact identity and observes generation exit before accepting', async () => {
   const { response, clicks, generating } = await runStopFixture()

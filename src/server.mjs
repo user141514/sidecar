@@ -23,7 +23,8 @@ const TOOLS = [
       type: 'object',
       properties: {
         target: { type: 'string' },
-        target_url: { type: 'string' }
+        target_url: { type: 'string' },
+        target_tab_id: { type: 'integer', minimum: 0 }
       },
       required: ['target'],
       additionalProperties: false
@@ -353,7 +354,7 @@ async function dispatchTool(conversationHost, workLedger, workController, memory
   }
   if (name === 'webgpt_shift_test') {
     if (typeof args.target !== 'string' || !args.target.trim()) throw new TypeError('webgpt_shift_test requires target')
-    return conversationHost.shiftTest(args.target, args.target_url ?? null)
+    return conversationHost.shiftTest(args.target, args.target_url ?? null, args.target_tab_id ?? null)
   }
   if (CONVERSATION_TOOLS.some((tool) => tool.name === name)) {
     return dispatchConversationTool(conversationHost, name, args)
@@ -550,7 +551,40 @@ export function createSidecarServer({ conversationHost, workLedger = null, workC
           writeJson(res, 503, { error: 'intent_owner_unavailable' })
           return
         }
-        writeJson(res, 200, await conversationHost.proposeContinuation(await readJson(req)))
+        const intent = await readJson(req)
+        if (!intent?.contractVersion || !['human', 'coordinator'].includes(intent?.source)) {
+          writeJson(res, 400, { accepted: false, reason: 'watchdog_registration_required' })
+          return
+        }
+        writeJson(res, 200, await conversationHost.proposeContinuation(intent))
+        return
+      }
+      const watchdogRoutes = {
+        '/internal/watchdog-bind': 'bindWatchdog',
+        '/internal/watchdog-withdraw': 'withdrawWatchdog',
+        '/internal/watchdog-intents': 'proposeWatchdogIntent',
+        '/internal/conversation-recovery': 'recoverWatchdog'
+      }
+      if (req.method === 'POST' && Object.hasOwn(watchdogRoutes, url.pathname)) {
+        if (!isLoopback(req.socket.remoteAddress) || req.headers.origin) {
+          writeJson(res, 403, { error: 'localhost_non_browser_only' })
+          return
+        }
+        if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
+          writeJson(res, 415, { error: 'json_required' })
+          return
+        }
+        const method = watchdogRoutes[url.pathname]
+        try {
+          if (typeof conversationHost?.[method] !== 'function') throw new Error('watchdog authority unavailable')
+          const result = await conversationHost[method](await readJson(req))
+          writeJson(res, method === 'withdrawWatchdog' && result?.quiescent !== true ? 503 : 200, result)
+        } catch (error) {
+          writeJson(res, error instanceof TypeError ? 400 : 503, {
+            accepted: false, ...(method === 'withdrawWatchdog' ? { quiescent: false } : {}),
+            reason: error instanceof TypeError ? 'invalid_watchdog_request' : 'watchdog_authority_unavailable'
+          })
+        }
         return
       }
       if (req.method === 'POST' && url.pathname === '/internal/conversation-state') {
@@ -573,6 +607,29 @@ export function createSidecarServer({ conversationHost, workLedger = null, workC
           return
         }
         writeJson(res, 200, await conversationHost.stateByTarget(payload.target))
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/internal/conversation-observation') {
+        if (!isLoopback(req.socket.remoteAddress) || req.headers.origin) {
+          writeJson(res, 403, { error: 'localhost_non_browser_only' })
+          return
+        }
+        if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
+          writeJson(res, 415, { error: 'json_required' })
+          return
+        }
+        const payload = await readJson(req)
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 1 ||
+            typeof payload.target !== 'string' || !payload.target.trim()) {
+          writeJson(res, 400, { error: 'exact_target_required' })
+          return
+        }
+        try {
+          if (typeof conversationHost?.observationByTarget !== 'function') throw new Error('observation owner unavailable')
+          writeJson(res, 200, await conversationHost.observationByTarget(payload.target))
+        } catch {
+          writeJson(res, 503, { found: false, reason: 'observation_unavailable' })
+        }
         return
       }
       if (req.method === 'POST' && url.pathname === '/internal/human-gate-ack') {

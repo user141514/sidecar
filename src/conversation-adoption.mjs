@@ -32,9 +32,11 @@ export async function adoptExistingConversation(host, payload) {
 
   const key = canonicalTarget(target)
   const requestId = hash(['adopt-existing/v1', key, expectedUserMessageId])
-  const turnId = `adopted_${hash([uuid, expectedUserMessageId])}`
+  let turnId = `adopted_${hash([uuid, expectedUserMessageId])}`
   const allocationIntentId = `adopt-existing:${uuid}`
-  const inspect = await host.bridge.request('conversation_adoption_inspect', {
+  const writerRequest = (method, params) => host.writerRequest
+    ? host.writerRequest(method, params) : host.bridge.request(method, params)
+  const inspect = await writerRequest('conversation_adoption_inspect', {
     externalUrl: target, expectedUserMessageId, writerEpoch: host.writer.epoch
   })
   if (inspect?.found !== true) return { accepted: false, reason: inspect?.reason || 'target_unavailable' }
@@ -44,6 +46,23 @@ export async function adoptExistingConversation(host, payload) {
 
   const known = await host.store.findByExternalUrl(target)
   if (known.length > 1) return { accepted: false, reason: 'ambiguous_local_binding' }
+  if (known.length === 1 && known[0].latestTurnId) {
+    // Explicit operator knowledge of the current persistent user UUID can
+    // recover a virtualized-away old anchor. Ordinary polling never guesses.
+    const currentState = await host.state(known[0].id)
+    let current = await host.store.read(known[0].id)
+    if (currentState.turn.userMessageId !== expectedUserMessageId) {
+      const observed = await host.store.recordHumanObservation(current.id, current.latestTurnId, {
+        target: inspect.url, userMessageId: expectedUserMessageId,
+        assistantMessageId: inspect.assistantMessageId ?? null,
+        observedAt: new Date().toISOString(), generating: inspect.generating
+      })
+      if (observed.accepted !== true) return { accepted: false, reason: observed.reason }
+      current = await host.store.read(current.id)
+    }
+    known[0] = current
+    turnId = current.latestTurnId
+  }
   const validateReceipt = (receipt, record) => Boolean(receipt && receipt.action === 'adopt' &&
     receipt.requestId === requestId && receipt.conversationId === record.id && receipt.turnId === turnId &&
     receipt.userMessageId === expectedUserMessageId && typeof receipt.externalUrl === 'string' &&
@@ -53,7 +72,7 @@ export async function adoptExistingConversation(host, payload) {
   // A lost ACK is reconciled from a durable effect receipt. It is never a
   // reason to replay a browser mutation, even though binding is idempotent.
   let settled = null
-  if (known.length === 1 && known[0].allocationIntentId === allocationIntentId) {
+  if (known.length === 1 && (known[0].allocationIntentId === allocationIntentId || known[0].latestTurnId === turnId)) {
     let lookup
     try { lookup = await host.bridge.request('conversation_effect_receipt', { requestId }) } catch {}
     if (lookup?.found === true && validateReceipt(lookup.receipt, known[0])) {
@@ -62,7 +81,7 @@ export async function adoptExistingConversation(host, payload) {
           accepted: true, conversationId: known[0].id, conversationUuid: uuid, turnId
         }, known[0].id)
       } catch {}
-      if (settled?.accepted === true) await host.store.recordAdoption(known[0].id, lookup.receipt)
+      if (settled?.accepted === true && !known[0].latestTurnId) await host.store.recordAdoption(known[0].id, lookup.receipt)
     }
   }
 
@@ -70,26 +89,25 @@ export async function adoptExistingConversation(host, payload) {
     settled = await host.mailbox.run(target, requestId, { action: 'adopt', source, target: key, expectedUserMessageId }, async markDispatching => {
       const matches = await host.store.findByExternalUrl(target)
       if (matches.length > 1) return { accepted: false, reason: 'ambiguous_local_binding' }
-      if (matches[0] && matches[0].allocationIntentId !== allocationIntentId) {
-        // Existing Sidecar-owned turns stay owned by their original record.
-        if (!matches[0].latestTurnId) return { accepted: false, reason: 'existing_binding_not_adoptable' }
-        return { accepted: true, conversationId: matches[0].id, conversationUuid: uuid, alreadyManaged: true }
+      if (matches[0]?.latestTurnId && matches[0].latestTurnId !== turnId) return { accepted: false, reason: 'adoption_turn_changed' }
+      if (matches[0] && matches[0].allocationIntentId !== allocationIntentId && !matches[0].latestTurnId) {
+        return { accepted: false, reason: 'existing_binding_not_adoptable' }
       }
       const record = matches[0] ?? await host.store.allocate({
         backend: 'chatgpt-web-extension', externalUrl: inspect.url,
         intentId: allocationIntentId, intentDigest: hash(['adopt-existing/v1', key])
       })
-      const adopted = record.events?.find(event => event.type === 'conversation_adopted')
+      const adopted = record.events?.find(event => event.type === 'conversation_adopted' && event.turnId === turnId && event.userMessageId === expectedUserMessageId)
       if (adopted) return { accepted: true, conversationId: record.id, conversationUuid: uuid, alreadyManaged: true }
       await markDispatching({ action: 'adopt', conversationId: record.id, turnId })
-      const result = await host.bridge.request('conversation_adopt', {
+      const result = await writerRequest('conversation_adopt', {
         conversationId: record.id, externalUrl: inspect.url, turnId, requestId,
         expectedUserMessageId, writerEpoch: host.writer.epoch
       })
       if (result?.accepted !== true || !validateReceipt(result.receipt, record)) {
         throw new Error('adoption binding outcome unconfirmed; receipt reconciliation required')
       }
-      await host.store.recordAdoption(record.id, result.receipt)
+      if (!record.latestTurnId) await host.store.recordAdoption(record.id, result.receipt)
       return { accepted: true, conversationId: record.id, conversationUuid: uuid, turnId }
     })
   }

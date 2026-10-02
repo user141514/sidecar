@@ -5,6 +5,8 @@ try { globalThis.__sidecarContentRuntime?.dispose() } catch {
 let contentDisposed = false
 let preparedSend = null
 const contentBuildId = globalThis.__sidecarBuildId ?? 'unversioned'
+const contentEffects = globalThis.__sidecarContentEffects ??= { documentId: null, tabId: null, operations: new Map(), completed: new Map() }
+const journaledMethods = new Set(['conversation_prepare', 'conversation_submit', 'conversation_stop', 'webgpt_shift_test', 'project_open', 'project_create'])
 globalThis.__sidecarContentRuntime = {
   buildId: contentBuildId,
   monitorTurn,
@@ -828,17 +830,27 @@ function readTurnObservation({ baselineAssistantCount = 0, promptText = '' } = {
   }
 }
 
-function readConversationStateObservation(expectedUserMessageId) {
+function readConversationStateObservation(expectedUserMessageId, allowLatestUser = false) {
   const users = userMessages()
   const assistants = assistantMessages()
-  const anchor = typeof expectedUserMessageId === 'string' && expectedUserMessageId
+  const expectedAnchor = typeof expectedUserMessageId === 'string' && expectedUserMessageId
     ? users.find(user => user?.getAttribute?.('data-message-id') === expectedUserMessageId) ?? null
     : null
+  let anchor = expectedAnchor
+  if (allowLatestUser) {
+    const latest = users.at(-1) ?? null
+    const relation = expectedAnchor?.compareDocumentPosition?.(latest)
+    const provenLatest = expectedAnchor && latest && (latest === expectedAnchor ||
+      (typeof relation === 'number' && (relation & 4) !== 0 && (relation & 1) === 0))
+    const persistentId = latest?.getAttribute?.('data-message-id')
+    anchor = provenLatest && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(persistentId ?? '') ? latest : null
+  }
   if (!anchor) {
     return {
       ready: true, url: location.href, readable: false,
       userMessageId: null, assistantMessageId: null, assistantText: null,
-      generating: null, terminal: null, body: 'unknown', humanGate: null
+      generating: null, terminal: null, body: 'unknown', humanGate: null,
+      ...(allowLatestUser && !expectedAnchor ? { reason: 'human_turn_anchor_unavailable' } : {})
     }
   }
 
@@ -868,8 +880,9 @@ function readConversationStateObservation(expectedUserMessageId) {
   const mode = getComposerMode()
   const generating = mode === 'GENERATING'
   const assistantText = assistant ? (body.bodyText || '') : ''
-  const humanGate = Boolean(document.querySelector('[data-testid="tool-approval-card"]')) ||
-    /(?:^|\n)\[SUPERVISOR_STATE\s*:\s*NEED_INPUT\]\s*$/.test(assistantText)
+  const approvalScope = allowLatestUser ? turn : document
+  const humanGate = Boolean(assistant || !allowLatestUser) && (Boolean(approvalScope?.querySelector?.('[data-testid="tool-approval-card"]')) ||
+    /(?:^|\n)\[SUPERVISOR_STATE\s*:\s*NEED_INPUT\]\s*$/.test(assistantText))
   const bodyState = !assistant
     ? 'empty'
     : mode === 'INTERRUPTED'
@@ -1231,7 +1244,87 @@ async function resumePendingTurn() {
   }
 }
 
-function onSidecarMessage(message, _sender, sendResponse) {
+async function reportContentEffectCompletion(completion) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      const acknowledgement = await chrome.runtime.sendMessage({ kind: 'content_effect_complete', effect: completion.effect })
+      if (acknowledgement?.settled === true && acknowledgement.token === completion.effect.token) {
+        if (contentEffects.completed.get(completion.effect.token) === completion) contentEffects.completed.delete(completion.effect.token)
+        return
+      }
+    } catch {}
+    if (attempt < 7) await sleep(250)
+  }
+}
+
+function onSidecarMessage(message, sender, sendResponse) {
+  if (contentDisposed) return
+  const completionProbe = ['sidecar_ping', 'sidecar_effect_document', 'conversation_observe', 'conversation_state_observe', 'conversation_snapshot'].includes(message?.type)
+  const completions = completionProbe ? [...contentEffects.completed.values()] : []
+  if (completions.length) {
+    // A read-only probe can recover exhausted delivery retries. Its response
+    // waits for completion ACKs so the owner can re-read the durable journal.
+    void Promise.all(completions.map(reportContentEffectCompletion)).then(() => {
+      processSidecarMessage(message, sender, sendResponse)
+    }).catch(() => sendResponse({ ready: false }))
+    return true
+  }
+  return processSidecarMessage(message, sender, sendResponse)
+}
+
+function processSidecarMessage(message, sender, sendResponse) {
+  if (contentDisposed) return
+  if (message?.type === 'sidecar_effect_document') {
+    void chrome.runtime.sendMessage({ kind: 'content_effect_document', token: message.token }).then(identity => {
+      if (identity?.token === message.token && Number.isInteger(identity.tabId) &&
+          typeof identity.documentId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(identity.documentId)) {
+        contentEffects.documentId = identity.documentId
+        contentEffects.tabId = identity.tabId
+        sendResponse(identity)
+      } else sendResponse({ ready: false })
+    }).catch(() => sendResponse({ ready: false }))
+    return true
+  }
+  const effect = message?.contentEffect
+  if (!effect) return dispatchSidecarMessage(message, sender, sendResponse)
+  if (effect.version !== 1 || typeof effect.token !== 'string' || !effect.token || effect.token.length > 256 ||
+      effect.documentId !== contentEffects.documentId || effect.tabId !== contentEffects.tabId ||
+      effect.method !== message.type || !journaledMethods.has(message.type)) {
+    sendResponse({ accepted: false, prepared: false, switched: false, error: 'content_effect_document_mismatch' })
+    return true
+  }
+  const existing = contentEffects.operations.get(effect.token)
+  if (existing) {
+    if (JSON.stringify(existing.effect) !== JSON.stringify(effect)) sendResponse({ accepted: false, error: 'content_effect_identity_conflict' })
+    else void existing.promise.then(sendResponse)
+    return true
+  }
+  const promise = new Promise(resolve => {
+    let answered = false
+    const complete = result => {
+      if (answered) return
+      answered = true
+      const response = { ...result, contentEffectSettled: effect }
+      const completion = { effect, response }
+      // This callback runs only after the handler's effect-bearing awaits end.
+      // The outbox survives listener reinjection; only the completion is retried.
+      contentEffects.completed.set(effect.token, completion)
+      resolve(response)
+      void reportContentEffectCompletion(completion)
+      try { sendResponse(response) } catch {}
+    }
+    try {
+      const keepOpen = dispatchSidecarMessage(message, sender, complete)
+      if (keepOpen !== true && !answered) complete({ accepted: false, error: 'unsupported_content_effect' })
+    } catch (error) {
+      complete({ accepted: false, error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  contentEffects.operations.set(effect.token, { effect, promise })
+  return true
+}
+
+function dispatchSidecarMessage(message, _sender, sendResponse) {
   if (contentDisposed) return
   if (message?.type === 'sidecar_ping') {
     sendResponse({
@@ -1252,7 +1345,7 @@ function onSidecarMessage(message, _sender, sendResponse) {
   }
 
   if (message?.type === 'conversation_state_observe') {
-    sendResponse(readConversationStateObservation(message.expectedUserMessageId))
+    sendResponse(readConversationStateObservation(message.expectedUserMessageId, message.allowLatestUser === true))
     return
   }
 
@@ -1366,6 +1459,7 @@ function runHashShiftProbe() {
 }
 
 chrome.runtime.onMessage.addListener(onSidecarMessage)
+for (const completion of contentEffects.completed.values()) void reportContentEffectCompletion(completion)
 void resumePendingTurn()
 runHashShiftProbe()
 })()

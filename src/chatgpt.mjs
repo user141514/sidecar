@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { SendMailbox, canonicalTarget } from './send-mailbox.mjs'
-import { parseIntentEnvelope } from './conversation-contract.mjs'
+import { parseIntentEnvelope, parseObservation } from './conversation-contract.mjs'
 import { reduceConversationProjection } from './conversation-state.mjs'
-import { adoptExistingConversation } from './conversation-adoption.mjs'
+import { adoptExistingConversation, exactConversationUuid } from './conversation-adoption.mjs'
+import { WatchdogAuthority } from './watchdog-authority.mjs'
 
 const DEFAULT_CHATGPT_URL = 'https://chatgpt.com/'
+const PERSISTENT_UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
 
 function turnId() {
   return `turn_${Date.now()}_${randomUUID().slice(0, 8)}`
@@ -93,6 +96,8 @@ export class ChatGptConversationHost {
     this.writer = { mode: writerMode, epoch: writerEpoch }
     this.managedProjectUrl = managedProjectUrl ? normalizeProjectHomeUrl(managedProjectUrl) : null
     this.mailbox = new SendMailbox({ rootDir: store.rootDir ? join(store.rootDir, '.send-mailbox') : null })
+    this.watchdogAuthority = new WatchdogAuthority({ rootDir: store.rootDir ? join(store.rootDir, '.watchdog-authority') : null, writerEpoch })
+    this.watchdogContext = new AsyncLocalStorage()
     this.activeSends = new Set()
     this.stateQueues = new Map()
     this.terminalListeners = new Map()
@@ -246,6 +251,162 @@ export class ChatGptConversationHost {
       markDispatching => this.#send(conversationId, text, { app, preAdmitted, requestId, markDispatching, intentSource }), conversationId)
     if (result?.deliveryUncertain === true) throw Object.assign(new Error(`delivery uncertain; reconciliation required: ${result.message || 'unknown outcome'}`), { code: 'DELIVERY_UNCERTAIN', conversationId, turnId: result.turnId })
     return result
+  }
+
+  // Only an accepted owner grant can add extension-side provenance. Caller
+  // fields never select a grant, and revocation is rechecked at dispatch.
+  async writerRequest(method, params) {
+    const { registrationId: ignored, ...wire } = params
+    const grant = this.watchdogContext.getStore()
+    if (!grant) return this.bridge.request(method, wire)
+    const permission = await this.watchdogAuthority.assertActive(grant)
+    if (permission.accepted !== true) {
+      throw Object.assign(new Error(permission.reason), { code: 'WATCHDOG_REVOKED', definiteRejection: true })
+    }
+    return this.bridge.request(method, { ...wire, registrationId: grant.registrationId })
+  }
+
+  async #withWatchdog(identity, action) {
+    try {
+      return await this.watchdogAuthority.run(identity, () =>
+        this.watchdogContext.run({ registrationId: identity.registrationId.toLowerCase(), target: identity.target }, action))
+    } catch (error) {
+      if (error?.code === 'WATCHDOG_REVOKED') return { accepted: false, reason: 'registration_revoked' }
+      throw error
+    }
+  }
+
+  async bindWatchdog(payload) {
+    if (!payload || Object.keys(payload).length !== 2 || !Object.hasOwn(payload, 'registrationId') || !Object.hasOwn(payload, 'target')) {
+      throw new TypeError('exact watchdog binding fields required')
+    }
+    if (this.writer.mode !== 'managed' || this.writer.epoch <= 0) return { accepted: false, reason: 'writer_epoch_unavailable' }
+    const bound = await this.watchdogAuthority.bind(payload)
+    if (bound.accepted !== true) return bound
+    return this.#withWatchdog(payload, async () => {
+      const known = await this.store.findByExternalUrl(payload.target)
+      if (known.length > 1) return { accepted: false, reason: 'ambiguous_local_binding' }
+      if (known.length === 0) {
+        const current = await this.writerRequest('conversation_supervision_inspect', {
+          externalUrl: payload.target, writerEpoch: this.writer.epoch
+        })
+        if (current?.found !== true || canonicalTarget(current.url) !== canonicalTarget(payload.target)) {
+          return { accepted: false, reason: current?.reason || 'target_unavailable' }
+        }
+        // An explicit/restored Registry binding carries operator authority.
+        // Adoption derives the owner projection without creating membership.
+        const adopted = await this.adoptExistingConversation({
+          target: payload.target, expectedUserMessageId: current.userMessageId,
+          expectedWriterEpoch: this.writer.epoch, source: 'human'
+        })
+        if (adopted?.accepted !== true) return adopted
+      } else {
+        const restored = await this.#restoreWatchdogBinding(payload, known[0])
+        if (restored?.accepted !== true) return restored
+      }
+      return { ...bound, target: payload.target }
+    })
+  }
+
+  async #restoreWatchdogBinding(identity, record) {
+    const projection = await this.state(record.id)
+    const userMessageId = projection.turn.userMessageId
+    const turnId = projection.turn.turnId
+    if (!turnId || !userMessageId) return { accepted: false, reason: 'binding_identity_unknown' }
+    const current = await this.writerRequest('conversation_supervision_inspect', {
+      externalUrl: identity.target, writerEpoch: this.writer.epoch
+    })
+    if (current?.found !== true || canonicalTarget(current.url) !== canonicalTarget(identity.target) ||
+        current.readable !== true || current.userMessageId !== userMessageId) {
+      return { accepted: false, reason: current?.reason || 'binding_identity_mismatch' }
+    }
+    const requestId = createHash('sha256').update(JSON.stringify([
+      'watchdog-restore/v1', identity.registrationId, this.writer.epoch, record.id,
+      turnId, userMessageId, canonicalTarget(identity.target)
+    ])).digest('hex')
+    const validateReceipt = receipt => receipt?.action === 'adopt' && receipt.requestId === requestId &&
+      receipt.conversationId === record.id && receipt.turnId === turnId &&
+      receipt.userMessageId === userMessageId && receipt.expectedWriterEpoch === this.writer.epoch &&
+      Number.isInteger(receipt.tabId) && Number.isInteger(receipt.windowId) &&
+      canonicalTarget(receipt.externalUrl) === canonicalTarget(identity.target)
+    const pending = await this.mailbox.pendingEffect(identity.target, record.id)
+    if (pending?.requestId === requestId && pending.effect?.action === 'restore_binding') {
+      let lookup
+      try { lookup = await this.bridge.request('conversation_effect_receipt', { requestId }) } catch {}
+      if (lookup?.found === true && validateReceipt(lookup.receipt)) {
+        return this.mailbox.reconcile(identity.target, requestId, { accepted: true, conversationId: record.id }, record.id)
+      }
+    }
+    return this.mailbox.run(identity.target, requestId, {
+      action: 'restore_binding', registrationId: identity.registrationId,
+      conversationId: record.id, turnId, userMessageId, writerEpoch: this.writer.epoch
+    }, async markDispatching => {
+      await markDispatching({ action: 'restore_binding', conversationId: record.id, turnId })
+      const result = await this.writerRequest('conversation_adopt', {
+        conversationId: record.id, externalUrl: identity.target, turnId, requestId,
+        expectedUserMessageId: userMessageId, writerEpoch: this.writer.epoch
+      })
+      const receipt = result?.receipt
+      if (result?.accepted !== true || !validateReceipt(receipt)) {
+        throw new Error('restored attachment outcome unconfirmed')
+      }
+      // The existing ledger turn remains the sole conversation lifecycle.
+      return { accepted: true, conversationId: record.id }
+    }, record.id)
+  }
+
+  withdrawWatchdog(payload) {
+    if (!payload || Object.keys(payload).length !== 2 || !Object.hasOwn(payload, 'registrationId') || !Object.hasOwn(payload, 'target')) {
+      throw new TypeError('exact watchdog withdrawal fields required')
+    }
+    return this.watchdogAuthority.withdraw(payload, async () => {
+      const registrationId = payload.registrationId.toLowerCase()
+      const receipt = await this.bridge.request('writer_quiesce', { writerEpoch: this.writer.epoch, registrationId })
+      return { quiescent: receipt?.quiescent === true && receipt.registrationId === registrationId &&
+        receipt.currentWriterEpoch === this.writer.epoch }
+    })
+  }
+
+  proposeWatchdogIntent(payload) {
+    if (!payload || Object.keys(payload).length !== 2 || !Object.hasOwn(payload, 'registrationId') || !Object.hasOwn(payload, 'intent')) {
+      throw new TypeError('exact watchdog intent fields required')
+    }
+    const intent = parseIntentEnvelope(payload.intent)
+    if (intent.source !== 'watchdog' || !intent.target) throw new TypeError('bound watchdog intent required')
+    return this.#withWatchdog({ registrationId: payload.registrationId, target: intent.target },
+      () => this.proposeContinuation(intent))
+  }
+
+  recoverWatchdog(payload) {
+    const keys = ['registrationId', 'requestId', 'kind', 'conversationId', 'target', 'expectedStateVersion', 'expectedWriterEpoch', 'expected']
+    if (!payload || Object.keys(payload).length !== keys.length || Object.keys(payload).some(key => !keys.includes(key)) || payload.kind !== 'refresh') {
+      throw new TypeError('exact watchdog refresh fields required')
+    }
+    const intent = parseIntentEnvelope({
+      contractVersion: 1, intentId: payload.requestId, source: 'watchdog',
+      conversationId: payload.conversationId, target: payload.target,
+      expectedStateVersion: payload.expectedStateVersion, expectedWriterEpoch: payload.expectedWriterEpoch,
+      action: 'continue', allocation: null, text: 'refresh', expected: payload.expected
+    })
+    return this.#withWatchdog({ registrationId: payload.registrationId, target: intent.target }, () =>
+      this.mailbox.run(intent.target, intent.intentId, { action: 'refresh', ...payload }, async markDispatching => {
+        const current = await this.observationByTarget(intent.target)
+        if (current?.found !== true) return { accepted: false, reason: current?.reason || 'observation_unavailable' }
+        const denial = versionedIdentityDenial(intent, current.state)
+        if (denial) return denial
+        if (current.state.delivery !== 'delivered' || current.state.progress !== 'blocked' ||
+            !['empty', 'incomplete'].includes(current.state.body) || current.observation.generating !== false ||
+            current.observation.humanGate !== false) {
+          return { accepted: false, reason: 'state_not_refreshable', ...versionedIntentMeta(current.state) }
+        }
+        await markDispatching({ action: 'refresh', conversationId: intent.conversationId, turnId: current.state.turn.turnId })
+        return this.writerRequest('conversation_refresh', {
+          requestId: intent.intentId, conversationId: intent.conversationId, externalUrl: intent.target,
+          expectedUserMessageId: intent.expected.userMessageId,
+          expectedAssistantMessageId: intent.expected.assistantMessageId,
+          writerEpoch: intent.expectedWriterEpoch
+        })
+      }, intent.conversationId))
   }
 
   async proposeContinuation(payload) {
@@ -464,7 +625,7 @@ export class ChatGptConversationHost {
         expectedStateVersion: current.state.stateVersion,
         expectedWriterEpoch: current.state.writer.epoch
       })
-      const stopped = await this.bridge.request('conversation_stop', {
+      const stopped = await this.writerRequest('conversation_stop', {
         conversationId: conversation.id,
         turnId: current.state.turn.turnId,
         requestId,
@@ -644,12 +805,14 @@ export class ChatGptConversationHost {
       text,
       ...(requestId ? { requestId } : {}),
       ...(intentSource ? { source: intentSource } : expected ? { source: 'watchdog' } : {}),
+      ...(intentSource === 'watchdog' && this.watchdogContext.getStore()
+        ? { registrationId: this.watchdogContext.getStore().registrationId } : {}),
       ...(expected ? { continuationOf: conversation.latestTurnId ?? null } : {}),
       ...(app ? { app } : {})
     })
     try {
       await markDispatching?.({ conversationId, turnId: id })
-      const result = await this.bridge.request('conversation_send', {
+      const result = await this.writerRequest('conversation_send', {
         conversationId,
         turnId: id,
         requestId,
@@ -692,13 +855,16 @@ export class ChatGptConversationHost {
     }
   }
 
-  async stateByTarget(target) {
-    let url
-    try { url = new URL(target) } catch { throw new TypeError('exact conversation target is required') }
-    if (url.origin !== 'https://chatgpt.com' || url.username || url.password || url.search || url.hash ||
-        !/\/c\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\/?$/i.test(url.pathname)) {
-      throw new TypeError('exact conversation target is required')
-    }
+  stateByTarget(target) {
+    return this.#byTarget(target, false)
+  }
+
+  observationByTarget(target) {
+    return this.#byTarget(target, true)
+  }
+
+  async #byTarget(target, includeObservation) {
+    try { exactConversationUuid(target) } catch { throw new TypeError('exact conversation target is required') }
     const matches = await this.store.findByExternalUrl(target)
     if (matches.length === 0) return { found: false, reason: 'target_unavailable' }
     if (matches.length > 1) return { found: false, reason: 'ambiguous_local_binding' }
@@ -706,11 +872,21 @@ export class ChatGptConversationHost {
         !matches[0].events.some(event => event.type === 'conversation_adopted')) {
       return { found: false, reason: 'adoption_incomplete' }
     }
-    const state = await this.state(matches[0].id)
+    const snapshot = includeObservation ? await this.#snapshot(matches[0].id) : { state: await this.state(matches[0].id) }
+    const { state } = snapshot
     try {
       if (canonicalTarget(state.target) !== canonicalTarget(target)) return { found: false, reason: 'target_changed' }
     } catch {
       return { found: false, reason: 'target_changed' }
+    }
+    if (includeObservation) {
+      const { observation, observationStartedAt } = snapshot
+      const observedAt = Date.parse(observation?.observedAt)
+      if (!observation || observationStartedAt === null || observedAt < observationStartedAt || observedAt > Date.now() ||
+          canonicalTarget(observation.target) !== canonicalTarget(target)) {
+        return { found: false, reason: snapshot.observationUnavailableReason || 'observation_unavailable' }
+      }
+      return { found: true, state, observation, lineage: snapshot.lineage }
     }
     return { found: true, state }
   }
@@ -762,6 +938,10 @@ export class ChatGptConversationHost {
   }
 
   state(conversationId) {
+    return this.#snapshot(conversationId).then(snapshot => snapshot.state)
+  }
+
+  #snapshot(conversationId) {
     const previous = this.stateQueues.get(conversationId) ?? Promise.resolve()
     const run = previous.then(() => this.#state(conversationId))
     const tail = run.catch(() => {})
@@ -773,13 +953,13 @@ export class ChatGptConversationHost {
   async #state(conversationId) {
     let stored = await this.store.read(conversationId)
     if (stored.status === 'delivery_uncertain') stored = await this.#reconcileDelivery(stored) ?? stored
-    const turnId = stored.latestTurnId
+    let turnId = stored.latestTurnId
     const intent = turnId ? [...(stored.events || [])].reverse().find(event => event.type === 'send_intent' && event.turnId === turnId) : null
     const previousProjection = [...(stored.events || [])].reverse().find(event => event.type === 'conversation_state' && event.state)?.state ?? null
     const observations = []
     let expectedUserMessageId = previousProjection?.turn?.turnId === turnId ? previousProjection.turn.userMessageId : null
     if (!expectedUserMessageId) {
-      const adoption = stored.events.find(event => event.type === 'conversation_adopted' && event.turnId === turnId)
+      const adoption = stored.events.find(event => ['conversation_adopted', 'human_turn_observed'].includes(event.type) && event.turnId === turnId)
       expectedUserMessageId = adoption?.userMessageId ?? null
     }
 
@@ -818,21 +998,68 @@ export class ChatGptConversationHost {
     }
 
     let browserObservation = null
+    let observationStartedAt = null
+    let observationUnavailableReason = null
     if (turnId && expectedUserMessageId) {
       try {
+        observationStartedAt = Date.now()
         browserObservation = await this.bridge.request('conversation_state_observe', {
           conversationId: stored.id,
           externalUrl: stored.externalUrl,
           turnId,
-          expectedUserMessageId
+          expectedUserMessageId,
+          allowLatestUser: true
         })
-        if (browserObservation && typeof browserObservation === 'object') observations.push(browserObservation)
-      } catch {}
+        if (browserObservation && typeof browserObservation === 'object') {
+          browserObservation = parseObservation(browserObservation)
+          const observedAt = Date.parse(browserObservation.observedAt)
+          const freshExact = browserObservation.source === 'browser' && browserObservation.readable === true &&
+            browserObservation.conversationId === stored.id && browserObservation.turnId === turnId &&
+            canonicalTarget(browserObservation.target) === canonicalTarget(stored.externalUrl) &&
+            observedAt >= observationStartedAt && observedAt <= Date.now()
+          if (freshExact && browserObservation.userMessageId !== expectedUserMessageId &&
+              PERSISTENT_UUID.test(browserObservation.userMessageId ?? '') && !this.activeSends.has(stored.id)) {
+            const oldAssistant = stored.events.some(event =>
+              (event.assistantMessageId && event.assistantMessageId === browserObservation.assistantMessageId) ||
+              (event.state?.turn?.assistantMessageId && event.state.turn.assistantMessageId === browserObservation.assistantMessageId))
+            const emptyAssistant = browserObservation.assistantMessageId !== null ||
+              ((!browserObservation.assistantText || !browserObservation.assistantText.trim()) &&
+               ['empty', 'unknown'].includes(browserObservation.body) && browserObservation.terminal !== true &&
+               browserObservation.humanGate !== true)
+            if (!oldAssistant && emptyAssistant) {
+              const advanced = await this.store.recordHumanObservation(stored.id, turnId, browserObservation)
+              if (advanced.accepted === true) {
+                stored = await this.store.read(stored.id)
+                turnId = advanced.turnId
+                observations.length = 0
+                browserObservation = { ...browserObservation, turnId,
+                  delivery: browserObservation.delivery === 'unknown' ? 'delivered' : browserObservation.delivery }
+              }
+            }
+          }
+          if (browserObservation.delivery === 'unknown' && stored.events.some(event => event.type === 'human_turn_observed' &&
+              event.turnId === turnId && event.userMessageId === browserObservation.userMessageId)) {
+            browserObservation = { ...browserObservation, delivery: 'delivered' }
+          }
+          observations.push(browserObservation)
+        }
+      } catch (error) {
+        if (error?.code === 'HUMAN_TURN_ANCHOR_UNAVAILABLE') observationUnavailableReason = 'human_turn_anchor_unavailable'
+      }
     }
 
     const projection = reduceConversationProjection({ ledger: stored, observations, writer: this.writer })
     const state = projection.state
-    const acceptedBrowserObservation = projection.acceptedBrowserObservation
+    let acceptedBrowserObservation = projection.acceptedBrowserObservation
+    if (acceptedBrowserObservation?.delivery === 'unknown' && state.delivery === 'delivered' &&
+        PERSISTENT_UUID.test(state.turn.userMessageId ?? '') &&
+        acceptedBrowserObservation.userMessageId === state.turn.userMessageId &&
+        Date.parse(acceptedBrowserObservation.observedAt) >= observationStartedAt &&
+        Date.parse(acceptedBrowserObservation.observedAt) <= Date.now()) {
+      // Same-pass owner proof joins delivery to the exact fresh DOM user fact.
+      // A browser observation alone still cannot prove a pending send effect.
+      acceptedBrowserObservation = { ...acceptedBrowserObservation, delivery: 'delivered' }
+    }
     const latestProjection = [...(stored.events || [])].reverse().find(event => event.type === 'conversation_state' && event.state)?.state ?? null
     if (!latestProjection || state.stateVersion > latestProjection.stateVersion) {
       await this.store.append(stored.id, { type: 'conversation_state', state })
@@ -863,7 +1090,13 @@ export class ChatGptConversationHost {
       await this.store.append(stored.id, event)
       await this.#notifyTerminal(stored.id, event)
     }
-    return state
+    const currentIntent = [...stored.events].reverse().find(event =>
+      event.type === 'send_intent' && event.turnId === state.turn.turnId)
+    const lineage = currentIntent?.source === 'watchdog' &&
+      PERSISTENT_UUID.test(currentIntent.registrationId ?? '') && typeof currentIntent.requestId === 'string'
+      ? { registrationId: currentIntent.registrationId, intentId: currentIntent.requestId }
+      : { registrationId: null, intentId: null }
+    return { state, observation: acceptedBrowserObservation, observationStartedAt, observationUnavailableReason, lineage }
   }
 
   async read(conversationId) {

@@ -17,9 +17,17 @@ function statusFromEvents(events) {
   for (const event of events) {
     // Delayed events from an older turn must not replace current browser facts.
     if (event.turnId && latestTurnId && event.turnId !== latestTurnId &&
-        !['send_intent', 'prompt_sent'].includes(event.type)) continue
+        !['send_intent', 'prompt_sent', 'human_turn_observed'].includes(event.type)) continue
     if (event.externalUrl && !(status === 'completed' &&
         ['generation_started', 'delivery_uncertain', 'error'].includes(event.type))) externalUrl = event.externalUrl
+
+    if (event.type === 'human_turn_observed') {
+      latestTurnId = event.turnId
+      status = event.generating === true ? 'generating' : 'adopted'
+      latestResponse = null
+      error = null
+      continue
+    }
 
     if (event.type === 'conversation_adopted' && latestTurnId === null) {
       latestTurnId = event.turnId
@@ -225,6 +233,28 @@ export class ConversationStore {
     return this.enqueueWrite(id, async () => {
       await appendFile(join(this.conversationDir(id), 'events.jsonl'), `${JSON.stringify(record)}\n`, 'utf8')
       return record
+    })
+  }
+
+  recordHumanObservation(id, expectedTurnId, observation) {
+    return this.enqueueWrite(id, async () => {
+      const current = await this.read(id)
+      if (current.latestTurnId !== expectedTurnId || ['sending', 'submitted', 'delivery_uncertain'].includes(current.status)) {
+        return { accepted: false, reason: 'turn_changed' }
+      }
+      const seen = current.events.some(event => event.userMessageId === observation.userMessageId ||
+        event.effectUserMessageId === observation.userMessageId ||
+        event.state?.turn?.userMessageId === observation.userMessageId)
+      if (seen) return { accepted: false, reason: 'historical_user_identity' }
+      const turnId = 'human_' + createHash('sha256').update(JSON.stringify([
+        canonicalTarget(observation.target), observation.userMessageId
+      ])).digest('hex')
+      const event = { at: now(), type: 'human_turn_observed', source: 'browser', turnId,
+        previousTurnId: expectedTurnId, userMessageId: observation.userMessageId,
+        assistantMessageId: observation.assistantMessageId, externalUrl: observation.target,
+        observedAt: observation.observedAt, generating: observation.generating === true }
+      await appendFile(join(this.conversationDir(id), 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8')
+      return { accepted: true, turnId }
     })
   }
 
