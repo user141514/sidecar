@@ -5,6 +5,105 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
 
+function structuralComposerFixture(specs) {
+  let listener, focused = null
+  const nodes = []
+  const matches = (node, selector) => selector.split(',').some(part => {
+    const rule = part.trim()
+    if (rule.startsWith('#')) return node.getAttribute('id') === rule.slice(1)
+    const attribute = rule.match(/^\[([^=\]^]+)(\^?=)?(?:"([^"]*)")?\]$/)
+    if (attribute) {
+      const value = node.getAttribute(attribute[1])
+      return attribute[2] === '^=' ? value?.startsWith(attribute[3]) : attribute[2] ? value === attribute[3] : value !== null
+    }
+    return node.tagName.toLowerCase() === rule.toLowerCase()
+  })
+  const makeNode = (tag, attrs = {}, parent = null, shown = true) => {
+    const node = { tagName: tag.toUpperCase(), parentElement: parent, textContent: '', shown,
+      get innerText() { return this.textContent },
+      getAttribute(name) { return Object.hasOwn(attrs, name) ? attrs[name] : null },
+      closest(selector) { for (let current = this; current; current = current.parentElement) if (matches(current, selector)) return current; return null },
+      getClientRects() { for (let current = this; current; current = current.parentElement) if (!current.shown) return []; return [{ width: 500, height: 24 }] },
+      focus() { focused = this }, dispatchEvent() {}, querySelector() { return null }
+    }
+    nodes.push(node)
+    return node
+  }
+  const root = makeNode('main')
+  const editors = specs.map(spec => {
+    const context = spec.context === 'sidebar' ? makeNode('aside', {}, root) :
+      spec.context === 'message' ? makeNode('article', { 'data-message-author-role': 'assistant' }, root) :
+      spec.context === 'approval' ? makeNode('div', { 'data-testid': 'tool-approval-card' }, root) : root
+    const form = makeNode('form', {}, context, spec.visible !== false)
+    const body = makeNode('div', spec.structural === false ? {} : { 'data-composer-body': '' }, form)
+    const input = makeNode('div', spec.structural === false ? {} : { 'data-composer-input': '' }, body)
+    return makeNode('div', { id: spec.id ?? '', role: 'textbox', contenteditable: 'true', 'aria-label': spec.label,
+      ...(spec.ariaHidden ? { 'aria-hidden': 'true' } : {}) }, input)
+  })
+  const document = {
+    title: 'subagents',
+    querySelector(selector) { return nodes.find(node => matches(node, selector)) ?? null },
+    querySelectorAll(selector) { return nodes.filter(node => matches(node, selector)) },
+    execCommand(command, _ui, text) { if (command === 'insertText' && focused) focused.textContent = text; return true }
+  }
+  const context = vm.createContext({ document, location: { href: 'https://chatgpt.com/g/g-p-test-subagents/project' },
+    __sidecarBuildId: 'a'.repeat(64), getComputedStyle() { return { display: 'block', visibility: 'visible', opacity: '1' } },
+    chrome: { runtime: { sendMessage: async () => null, onMessage: { addListener(fn) { listener = fn }, removeListener() {} } } },
+    HTMLTextAreaElement: class {}, HTMLInputElement: class {}, InputEvent: class {}, console,
+    setTimeout(callback) { queueMicrotask(callback); return 1 }, clearTimeout() {} })
+  vm.runInContext(source, context)
+  const call = message => new Promise(resolve => { const keepOpen = listener(message, {}, resolve); if (keepOpen !== true && message.type !== 'sidecar_ping') resolve(null) })
+  return { editors, call, get focused() { return focused } }
+}
+
+test('project composer ping and prepare recognize the captured Chinese DIV and its English equivalent', async () => {
+  for (const label of ['在“subagents”中新建聊天', 'New chat in subagents']) {
+    const fixture = structuralComposerFixture([{ label }])
+    const ping = await fixture.call({ type: 'sidecar_ping' })
+    assert.equal(ping.composerPresent, true, label)
+    assert.equal(ping.buildId, 'a'.repeat(64))
+    assert.equal((await fixture.call({ type: 'conversation_prepare', text: 'fixture prompt' })).prepared, true)
+    assert.equal(fixture.focused, fixture.editors[0])
+    assert.equal(fixture.editors[0].textContent, 'fixture prompt')
+  }
+})
+
+test('structural project composer excludes sidebar, message-edit, and tool-approval label decoys', async () => {
+  const fixture = structuralComposerFixture([
+    { label: 'Message sidebar', context: 'sidebar' }, { label: 'Prompt edit', context: 'message' },
+    { label: 'Message approval', context: 'approval' }, { label: '在“subagents”中新建聊天' }
+  ])
+  assert.equal((await fixture.call({ type: 'sidecar_ping' })).composerPresent, true)
+  assert.equal((await fixture.call({ type: 'conversation_prepare', text: 'real composer only' })).prepared, true)
+  assert.equal(fixture.focused, fixture.editors[3])
+  assert.deepEqual(fixture.editors.map(editor => editor.textContent), ['', '', '', 'real composer only'])
+})
+
+test('structural composer ambiguity across visible forms is unreadable even with a Message label', async () => {
+  const fixture = structuralComposerFixture([{ label: 'Message ChatGPT' }, { label: '在“subagents”中新建聊天' }])
+  assert.equal((await fixture.call({ type: 'sidecar_ping' })).composerPresent, false)
+  assert.equal(fixture.focused, null)
+  assert.deepEqual(fixture.editors.map(editor => editor.textContent), ['', ''])
+})
+
+test('hidden project composer candidates and unscoped editable decoys never override the unique visible editor', async () => {
+  const fixture = structuralComposerFixture([
+    { label: 'Message hidden', visible: false }, { label: 'Prompt hidden', ariaHidden: true },
+    { label: 'Message unrelated', structural: false }, { label: 'New chat in subagents' }
+  ])
+  assert.equal((await fixture.call({ type: 'sidecar_ping' })).composerPresent, true)
+  assert.equal((await fixture.call({ type: 'conversation_prepare', text: 'visible composer' })).prepared, true)
+  assert.equal(fixture.focused, fixture.editors[3])
+  assert.deepEqual(fixture.editors.map(editor => editor.textContent), ['', '', '', 'visible composer'])
+})
+
+test('legacy prompt ID stays authoritative and decoy-only forms are not a composer', async () => {
+  const legacy = structuralComposerFixture([{ label: 'Legacy', structural: false, id: 'prompt-textarea' }])
+  assert.equal((await legacy.call({ type: 'sidecar_ping' })).composerPresent, true)
+  const decoys = structuralComposerFixture([{ label: 'Message edit', context: 'message' }, { label: 'Message unrelated', structural: false }])
+  assert.equal((await decoys.call({ type: 'sidecar_ping' })).composerPresent, false)
+})
+
 async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = false, hasForm = true, draftOnly = false, generationOnly = false }) {
   let runtimeListener = null
   let userSubmitted = false

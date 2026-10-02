@@ -5,6 +5,7 @@ import vm from 'node:vm'
 
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
 const lifecycleSource = await readFile(new URL('../extension/lifecycle.js', import.meta.url), 'utf8')
+const contentSource = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
 
 test('startup durably settles only pre-submit turns whose tabs are gone', async () => {
   const storage = {}
@@ -35,7 +36,7 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
 
 let harnessEffectToken = 0
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -218,6 +219,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
             throw new Error('Could not establish connection. Receiving end does not exist.')
           }
           if (completedEffectOnPing) await runtime({ kind: 'content_effect_complete', effect: completedEffectOnPing })
+          if (contentPingProvider) return contentPingProvider(tab)
           return { ready: tab.pingReady !== false, url: tab.pingUrl ?? tab.url, buildId: tab.pingBuildId ?? 'a'.repeat(64), composerPresent: tab.composerPresent === true }
         }
         if (message.type === 'conversation_observe') {
@@ -1309,6 +1311,48 @@ test('conversation_create accepts Project navigation when the message channel cl
 
   assert.equal(response.ok, true)
   assert.equal(response.result.url, projectUrl)
+})
+
+function capturedProjectComposerPing(tab) {
+  let listener
+  const form = { tagName: 'FORM', attrs: {}, parentElement: null }
+  const body = { tagName: 'DIV', attrs: { 'data-composer-body': '' }, parentElement: form }
+  const input = { tagName: 'DIV', attrs: { 'data-composer-input': '' }, parentElement: body }
+  const editor = { tagName: 'DIV', attrs: { id: '', contenteditable: 'true', role: 'textbox', 'aria-label': '在“subagents”中新建聊天' }, parentElement: input }
+  for (const node of [form, body, input, editor]) {
+    node.getAttribute = name => Object.hasOwn(node.attrs, name) ? node.attrs[name] : null
+    node.getClientRects = () => [{ width: 500, height: 24 }]
+    node.closest = selector => {
+      for (let current = node; current; current = current.parentElement) {
+        if (selector === 'form' && current.tagName === 'FORM') return current
+        if (/^\[[a-z-]+\]$/.test(selector) && current.getAttribute(selector.slice(1, -1)) !== null) return current
+      }
+      return null
+    }
+  }
+  const document = { title: 'subagents', querySelector() { return null },
+    querySelectorAll(selector) { return selector === '[contenteditable="true"]' ? [editor] : [] } }
+  const context = vm.createContext({ document, location: { href: tab.url }, __sidecarBuildId: 'a'.repeat(64),
+    getComputedStyle() { return { display: 'block', visibility: 'visible', opacity: '1' } },
+    chrome: { runtime: { sendMessage: async () => null, onMessage: { addListener(fn) { listener = fn }, removeListener() {} } } },
+    HTMLTextAreaElement: class {}, HTMLInputElement: class {}, InputEvent: class {}, console, setTimeout, clearTimeout })
+  vm.runInContext(contentSource, context)
+  let response
+  listener({ type: 'sidecar_ping' }, {}, value => { response = value })
+  return response
+}
+
+test('native Project creation consumes actual content VM composer readiness for the captured Chinese structural DIV', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const captured = capturedProjectComposerPing({ url: projectUrl })
+  const harness = makeHarness({ fastProjectDraftClock: true, contentPingProvider: capturedProjectComposerPing })
+  const created = await harness.request('conversation_create', { conversationId: 'conv_structural_composer', url: projectUrl })
+  assert.equal(created.ok, true)
+  assert.equal(captured.composerPresent, true)
+  assert.equal(created.result.url, projectUrl)
+  assert.equal(harness.reloadedTabs.length, 0)
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.sentToTabs.filter(({ message }) => message.type === 'project_open').length, 1)
 })
 
 test('conversation_create recovers one missing Project draft listener by exact-tab read-only reinjection', async () => {

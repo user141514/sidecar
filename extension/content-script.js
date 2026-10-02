@@ -28,11 +28,26 @@ function sleep(ms) {
 }
 
 function findPromptEditor() {
-  return document.querySelector('#prompt-textarea') ||
-    [...document.querySelectorAll('[contenteditable="true"]')].find((node) => {
-      const label = (node.getAttribute('aria-label') || node.getAttribute('data-placeholder') || '').toLowerCase()
-      return label.includes('message') || label.includes('prompt') || label.includes('消息')
-    })
+  const legacy = document.querySelector('#prompt-textarea')
+  if (legacy) return legacy
+  const candidates = [...document.querySelectorAll('[contenteditable="true"]')].filter(node => {
+    if (node.getAttribute('role') !== 'textbox' || node.closest?.(
+      'aside, nav, [role="complementary"], [data-sidebar], [data-testid="sidebar"], [data-message-author-role], [data-message-id], [data-testid^="conversation-turn-"], [data-testid="tool-approval-card"], [role="dialog"], [hidden], [aria-hidden="true"]'
+    )) return false
+    const form = node.closest?.('form')
+    const input = node.closest?.('[data-composer-input]')
+    const body = node.closest?.('[data-composer-body]')
+    if (!form || !input || !body || input.closest?.('[data-composer-body]') !== body ||
+        input.closest?.('form') !== form || body.closest?.('form') !== form) return false
+    const rects = node.getClientRects?.()
+    if (!rects || ![...rects].some(rect => rect.width > 0 && rect.height > 0)) return false
+    for (let current = node; current; current = current.parentElement) {
+      const style = globalThis.getComputedStyle?.(current)
+      if (style && (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0')) return false
+    }
+    return true
+  })
+  return candidates.length === 1 ? candidates[0] : null
 }
 
 async function waitForPromptEditor() {
