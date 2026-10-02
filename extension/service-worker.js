@@ -308,10 +308,9 @@ function stableConversationUrl(url) {
   try {
     const parsed = new URL(url)
     if (parsed.origin !== 'https://chatgpt.com') return null
-    const rootMatch = parsed.pathname.match(/^\/c\/[^/]+/)
-    if (rootMatch) return `${parsed.origin}${rootMatch[0]}`
-    const projectMatch = parsed.pathname.match(/^\/g\/g-p-[^/]+\/c\/[^/]+/)
-    return projectMatch ? `${parsed.origin}${projectMatch[0]}` : null
+    if (parsed.username || parsed.password) return null
+    const match = parsed.pathname.match(/^\/(?:g\/g-p-[^/]+\/)?c\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\/?$/i)
+    return match ? `${parsed.origin}${match[0].replace(/\/$/, '')}` : null
   } catch {
     return null
   }
@@ -332,8 +331,8 @@ function chatGptPageUrl(url) {
 function chooseConversationUrl(preferred, fallback) {
   return stableConversationUrl(preferred) ||
     stableConversationUrl(fallback) ||
-    chatGptPageUrl(preferred) ||
-    chatGptPageUrl(fallback) ||
+    projectHomeUrl(preferred) ||
+    projectHomeUrl(fallback) ||
     CHATGPT_URL
 }
 
@@ -615,23 +614,31 @@ async function resolveConversationAttachment(conversationId, requestedUrl, exist
 
 async function claimPendingTurnForTab(tab) {
   if (typeof tab?.id !== 'number') return null
+  try { tab = await chrome.tabs.get(tab.id) } catch { return null }
+  const candidateUrl = stableConversationUrl(tab.url)
+  if (!candidateUrl) return null
   const stored = await chrome.storage.local.get(null)
-  const candidateUrl = stableConversationUrl(tabPageUrl(tab))
   for (const [key, value] of Object.entries(stored)) {
     if (!key.startsWith(PENDING_PREFIX)) continue
-    if (value.phase === 'preparing' || value.phase === 'prepared') continue
+    if (value.phase === 'preparing' || value.phase === 'prepared' || value.phase === 'submitting') continue
 
+    const binding = stored[`${STORAGE_PREFIX}${value.conversationId}`]
+    const bindingUrl = stableConversationUrl(binding?.url)
     let rebind = false
-    if (value?.tabId !== tab.id) {
-      if (!candidateUrl || !isRecoverableSubmittedPending(stored, value)) continue
-      const binding = stored[`${STORAGE_PREFIX}${value.conversationId}`]
-      const bindingUrl = stableConversationUrl(binding?.url)
+    if (value?.tabId === tab.id) {
+      if (bindingUrl) {
+        if (exactAdoptionUuid(bindingUrl) !== exactAdoptionUuid(candidateUrl)) continue
+      } else if (!binding || (!projectHomeUrl(binding.url) && chatGptPageUrl(binding.url) !== CHATGPT_URL)) {
+        continue
+      }
+    } else {
+      if (!isRecoverableSubmittedPending(stored, value)) continue
       if (!bindingUrl || pageIdentity(bindingUrl) !== pageIdentity(candidateUrl)) continue
 
       if (typeof value.tabId === 'number') {
         try {
           const priorTab = await chrome.tabs.get(value.tabId)
-          const priorUrl = stableConversationUrl(tabPageUrl(priorTab))
+          const priorUrl = stableConversationUrl(priorTab.url)
           if (priorUrl && pageIdentity(priorUrl) === pageIdentity(bindingUrl)) continue
         } catch {
           // The original tab is gone, so the exact same conversation may take over monitoring.
@@ -652,7 +659,7 @@ async function claimPendingTurnForTab(tab) {
       await saveConversation(claimed.conversationId, {
         windowId: tab.windowId ?? current.windowId,
         tabId: tab.id,
-        url: chooseConversationUrl(tabPageUrl(tab), current.url)
+        url: candidateUrl
       })
     }
     return claimed
@@ -767,17 +774,22 @@ async function waitForProjectDraftSurface(tabId, expectedProjectUrl) {
 
 async function waitForConversationThreadUrl(tabId, fallbackUrl, timeoutMs = 5000) {
   const existing = stableConversationUrl(fallbackUrl)
-  if (existing) return existing
   const deadline = Date.now() + timeoutMs
   let lastUrl = fallbackUrl
   while (Date.now() < deadline) {
-    const tab = await chrome.tabs.get(tabId)
-    lastUrl = tabPageUrl(tab) || lastUrl
-    const stable = stableConversationUrl(lastUrl)
-    if (stable) return stable
+    let tab
+    try { tab = await chrome.tabs.get(tabId) } catch (error) { throw deliveryUncertain(error) }
+    lastUrl = tab.url || lastUrl
+    const stable = stableConversationUrl(tab.url)
+    if (stable) {
+      if (existing && exactAdoptionUuid(existing) !== exactAdoptionUuid(stable)) {
+        throw deliveryUncertain('Submitted tab changed persistent conversation identity')
+      }
+      return stable
+    }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
-  return chooseConversationUrl(lastUrl, fallbackUrl)
+  throw deliveryUncertain(`Submitted tab did not expose a committed persistent conversation URL; last URL was ${lastUrl}`)
 }
 
 async function findProject(params) {
@@ -1365,28 +1377,41 @@ async function performSend(params, operation) {
     await clearPendingTurn(params.conversationId)
     throw new Error(submitted?.error || 'ChatGPT content script rejected the prompt submission')
   }
-  if (typeof submitted.userMessageId !== 'string' || !submitted.userMessageId) {
+  if (typeof submitted.userMessageId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(submitted.userMessageId)) {
     throw deliveryUncertain('Submit acknowledgement lacked stable user message identity')
   }
+  const submittedUrl = await waitForConversationThreadUrl(currentState.tabId, currentState.url)
+  const knownUrls = [stableConversationUrl(state.url), stableConversationUrl(submitted.url)]
+  if (knownUrls.some(url => url && exactAdoptionUuid(url) !== exactAdoptionUuid(submittedUrl))) {
+    throw deliveryUncertain('Committed conversation UUID conflicts with the prior binding or submission acknowledgement')
+  }
+  let observed
+  let committedTab
+  try {
+    observed = await boundedMessage(currentState.tabId, {
+      type: 'conversation_state_observe', expectedUserMessageId: submitted.userMessageId
+    }, 2000)
+    committedTab = await chrome.tabs.get(currentState.tabId)
+  } catch (error) { throw deliveryUncertain(error) }
+  if (observed?.ready !== true || observed.readable !== true || observed.userMessageId !== submitted.userMessageId ||
+      pageIdentity(stableConversationUrl(observed.url)) !== pageIdentity(submittedUrl) ||
+      pageIdentity(stableConversationUrl(committedTab.url)) !== pageIdentity(submittedUrl)) {
+    throw deliveryUncertain('Submitted user UUID was not observed on the committed conversation')
+  }
+  const submittedState = {
+    ...currentState,
+    url: submittedUrl
+  }
+  await saveConversation(params.conversationId, submittedState)
   if (typeof params.requestId === 'string' && params.requestId) {
     await saveEffectReceipt({
       requestId: params.requestId,
       conversationId: params.conversationId,
       turnId: params.turnId,
       userMessageId: submitted.userMessageId,
-      externalUrl: chooseConversationUrl(submitted.url, currentState.url)
+      externalUrl: submittedUrl
     })
   }
-
-  const submittedUrl = await waitForConversationThreadUrl(
-    currentState.tabId,
-    chooseConversationUrl(submitted.url, currentState.url)
-  )
-  const submittedState = {
-    ...currentState,
-    url: submittedUrl
-  }
-  await saveConversation(params.conversationId, submittedState)
   pending = { ...pending, phase: 'submitted' }
   const currentPending = await loadPendingTurn(params.conversationId)
   if (currentPending?.turnId !== params.turnId) return { accepted: true, ...submittedState, reattached }

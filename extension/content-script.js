@@ -80,9 +80,9 @@ function setPromptText(editor, text) {
 }
 
 function findSendButton() {
-  const explicit = document.querySelector('[data-testid="send-button"]')
-  if (explicit) return explicit
-  return [...document.querySelectorAll('button')].find((button) => {
+  const explicit = currentThreadNodes('[data-testid="send-button"]')[0]
+  if (explicit && visibleNode(explicit)) return explicit
+  return currentThreadNodes('button').find((button) => {
     const label = (button.getAttribute('aria-label') || button.textContent || '').trim().toLowerCase()
     return label === 'send' || label.includes('send message') || label.includes('发送')
   })
@@ -93,19 +93,16 @@ async function waitAndSubmit(beforeClick = null) {
     const button = findSendButton()
     if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
       beforeClick?.()
-      const baselineUserCount = userMessages().length
+      const baselineUserIds = new Set(userMessages().map(persistentMessageId))
+      const promptText = composerDraft().trim()
       const form = button.closest?.('form')
       if (form && typeof form.requestSubmit === 'function') form.requestSubmit(button)
       else button.click()
       for (let confirm = 0; confirm < 20; confirm += 1) {
-        const editor = findPromptEditor()
-        const draft = editor
-          ? (typeof editor.value === 'string' ? editor.value : (editor.innerText || editor.textContent || ''))
-          : ''
-        if (userMessages().length > baselineUserCount) {
-          const userMessageId = userMessages().at(-1)?.getAttribute?.('data-message-id') || ''
-          if (userMessageId) return { userMessageId }
-        }
+        const latest = userMessages().at(-1)
+        const userMessageId = persistentMessageId(latest)
+        if (PERSISTENT_MESSAGE_UUID.test(userMessageId ?? '') && !baselineUserIds.has(userMessageId) &&
+            promptText && userMessageText(latest) === promptText) return { userMessageId }
         await sleep(125)
       }
       throw Object.assign(new Error('ChatGPT submit click produced no observable submission progress'), { deliveryUncertain: true })
@@ -750,12 +747,128 @@ async function handleProjectCreate(message) {
   return { accepted: true, name }
 }
 
-function assistantMessages() {
-  return [...document.querySelectorAll('[data-message-author-role="assistant"]')]
+const PERSISTENT_MESSAGE_UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
+
+function visibleNode(node) {
+  if (!node) return false
+  for (let current = node; current; current = current.parentElement) {
+    if (['aside', 'nav'].includes(current.tagName?.toLowerCase()) || current.getAttribute?.('role') === 'complementary' ||
+        current.getAttribute?.('data-testid') === 'sidebar' || current.getAttribute?.('aria-hidden') === 'true' ||
+        current.hasAttribute?.('data-sidebar') || current.hasAttribute?.('hidden')) return false
+  }
+  const rects = node.getClientRects?.()
+  if (rects && ![...rects].some(rect => rect.width > 0 && rect.height > 0)) return false
+  for (let current = node; current; current = current.parentElement) {
+    const style = globalThis.getComputedStyle?.(current)
+    if (style && (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0')) return false
+  }
+  return true
 }
 
-function userMessages() {
-  return [...document.querySelectorAll('[data-message-author-role="user"]')]
+function messageCollection() {
+  const roots = [...document.querySelectorAll('main[data-app-shell-main-surface="browser"]')]
+  if (roots.length > 1) return { messages: [], unreadable: true, root: null }
+  const root = roots[0] ?? null
+  const units = root ? [...root.querySelectorAll('[data-chatgpt-search-unit-key]')].filter(visibleNode) : []
+  if (!units.length) return { messages: [], unreadable: false, root }
+  const messages = []
+  for (const node of units) {
+    const ids = (node.getAttribute('data-chatgpt-search-message-ids') ?? '').split(' ')
+    const unique = [...new Set(ids)]
+    const searchTurn = node.closest('[data-content-search-turn-key]')
+    const turn = searchTurn?.parentElement
+    const bubbles = [...node.querySelectorAll('[data-user-message-bubble="true"]')]
+    const headings = [...node.querySelectorAll('[data-conversation-role="assistant"]')]
+    const bodies = [...node.querySelectorAll('[data-markdown-text-style="assistant-message"]')]
+    const selections = [...node.querySelectorAll('[data-chatgpt-selection-message-id]')]
+    const role = bubbles.length === 1 && !headings.length && !bodies.length && !selections.length ? 'user' :
+      !bubbles.length && headings.length === 1 && bodies.length === 1 && selections.length === 1 ? 'assistant' : null
+    const id = unique[0]
+    if (node.closest('form, [role="dialog"], [data-testid="tool-approval-card"], [data-composer-body], [data-composer-input]') ||
+        !role || unique.length !== 1 || !ids.every(value => PERSISTENT_MESSAGE_UUID.test(value)) ||
+        !turn || !PERSISTENT_MESSAGE_UUID.test(turn.getAttribute?.('data-turn-key') ?? '') ||
+        node.closest('[data-turn-key]') !== turn || node.closest('main[data-app-shell-main-surface="browser"]') !== root ||
+        (role === 'user' && id !== turn.getAttribute('data-turn-key')) ||
+        (role === 'assistant' && (selections[0].getAttribute('data-chatgpt-selection-message-id') !== id ||
+          bodies[0].parentElement !== selections[0])) ||
+        [...bubbles, ...headings, ...bodies, ...selections].some(child => child.closest('[data-chatgpt-search-unit-key]') !== node)) {
+      return { messages: [], unreadable: true, root }
+    }
+    messages.push({ node, role, id, turn, searchTurn, body: role === 'user' ? bubbles[0] : bodies[0] })
+  }
+  for (const message of messages) {
+    const peers = messages.filter(other => other.turn === message.turn)
+    const anchor = peers.filter(other => other.role === 'user')
+    if (anchor.length !== 1 || peers.filter(other => other.role === 'assistant').length > 1 ||
+        peers.some(other => other.searchTurn !== message.searchTurn) ||
+        (message.role === 'assistant' && ((anchor[0].node.compareDocumentPosition(message.node) & 5) !== 4)) ||
+        messages.some(other => other !== message && other.id === message.id)) return { messages: [], unreadable: true, root }
+  }
+  return { messages, unreadable: false, root }
+}
+
+function messageMetadata(node) {
+  return node?.getAttribute?.('data-chatgpt-search-unit-key') !== null
+    ? messageCollection().messages.find(message => message.node === node) ?? null : null
+}
+
+function persistentMessageId(node) {
+  if (!node) return null
+  if (node.getAttribute?.('data-chatgpt-search-unit-key') != null) return messageMetadata(node)?.id ?? null
+  return node.getAttribute?.('data-message-id') || null
+}
+
+function messageTurn(node) {
+  return messageMetadata(node)?.turn ?? node?.closest?.('[data-testid^="conversation-turn-"]') ?? null
+}
+
+function messagesForRole(role) {
+  const collection = messageCollection()
+  if (collection.unreadable) return []
+  if (collection.messages.length) return collection.messages.filter(message => message.role === role).map(message => message.node)
+  return [...(collection.root ?? document).querySelectorAll('[data-message-author-role="' + role + '"]')].filter(visibleNode)
+}
+
+function assistantMessages() { return messagesForRole('assistant') }
+function userMessages() { return messagesForRole('user') }
+
+function followsUser(anchor, assistant) {
+  const relation = anchor?.compareDocumentPosition?.(assistant)
+  if (typeof relation !== 'number' || (relation & 5) !== 4) return false
+  const proof = messageMetadata(anchor)
+  return !proof || messageMetadata(assistant)?.turn === proof.turn
+}
+
+function currentThreadNodes(selector, includeOtherForms = false) {
+  const collection = messageCollection()
+  if (collection.unreadable) return []
+  const scope = collection.root ?? document
+  const currentTurn = collection.messages.filter(message => message.role === 'user').at(-1)?.turn
+  const composerForm = findPromptEditor()?.closest?.('form')
+  return [...scope.querySelectorAll(selector)].filter(node => {
+    const turn = node.closest?.('[data-turn-key]')
+    const form = node.closest?.('form')
+    const foreignControl = !includeOtherForms && node.closest?.('[role="dialog"], [data-testid="tool-approval-card"], [data-message-author-role], [data-chatgpt-search-unit-key], [data-markdown-text-style="assistant-message"]')
+    return !foreignControl && visibleNode(node) && (!currentTurn || !turn || turn === currentTurn) && (includeOtherForms || !composerForm || !form || form === composerForm)
+  })
+}
+
+function terminalActionAvailable(message) {
+  const proof = messageMetadata(message)
+  const turn = messageTurn(message)
+  if (!turn) return false
+  if (!proof) {
+    const selector = '[data-testid="copy-turn-action-button"], [data-testid="feedback-turn-action-button"], button[aria-label*="Copy response" i], button[aria-label*="复制回复"]'
+    const candidates = typeof turn.querySelectorAll === 'function' ? [...turn.querySelectorAll(selector)] : [turn.querySelector?.(selector)]
+    return candidates.some(button => visibleNode(button) &&
+      (typeof button.closest !== 'function' || button.closest('[data-testid^="conversation-turn-"]') === turn))
+  }
+  return [...turn.querySelectorAll('button')].some(button => visibleNode(button) &&
+    button.closest('[data-turn-key]') === turn &&
+    !button.closest('[data-user-message-bubble="true"]') &&
+    !messageCollection().messages.some(candidate => candidate.role === 'user' && candidate.node.contains(button)) &&
+    (['copy-turn-action-button', 'feedback-turn-action-button'].includes(button.getAttribute('data-testid')) ||
+      ['Copy response', 'Regenerate response', 'Bad response', '复制', '复制回复', '重新生成回复', '回复不佳'].includes(button.getAttribute('aria-label'))))
 }
 
 function nodeText(node) {
@@ -763,13 +876,15 @@ function nodeText(node) {
 }
 
 function userMessageText(node) {
-  const content = node?.querySelector?.('[data-testid="collapsible-user-message-content"]')
+  const content = messageMetadata(node)?.body ?? node?.querySelector?.('[data-testid="collapsible-user-message-content"]')
   return nodeText(content || node)
 }
 
 function turnKey(node) {
-  const turn = node?.closest?.('[data-testid^="conversation-turn-"]')
-  return turn?.getAttribute?.('data-testid') || node?.getAttribute?.('data-message-id') || null
+  const proof = messageMetadata(node)
+  if (proof) return proof.id
+  const turn = messageTurn(node)
+  return turn?.getAttribute?.('data-testid') || persistentMessageId(node)
 }
 
 function bodySnapshot(message) {
@@ -782,7 +897,7 @@ function bodySnapshot(message) {
     return { bodyText: shellText, bodyComplete: Boolean(shellText), shellText }
   }
 
-  const root = message.querySelector(
+  const root = messageMetadata(message)?.body ?? message.querySelector(
     '[data-message-content], [data-testid="assistant-message-content"], .markdown, [class*="markdown"], [class*="prose"]'
   )
   if (!root) return { bodyText: '', bodyComplete: false, shellText }
@@ -815,10 +930,7 @@ function readTurnObservation({ baselineAssistantCount = 0, promptText = '' } = {
     anchor = [...users].reverse().find((user) => userMessageText(user) === normalizedPrompt) ?? null
     if (!anchor) last = null
     else {
-      const following = assistants.filter((assistant) => {
-        const relation = anchor?.compareDocumentPosition?.(assistant)
-        return typeof relation === 'number' && (relation & 4) !== 0
-      })
+      const following = assistants.filter(assistant => followsUser(anchor, assistant))
       last = following.at(-1) ?? null
     }
   }
@@ -827,10 +939,7 @@ function readTurnObservation({ baselineAssistantCount = 0, promptText = '' } = {
     ? Boolean(anchor && last)
     : assistants.length > Number(baselineAssistantCount ?? 0) && Boolean(last)
   const body = bodySnapshot(present ? last : null)
-  const turn = last?.closest?.('[data-testid^="conversation-turn-"]')
-  const terminalActionAvailable = Boolean(turn?.querySelector?.(
-    '[data-testid="copy-turn-action-button"], [data-testid="feedback-turn-action-button"], button[aria-label*="Copy response" i], button[aria-label*="复制回复"]'
-  ))
+  const terminalActions = terminalActionAvailable(last)
 
   return {
     url: location.href,
@@ -841,7 +950,7 @@ function readTurnObservation({ baselineAssistantCount = 0, promptText = '' } = {
     bodyComplete: body.bodyComplete,
     shellText: body.shellText,
     continuationAvailable: ['INTERRUPTED', 'RESUME_UNAVAILABLE'].includes(getComposerMode()),
-    terminalActionAvailable
+    terminalActionAvailable: terminalActions
   }
 }
 
@@ -849,7 +958,7 @@ function readConversationStateObservation(expectedUserMessageId, allowLatestUser
   const users = userMessages()
   const assistants = assistantMessages()
   const expectedAnchor = typeof expectedUserMessageId === 'string' && expectedUserMessageId
-    ? users.find(user => user?.getAttribute?.('data-message-id') === expectedUserMessageId) ?? null
+    ? users.find(user => persistentMessageId(user) === expectedUserMessageId) ?? null
     : null
   let anchor = expectedAnchor
   if (allowLatestUser) {
@@ -857,7 +966,7 @@ function readConversationStateObservation(expectedUserMessageId, allowLatestUser
     const relation = expectedAnchor?.compareDocumentPosition?.(latest)
     const provenLatest = expectedAnchor && latest && (latest === expectedAnchor ||
       (typeof relation === 'number' && (relation & 4) !== 0 && (relation & 1) === 0))
-    const persistentId = latest?.getAttribute?.('data-message-id')
+    const persistentId = persistentMessageId(latest)
     anchor = provenLatest && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(persistentId ?? '') ? latest : null
   }
   if (!anchor) {
@@ -876,27 +985,24 @@ function readConversationStateObservation(expectedUserMessageId, allowLatestUser
   if (newerUser) {
     return {
       ready: true, url: location.href, readable: false,
-      userMessageId: anchor.getAttribute?.('data-message-id') || null,
+      userMessageId: persistentMessageId(anchor),
       assistantMessageId: null, assistantText: null,
       generating: null, terminal: null, body: 'unknown', humanGate: null
     }
   }
 
-  const following = assistants.filter(assistant => {
-    const relation = anchor?.compareDocumentPosition?.(assistant)
-    return typeof relation === 'number' && (relation & 4) !== 0
-  })
+  const following = assistants.filter(assistant => followsUser(anchor, assistant))
   const assistant = following.at(-1) ?? null
   const body = bodySnapshot(assistant)
-  const turn = assistant?.closest?.('[data-testid^="conversation-turn-"]')
-  const finalActionAvailable = Boolean(turn?.querySelector?.(
-    '[data-testid="copy-turn-action-button"], [data-testid="feedback-turn-action-button"], button[aria-label*="Copy response" i], button[aria-label*="复制回复"]'
-  ))
+  const turn = messageTurn(assistant)
+  const finalActionAvailable = terminalActionAvailable(assistant)
   const mode = getComposerMode()
   const generating = mode === 'GENERATING'
   const assistantText = assistant ? (body.bodyText || '') : ''
   const approvalScope = allowLatestUser ? turn : document
-  const humanGate = Boolean(assistant || !allowLatestUser) && (Boolean(approvalScope?.querySelector?.('[data-testid="tool-approval-card"]')) ||
+  const liveApproval = messageCollection().root ? currentThreadNodes('[data-testid="tool-approval-card"]', true).length > 0 :
+    Boolean(approvalScope?.querySelector?.('[data-testid="tool-approval-card"]'))
+  const humanGate = Boolean(assistant || !allowLatestUser) && (liveApproval ||
     /(?:^|\n)\[SUPERVISOR_STATE\s*:\s*NEED_INPUT\]\s*$/.test(assistantText))
   const bodyState = !assistant
     ? 'empty'
@@ -910,8 +1016,8 @@ function readConversationStateObservation(expectedUserMessageId, allowLatestUser
     ready: true,
     url: location.href,
     readable: true,
-    userMessageId: anchor.getAttribute?.('data-message-id') || null,
-    assistantMessageId: assistant?.getAttribute?.('data-message-id') || null,
+    userMessageId: persistentMessageId(anchor),
+    assistantMessageId: persistentMessageId(assistant),
     assistantText,
     generating,
     terminal: generating || ['INTERRUPTED', 'RESUME_UNAVAILABLE'].includes(mode) ? false : finalActionAvailable,
@@ -921,9 +1027,9 @@ function readConversationStateObservation(expectedUserMessageId, allowLatestUser
 }
 
 function findStopButton() {
-  const direct = document.querySelector('[data-testid="stop-button"]')
-  if (direct) return direct
-  return [...document.querySelectorAll('button')].find((button) => {
+  const direct = currentThreadNodes('[data-testid="stop-button"]')[0]
+  if (direct && visibleNode(direct)) return direct
+  return currentThreadNodes('button').find((button) => {
     const label = (button.getAttribute('aria-label') || button.textContent || '').trim().toLowerCase()
     return label.includes('stop streaming') ||
       label.includes('stop generating') ||
@@ -986,12 +1092,12 @@ async function handleStop(message) {
 }
 
 function getComposerMode() {
-  const buttons = [...document.querySelectorAll('button')]
+  const buttons = currentThreadNodes('button')
   const labels = buttons.map((button) => (
     button.getAttribute('aria-label') || button.textContent || ''
   ).trim().toLowerCase())
-  const alerts = [...document.querySelectorAll('[role="alert"]')].map(nodeText)
-  const statuses = [...document.querySelectorAll('[role="status"]')].map(nodeText)
+  const alerts = currentThreadNodes('[role="alert"]').map(nodeText)
+  const statuses = currentThreadNodes('[role="status"]').map(nodeText)
   const frontendNotices = [...alerts, ...statuses]
   const resumeUnavailable = labels.some((label) =>
     label.includes('resume stream unavailable') || label.includes('unable to resume stream')
@@ -1000,7 +1106,7 @@ function getComposerMode() {
   )
   if (resumeUnavailable) return 'RESUME_UNAVAILABLE'
   const hasError = labels.some((label) =>
-    label.includes('try again') || label === 'retry' || label.includes('重试')
+    ['try again', 'retry', '重试'].includes(label)
   ) || alerts.some((text) => /something went wrong|network error|出了点问题|网络错误/i.test(text))
   if (hasError) return 'ERROR'
   if (isGenerating()) return 'GENERATING'
@@ -1170,19 +1276,19 @@ function composerDraft(editor = findPromptEditor()) {
 function writerObservation(ownedDraft = null, requireTerminalEvidence = true, requireTextHumanGate = true) {
   const users = userMessages(), assistants = assistantMessages()
   const user = users.at(-1), assistant = assistants.at(-1)
-  const userMessageId = user?.getAttribute?.('data-message-id') || ''
-  const assistantMessageId = assistant?.getAttribute?.('data-message-id') || ''
+  const userMessageId = persistentMessageId(user) || ''
+  const assistantMessageId = persistentMessageId(assistant) || ''
   const userPending = Boolean(user && (!assistant || ((assistant.compareDocumentPosition?.(user) || 0) & 4)))
-  const turn = assistant?.closest?.('[data-testid^="conversation-turn-"]')
-  const finalized = Boolean(turn?.querySelector?.('[data-testid="copy-turn-action-button"], [data-testid="feedback-turn-action-button"]'))
+  const turn = messageTurn(assistant)
+  const finalized = terminalActionAvailable(assistant)
   const editor = findPromptEditor()
   const draft = composerDraft(editor)
-  const text = nodeText(assistant)
-  const liveApprovalGate = Boolean(document.querySelector('[data-testid="tool-approval-card"]'))
+  const text = bodySnapshot(assistant).bodyText || nodeText(assistant)
+  const liveApprovalGate = currentThreadNodes('[data-testid="tool-approval-card"]', true).length > 0
   const textualHumanGate = /(?:^|\n)\[SUPERVISOR_STATE\s*:\s*NEED_INPUT\]\s*$/.test(text)
   const needsInput = liveApprovalGate || (requireTextHumanGate && textualHumanGate)
   const busy = isGenerating() || turn?.getAttribute?.('aria-busy') === 'true' || Boolean(turn?.querySelector?.('[aria-busy="true"]'))
-  const reason = userPending ? 'user_turn_pending' : busy ? 'assistant_active' : needsInput ? 'need_input' :
+  const reason = messageCollection().unreadable ? 'persistent_turn_identity_unavailable' : userPending ? 'user_turn_pending' : busy ? 'assistant_active' : needsInput ? 'need_input' :
     !editor || editor.getAttribute?.('aria-disabled') === 'true' ? 'composer_unavailable' :
     (ownedDraft === null ? Boolean(draft.trim()) : draft.replace(/\r\n/g, '\n') !== ownedDraft.replace(/\r\n/g, '\n')) ? 'composer_changed' :
     requireTerminalEvidence && assistant && !finalized ? 'terminal_evidence_missing' : null
@@ -1380,7 +1486,7 @@ function dispatchSidecarMessage(message, _sender, sendResponse) {
       ready: true,
       url: location.href,
       generating: isGenerating(),
-      assistantText: (last?.innerText || last?.textContent || '').trim()
+      assistantText: bodySnapshot(last).bodyText
     })
     return
   }

@@ -3,8 +3,8 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
-function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, interrupted = false, finalized = true, needsInputText = false, latestUserId = 'u-later', latestAssistantId = 'a-later', latestAssistantPresent = true, messageDomUnavailable = false } = {}) {
-  let listener, clicks = 0, pending = false, active = false, gate = false, submitted = false
+function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, interrupted = false, finalized = true, needsInputText = false, latestUserId = 'u-later', latestAssistantId = 'a-later', latestAssistantPresent = true, messageDomUnavailable = false, terminalHidden = false } = {}) {
+  let listener, clicks = 0, pending = false, active = false, gate = false, submitted = false, submittedText = ''
   class Editor {
     _value = ''
     get value() { return this._value }
@@ -14,7 +14,7 @@ function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, 
     getAttribute() { return null }
   }
   const editor = new Editor()
-  const turn = { getAttribute() { return 'conversation-turn-2' }, querySelector(s) { return finalized && s.includes('turn-action') ? {} : null } }
+  const turn = { getAttribute() { return 'conversation-turn-2' }, querySelector(s) { return finalized && s.includes('turn-action') ? { getClientRects() { return terminalHidden ? [] : [{ width: 32, height: 32 }] } } : null } }
   const assistantText = needsInputText ? 'Need approval\n[SUPERVISOR_STATE: NEED_INPUT]' : bodyMode === 'incomplete' ? 'Only heading' : 'complete body'
   const assistant = { innerText: assistantText, getAttribute(n) { return n === 'data-message-id' ? 'a1' : null }, closest() { return turn }, compareDocumentPosition(n) { return pending && n === user ? 4 : 0 } }
   if (bodyMode) {
@@ -26,10 +26,10 @@ function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, 
     assistant.querySelector = s => /data-message-content|assistant-message-content|markdown|prose/.test(s) ? root : null
   }
   const user = { innerText: 'task', getAttribute(n) { return n === 'data-message-id' ? (pending ? 'u2' : 'u1') : null }, compareDocumentPosition() { return pending ? 0 : 4 }, querySelector() { return null } }
-  const submittedUser = { innerText: 'submitted command', getAttribute(n) { return n === 'data-message-id' ? 'u-submit' : null }, querySelector() { return null } }
+  const submittedUser = { get innerText() { return submittedText }, getAttribute(n) { return n === 'data-message-id' ? '11111111-1111-4111-8111-111111111111' : null }, querySelector() { return null } }
   const laterUser = { innerText: 'later task', getAttribute(n) { return n === 'data-message-id' ? latestUserId : null }, compareDocumentPosition(node) { return node === laterAssistant ? 4 : 2 }, querySelector() { return null } }
   const laterAssistant = { innerText: 'later answer', getAttribute(n) { return n === 'data-message-id' ? latestAssistantId : null }, closest() { return turn }, compareDocumentPosition() { return 0 }, querySelector(s) { return /data-message-content|assistant-message-content|markdown|prose/.test(s) ? { innerText: 'later answer', querySelector(selector) { return /p, li, pre, code/.test(selector) ? {} : null } } : null } }
-  const button = { disabled: false, getAttribute() { return null }, click() { clicks++; editor.value = ''; submitted = true } }
+  const button = { disabled: false, getAttribute() { return null }, click() { clicks++; submittedText = editor.value.trim(); editor.value = ''; submitted = true } }
   const document = {
     querySelector(s) {
       if (s === '#prompt-textarea') return editor
@@ -39,6 +39,9 @@ function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, 
       return null
     },
     querySelectorAll(s) {
+      if (s === '[data-testid="send-button"]') return [button]
+      if (s === '[data-testid="stop-button"]') return active ? [{}] : []
+      if (s === '[data-testid="tool-approval-card"]') return gate ? [{}] : []
       if (s === '[data-message-author-role="assistant"]') return messageDomUnavailable ? [] : laterTurn && latestAssistantPresent ? [assistant, laterAssistant] : [assistant]
       if (s === '[data-message-author-role="user"]') {
         if (messageDomUnavailable) return []
@@ -71,6 +74,13 @@ test('state observation anchors exact user identity and reuses body/terminal evi
 
   const shellOnly = fixture({ bodyMode: 'incomplete' })
   assert.equal((await shellOnly.call({ type: 'conversation_state_observe', expectedUserMessageId: 'u1' })).body, 'incomplete')
+})
+
+test('legacy terminal controls must be visible before proving completion', async () => {
+  const f = fixture({ terminalHidden: true, bodyMode: 'substantive' })
+  const state = await f.call({ type: 'conversation_state_observe', expectedUserMessageId: 'u1' })
+  assert.equal(state.readable, true)
+  assert.equal(state.terminal, false)
 })
 
 test('state observation fails closed when exact user identity is absent', async () => {

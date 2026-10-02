@@ -2,8 +2,169 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
+import { nativeContentFixture, MODERN_USER_ID, MODERN_ASSISTANT_ID } from './helpers/native-content-fixture.mjs'
 
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
+
+test('captured modern persistent units produce native readable body and same-turn terminal evidence', async t => {
+  const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+  const raw = await fixture.call({ type: 'conversation_state_observe', expectedUserMessageId: MODERN_USER_ID })
+  assert.equal(raw.readable, true)
+  assert.equal(raw.userMessageId, MODERN_USER_ID)
+  assert.equal(raw.assistantMessageId, MODERN_ASSISTANT_ID)
+  assert.equal(raw.assistantText, 'ACTION_OK')
+  assert.equal(raw.body, 'substantive')
+  assert.equal(raw.terminal, true)
+  assert.equal(raw.generating, false)
+  const writer = await fixture.call({ type: 'conversation_observe', authoritativeState: true })
+  assert.equal(writer.readable, true)
+  assert.equal(writer.allowed, true)
+  const turn = fixture.runtime.readTurnObservation({ promptText: 'fixture prompt' })
+  assert.equal(turn.present, true)
+  assert.equal(turn.bodyText, 'ACTION_OK')
+  assert.equal(turn.userTurnKey, MODERN_USER_ID)
+  assert.equal(turn.assistantTurnKey, MODERN_ASSISTANT_ID)
+  assert.equal(turn.terminalActionAvailable, true)
+})
+
+test('modern latest human observation retains the expected anchor and excludes older assistant and controls', async t => {
+  const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+  const latestId = '11111111-1111-4111-8111-111111111111'
+  const latestTurn = fixture.addNode('section', { 'data-turn-key': latestId }, fixture.main)
+  const searchTurn = fixture.addNode('div', { 'data-content-search-turn-key': 'fallback-turn-1' }, latestTurn)
+  const user = fixture.addNode('div', { 'data-chatgpt-search-unit-key': 'fallback-turn-1:0:user', 'data-chatgpt-search-message-ids': latestId }, searchTurn)
+  fixture.addNode('div', { 'data-user-message-bubble': 'true' }, user, 'new human prompt')
+  const raw = await fixture.call({ type: 'conversation_state_observe', expectedUserMessageId: MODERN_USER_ID, allowLatestUser: true })
+  assert.equal(raw.readable, true)
+  assert.equal(raw.userMessageId, latestId)
+  assert.equal(raw.assistantMessageId, null)
+  assert.equal(raw.assistantText, '')
+  assert.equal(raw.body, 'empty')
+  assert.equal(raw.terminal, false)
+  assert.equal(raw.humanGate, false)
+})
+
+test('modern foreign visible and hidden Retry Continue and Stop controls do not enter current lifecycle', t => {
+  const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+  const sidebar = fixture.addNode('aside', {}, fixture.main)
+  const olderTurn = fixture.addNode('section', { 'data-turn-key': '11111111-1111-4111-8111-111111111111' }, fixture.main)
+  for (const parent of [sidebar, olderTurn]) for (const label of ['Retry', 'Continue generating', 'Stop responding'])
+    fixture.addNode('button', { 'aria-label': label }, parent)
+  for (const label of ['Retry', 'Continue generating', 'Stop responding']) fixture.addNode('button', { 'aria-label': label, hidden: '' }, fixture.turn)
+  assert.equal(fixture.runtime.getComposerMode(), 'IDLE_EMPTY')
+})
+
+test('modern submission proves a fresh persistent user UUID with constant virtualized user count', async t => {
+  const fixture = nativeContentFixture({ submitted: false, replaceBaseline: true }); t.after(() => fixture.dispose())
+  fixture.editor.textContent = 'fixture prompt'
+  const response = await fixture.call({ type: 'conversation_submit' })
+  assert.equal(response.accepted, true)
+  assert.equal(response.userMessageId, MODERN_USER_ID)
+  assert.equal(fixture.clicks, 1)
+})
+
+test('modern fresh submission rejects optimistic IDs and an unrelated persistent user without replay', async t => {
+  for (const options of [{ submissionId: 'local-message:temporary' }, { submissionId: 'fallback-turn-0:0:user' }, { submissionText: 'unrelated human prompt' }]) {
+    const fixture = nativeContentFixture({ submitted: false, ...options }); t.after(() => fixture.dispose())
+    fixture.editor.textContent = 'fixture prompt'
+    const result = await fixture.call({ type: 'conversation_submit' })
+    assert.equal(result.accepted, false)
+    assert.equal(result.deliveryUncertain, true)
+    assert.equal(fixture.clicks, 1)
+  }
+})
+
+test('modern duplicate identical UUIDs are accepted but malformed, conflicting, foreign and ambiguous identity are unreadable', async t => {
+  for (const options of [
+    { ids: MODERN_ASSISTANT_ID + ' 11111111-1111-4111-8111-111111111111' },
+    { ids: 'fallback-turn-0:2:assistant' }, { selectionId: MODERN_USER_ID }, { turnId: MODERN_ASSISTANT_ID },
+    { foreignUnit: true }, { dialogUnit: true }, { ambiguousMain: true }, { conflictingRole: true }
+  ]) {
+    const fixture = nativeContentFixture(options); t.after(() => fixture.dispose())
+    const raw = await fixture.call({ type: 'conversation_observe', authoritativeState: true })
+    assert.equal(raw.readable, false, JSON.stringify(options))
+  }
+})
+
+test('modern terminal evidence excludes user copy, polite status, hidden and foreign controls', async t => {
+  const fixture = nativeContentFixture({ terminal: false }); t.after(() => fixture.dispose())
+  fixture.addNode('button', { 'aria-label': '复制', hidden: '' }, fixture.turn)
+  fixture.addNode('button', { 'aria-label': '重新生成回复' }, fixture.main)
+  const raw = await fixture.call({ type: 'conversation_state_observe', expectedUserMessageId: MODERN_USER_ID })
+  assert.equal(raw.readable, true)
+  assert.equal(raw.terminal, false)
+  assert.equal(fixture.runtime.getComposerMode(), 'IDLE_EMPTY')
+})
+
+test('modern current visible Stop is selected despite a hidden sidebar Stop and exact identity is checked', async t => {
+  const fixture = nativeContentFixture({ generating: true }); t.after(() => fixture.dispose())
+  const result = await fixture.call({ type: 'conversation_stop', expected: { userMessageId: MODERN_USER_ID, assistantMessageId: MODERN_ASSISTANT_ID } })
+  assert.equal(result.accepted, true)
+  assert.equal(fixture.clicks, 1)
+  assert.equal(result.userMessageId, MODERN_USER_ID)
+  assert.equal(result.assistantMessageId, MODERN_ASSISTANT_ID)
+})
+
+test('legacy page scope excludes a visible Stop from another form', t => {
+  const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+  delete fixture.main.attrs['data-app-shell-main-surface']
+  fixture.document.querySelector('[data-testid="stop-button"]').connected = false
+  const foreignForm = fixture.addNode('form', {}, fixture.main)
+  fixture.addNode('button', { 'data-testid': 'stop-button', 'aria-label': 'Stop responding' }, foreignForm)
+  assert.equal(fixture.runtime.getComposerMode(), 'IDLE_EMPTY')
+})
+
+test('ambiguous modern main denies guarded prepare and submit even without an expected identity', async t => {
+  const fixture = nativeContentFixture({ submitted: false, ambiguousMain: true }); t.after(() => fixture.dispose())
+  const prepared = await fixture.call({ type: 'conversation_prepare', guarded: true, text: 'fixture prompt' })
+  assert.equal(prepared.prepared, false)
+  assert.equal(fixture.editor.textContent, '')
+  const submitted = await fixture.call({ type: 'conversation_submit' })
+  assert.equal(submitted.accepted, false)
+  assert.equal(fixture.clicks, 0)
+})
+
+test('legacy page never submits through a foreign form when its composer Send is absent', async t => {
+  const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+  delete fixture.main.attrs['data-app-shell-main-surface']
+  fixture.document.querySelector('[data-testid="send-button"]').connected = false
+  const foreign = fixture.addNode('form', {}, fixture.main)
+  const send = fixture.addNode('button', { 'data-testid': 'send-button', 'aria-label': 'Send' }, foreign)
+  send.click = () => { throw new Error('Foreign Send clicked') }
+  const response = await fixture.call({ type: 'conversation_submit' })
+  assert.equal(response.accepted, false)
+  assert.equal(fixture.clicks, 0)
+})
+
+test('visible foreign dialog Stop cannot authorize or receive a current-turn stop', async t => {
+  const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+  const dialog = fixture.addNode('div', { role: 'dialog' }, fixture.main)
+  const stop = fixture.addNode('button', { 'data-testid': 'stop-button', 'aria-label': 'Stop responding' }, dialog)
+  let foreignClicks = 0; stop.click = () => { foreignClicks++ }
+  const before = await fixture.call({ type: 'conversation_state_observe', expectedUserMessageId: MODERN_USER_ID })
+  assert.equal(before.generating, false)
+  const result = await fixture.call({ type: 'conversation_stop', expected: { userMessageId: MODERN_USER_ID, assistantMessageId: MODERN_ASSISTANT_ID } })
+  assert.equal(result.accepted, false)
+  assert.equal(foreignClicks, 0)
+})
+
+test('modern live approval in its own current-turn form still denies writers and Stop', async t => {
+  const fixture = nativeContentFixture({ generating: true }); t.after(() => fixture.dispose())
+  const approvalForm = fixture.addNode('form', {}, fixture.turn)
+  fixture.addNode('div', { 'data-testid': 'tool-approval-card' }, approvalForm)
+  const observed = await fixture.call({ type: 'conversation_state_observe', expectedUserMessageId: MODERN_USER_ID })
+  assert.equal(observed.humanGate, true)
+  const result = await fixture.call({ type: 'conversation_stop', expected: { userMessageId: MODERN_USER_ID, assistantMessageId: MODERN_ASSISTANT_ID } })
+  assert.equal(result.accepted, false)
+  assert.equal(fixture.clicks, 0)
+})
+
+test('modern visible thread Retry remains error while hidden sidebar Retry is ignored', t => {
+  const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+  assert.equal(fixture.runtime.getComposerMode(), 'IDLE_EMPTY')
+  fixture.addNode('button', { 'aria-label': '重试' }, fixture.turn)
+  assert.equal(fixture.runtime.getComposerMode(), 'ERROR')
+})
 
 function structuralComposerFixture(specs) {
   let listener, focused = null
@@ -150,8 +311,9 @@ async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = f
       return null
     },
     querySelectorAll(selector) {
+      if (selector === '[data-testid="send-button"]') return [sendButton]
       if (selector === '[data-message-author-role="assistant"]') return []
-      if (selector === '[data-message-author-role="user"]') return userSubmitted ? [{ getAttribute(name) { return name === 'data-message-id' ? 'user-submitted-1' : null } }] : []
+      if (selector === '[data-message-author-role="user"]') return userSubmitted ? [{ innerText: 'fixture prompt', getAttribute(name) { return name === 'data-message-id' ? '11111111-1111-4111-8111-111111111111' : null } }] : []
       if (selector === 'button') return [sendButton]
       if (selector === '[contenteditable="true"]') return []
       return []
@@ -453,13 +615,13 @@ test('conversation_submit rejects generation UI without a new user turn', async 
 test('conversation_submit falls back to button click when no form is available', async () => {
   const response = await runSubmitFixture({ clickTakesEffect: true, hasForm: false })
   assert.equal(response.accepted, true)
-  assert.equal(response.userMessageId, 'user-submitted-1')
+  assert.equal(response.userMessageId, '11111111-1111-4111-8111-111111111111')
 })
 
 test('conversation_submit prefers native form submission when button click is ignored', async () => {
   const response = await runSubmitFixture({ clickTakesEffect: false, requestSubmitTakesEffect: true })
   assert.equal(response.accepted, true)
-  assert.equal(response.userMessageId, 'user-submitted-1')
+  assert.equal(response.userMessageId, '11111111-1111-4111-8111-111111111111')
 })
 
 test('conversation_prepare selects a requested ChatGPT app before writing prompt text', async () => {
@@ -2761,6 +2923,7 @@ test('active generation refreshes the inactivity watchdog beyond the nominal 20-
     },
     querySelectorAll(selector) {
       if (selector === '[data-message-author-role="assistant"]') return [assistantNode]
+      if (selector === '[data-testid="stop-button"]') return now < stopUntil ? [stopButton] : []
       if (selector === 'button') return []
       if (selector === '[data-message-author-role="user"]') return []
       if (selector === '[contenteditable="true"]') return []

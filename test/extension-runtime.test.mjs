@@ -2,10 +2,114 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
+import { nativeContentFixture, MODERN_USER_ID, MODERN_ASSISTANT_ID, MODERN_THREAD_URL } from './helpers/native-content-fixture.mjs'
 
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
 const lifecycleSource = await readFile(new URL('../extension/lifecycle.js', import.meta.url), 'utf8')
 const contentSource = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
+
+test('actual modern content ACK and snapshots pass native send inspect state and stop with canonical receipt', async t => {
+  const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+  const draft = 'https://chatgpt.com/g/g-p-test-subagents/project'
+  const local = 'https://chatgpt.com/c/local-chatgpt%3A7611e69c-88dd-4b54-99ab-56258c3c6643'
+  const rawReplies = []
+  fixture.location.href = draft
+  fixture.configureOnSubmit(() => { fixture.location.href = local })
+  const h = makeHarness({
+    storage: { 'writer:authority': { version: 1, epoch: 3 }, 'conversation:conv_actual_modern': { tabId: 20, windowId: 10, url: draft } },
+    tabs: [{ id: 20, windowId: 10, url: draft }], windows: [{ id: 10 }],
+    async contentMessageProvider(tab, message, runtime) {
+      fixture.configureRuntimeTransport(runtime)
+      const raw = await fixture.call(message)
+      rawReplies.push({ type: message.type, raw })
+      if (message.type === 'conversation_submit' && raw.accepted === true) {
+        assert.equal(raw.url, local)
+        assert.equal(h.storageState['effect-receipt:actual-modern-send'], undefined)
+        tab.url = MODERN_THREAD_URL; fixture.location.href = MODERN_THREAD_URL
+      }
+      return raw
+    }
+  })
+  const sent = await h.request('conversation_send', { conversationId: 'conv_actual_modern', turnId: 'actual-turn',
+    requestId: 'actual-modern-send', externalUrl: draft, existingOnly: true, writerEpoch: 3, text: 'fixture prompt', authoritativeState: true })
+  assert.equal(sent.ok, true, sent.error)
+  assert.equal(sent.result.url, MODERN_THREAD_URL)
+  const ack = rawReplies.find(reply => reply.type === 'conversation_submit').raw
+  assert.equal(ack.userMessageId, MODERN_USER_ID)
+  assert.equal(ack.accepted, true)
+  assert.equal(h.storageState['effect-receipt:actual-modern-send'].userMessageId, MODERN_USER_ID)
+  assert.equal(h.storageState['effect-receipt:actual-modern-send'].externalUrl, MODERN_THREAD_URL)
+  assert.equal(h.storageState['conversation:conv_actual_modern'].url, MODERN_THREAD_URL)
+  const inspected = await h.request('conversation_supervision_inspect', { externalUrl: MODERN_THREAD_URL, writerEpoch: 3 })
+  assert.equal(inspected.result.found, true)
+  assert.equal(inspected.result.readable, true)
+  assert.equal(inspected.result.userMessageId, MODERN_USER_ID)
+  assert.equal(inspected.result.assistantMessageId, MODERN_ASSISTANT_ID)
+  const state = await h.request('conversation_state_observe', { conversationId: 'conv_actual_modern', turnId: 'actual-turn',
+    externalUrl: MODERN_THREAD_URL, expectedUserMessageId: MODERN_USER_ID })
+  assert.equal(state.result.readable, true)
+  assert.equal(state.result.assistantMessageId, MODERN_ASSISTANT_ID)
+  assert.equal(state.result.assistantText, 'ACTION_OK')
+  assert.equal(state.result.terminal, true)
+  fixture.setGenerating(true)
+  const stopped = await h.request('conversation_stop', { conversationId: 'conv_actual_modern', turnId: 'actual-turn',
+    requestId: 'actual-modern-stop', externalUrl: MODERN_THREAD_URL, expectedStateVersion: 9, writerEpoch: 3,
+    expected: { userMessageId: MODERN_USER_ID, assistantMessageId: MODERN_ASSISTANT_ID } })
+  assert.equal(stopped.ok, true, stopped.error)
+  assert.equal(stopped.result.userMessageId, MODERN_USER_ID)
+  assert.equal(stopped.result.assistantMessageId, MODERN_ASSISTANT_ID)
+  assert.equal(fixture.clicks, 2)
+  assert.equal(h.sentToTabs.filter(entry => entry.message.type === 'conversation_submit').length, 1)
+  assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length, 0)
+})
+
+test('actual modern unowned content supports explicit exact adoption and fresh native observation', async t => {
+  const fixture = nativeContentFixture({ generating: true }); t.after(() => fixture.dispose())
+  const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } },
+    tabs: [{ id: 61, windowId: 6, url: MODERN_THREAD_URL }], windows: [{ id: 6 }],
+    contentMessageProvider(tab, message, runtime) { fixture.configureRuntimeTransport(runtime); return fixture.call(message) }
+  })
+  const params = { conversationId: 'conv_actual_adopt', turnId: 'actual-adopt-turn', requestId: 'actual-adopt-request',
+    externalUrl: MODERN_THREAD_URL, expectedUserMessageId: MODERN_USER_ID, writerEpoch: 3 }
+  const inspected = await h.request('conversation_adoption_inspect', params)
+  assert.equal(inspected.result.found, true)
+  assert.equal(inspected.result.userMessageId, MODERN_USER_ID)
+  assert.equal(inspected.result.assistantMessageId, MODERN_ASSISTANT_ID)
+  const adopted = await h.request('conversation_adopt', params)
+  assert.equal(adopted.result.accepted, true)
+  assert.equal(adopted.result.receipt.userMessageId, MODERN_USER_ID)
+  assert.equal(adopted.result.receipt.assistantMessageId, MODERN_ASSISTANT_ID)
+  const state = await h.request('conversation_state_observe', { conversationId: params.conversationId, turnId: params.turnId,
+    externalUrl: MODERN_THREAD_URL, expectedUserMessageId: MODERN_USER_ID })
+  assert.equal(state.result.readable, true)
+  assert.equal(state.result.assistantText, 'ACTION_OK')
+  assert.equal(state.result.generating, true)
+  assert.equal(fixture.clicks, 0)
+  assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length, 0)
+})
+
+test('actual malformed modern submission cannot create a native receipt or replay the seed', async t => {
+  for (const options of [{ submissionId: 'local-user:temporary' }, { ids: MODERN_ASSISTANT_ID + ' ' + MODERN_USER_ID }]) {
+    const fixture = nativeContentFixture({ submitted: false, ...options }); t.after(() => fixture.dispose())
+    const draft = 'https://chatgpt.com/g/g-p-test-subagents/project'
+    fixture.location.href = draft
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 },
+      'conversation:conv_actual_unknown': { tabId: 20, windowId: 10, url: draft } },
+      tabs: [{ id: 20, windowId: 10, url: draft }], windows: [{ id: 10 }],
+      contentMessageProvider(tab, message, runtime) { fixture.configureRuntimeTransport(runtime); return fixture.call(message) }
+    })
+    const params = { conversationId: 'conv_actual_unknown', turnId: 'actual-unknown-turn', requestId: 'actual-unknown-send',
+      externalUrl: draft, existingOnly: true, writerEpoch: 3, text: 'fixture prompt', authoritativeState: true }
+    const sent = await h.request('conversation_send', params)
+    assert.equal(sent.errorCode, 'DELIVERY_UNCERTAIN')
+    assert.equal(h.storageState['effect-receipt:actual-unknown-send'], undefined)
+    assert.equal(h.storageState['conversation:conv_actual_unknown'].url, draft)
+    assert.equal(h.storageState['pending:conv_actual_unknown'].phase, 'submitting')
+    assert.equal(h.sentToTabs.filter(entry => entry.message.type === 'conversation_monitor_start').length, 0)
+    assert.equal((await h.request('conversation_send', params)).errorCode, 'DELIVERY_UNCERTAIN')
+    assert.equal(fixture.clicks, 1)
+  }
+})
 
 test('startup durably settles only pre-submit turns whose tabs are gone', async () => {
   const storage = {}
@@ -36,12 +140,13 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
 
 let harnessEffectToken = 0
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null, fastConversationUrlClock = false, onSubmittedTabGet = null, submitPendingUrl = null, submitUserMessageId = '00000000-0000-4000-8000-000000000001', contentMessageProvider = null, submitResponseUrl = null } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
   const tabMap = new Map(tabs.map((tab) => [tab.id, { ...tab }]))
   const nativeMessages = []
+  const submittedTabs = new Set()
   let draftClock = Date.now()
   const runtimeMessageListeners = []
   let tabUpdatedListener = null
@@ -168,6 +273,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
       async get(tabId) {
         const tab = tabMap.get(tabId)
         if (!tab) throw new Error(`No tab ${tabId}`)
+        if (submittedTabs.has(tabId)) onSubmittedTabGet?.(tab, storageState)
         return { ...tab }
       },
       async query({ windowId } = {}) {
@@ -206,6 +312,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           for (let attempt = 0; attempt < 8 && response === undefined; attempt += 1) await new Promise(resolve => setImmediate(resolve))
           return response
         }
+        if (contentMessageProvider) return contentMessageProvider(tab, message, runtime)
         if (message.type === 'sidecar_effect_document') {
           const result = await runtime({ kind: 'content_effect_document', token: message.token })
           onContentDocumentProbe?.(storageState)
@@ -234,10 +341,9 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         if (message.type === 'conversation_state_observe') {
           if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
           const readable = tab.stateReadable !== false && (message.allowLatestUser === true || tab.userMessageId === message.expectedUserMessageId)
-          onStateObservation?.(storageState)
-          return {
+          const observation = {
             ready: true,
-            url: tab.url,
+            url: tab.stateObservedUrl ?? tab.url,
             readable,
             ...(tab.stateReason ? { reason: tab.stateReason } : {}),
             userMessageId: readable ? tab.userMessageId : null,
@@ -248,6 +354,8 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
             body: readable ? (tab.body ?? 'unknown') : 'unknown',
             humanGate: readable ? tab.humanGate === true : null
           }
+          onStateObservation?.(storageState)
+          return observation
         }
         if (message.type === 'conversation_snapshot') {
           return {
@@ -291,9 +399,12 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         }
         if (message.type === 'conversation_submit') {
           if (submitTransportFailure) throw new Error('submit response lost during navigation')
-          const responseUrl = tab.url
+          const responseUrl = submitResponseUrl ?? tab.url
           if (submitNavigatesTo) tab.url = submitNavigatesTo
-          return { accepted: true, userMessageId: `user-${message.turnId}`, url: responseUrl }
+          if (submitPendingUrl) tab.pendingUrl = submitPendingUrl
+          submittedTabs.add(tabId)
+          tab.userMessageId = submitUserMessageId
+          return { accepted: true, userMessageId: submitUserMessageId, url: responseUrl }
         }
         if (message.type === 'conversation_stop') {
           if (stopGate) await stopGate
@@ -345,7 +456,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     },
     console,
     URL,
-    Date: fastProjectDraftClock ? class extends Date { static now() { draftClock += 1000; return draftClock } } : Date,
+    Date: (fastProjectDraftClock || fastConversationUrlClock) ? class extends Date { static now() { draftClock += 1000; return draftClock } } : Date,
     Promise,
     Object,
     setTimeout(callback, ms) {
@@ -619,7 +730,9 @@ test('concurrent adoption cannot create two owners of an exact tab', async () =>
 test('Project slug redirect preserves the existing tab', async () => {
   const home = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
   const alias = home.replace('/project', '-subagents/project')
+  const thread = alias.replace('/project', '/c/00000000-0000-4000-8000-000000000002')
   const harness = makeHarness({
+    submitNavigatesTo: thread,
     storage: { window0: { windowId: 10, sentinelTabId: 19 }, 'conversation:conv_alias': { windowId: 10, tabId: 20, url: home } },
     windows: [{ id: 10 }],
     tabs: [
@@ -633,9 +746,9 @@ test('Project slug redirect preserves the existing tab', async () => {
   assert.equal(harness.createdTabs.length, 0)
   const status = await harness.request('extension_status', {})
   assert.equal(status.result.managedTabs[0].tabId, 20)
-  assert.equal(status.result.managedTabs[0].url, alias)
-  assert.equal(harness.storageState['conversation:conv_alias'].url, alias)
-  assert.equal(result.result.url, alias)
+  assert.equal(status.result.managedTabs[0].url, thread)
+  assert.equal(harness.storageState['conversation:conv_alias'].url, thread)
+  assert.equal(result.result.url, thread)
 })
 
 test('accepted browser effect persists a request-to-user-turn receipt before native acknowledgement', async () => {
@@ -663,7 +776,7 @@ test('accepted browser effect persists a request-to-user-turn receipt before nat
     requestId: 'request-receipt',
     conversationId: 'conv_receipt',
     turnId: 'turn_receipt',
-    userMessageId: 'user-turn_receipt',
+    userMessageId: '00000000-0000-4000-8000-000000000001',
     externalUrl
   })
   const lookup = await harness.request('conversation_effect_receipt', { requestId: 'request-receipt' })
@@ -844,8 +957,8 @@ test('conversation_refresh rechecks fresh DOM after durable admission and denies
 test('conversation_refresh never reattaches a missing or changed registered tab', async () => {
   for (const options of [
     { storage: { 'conversation:conv_refresh': { windowId: 10, tabId: 99, url: refreshUrl } } },
-    { tab: { url: 'https://chatgpt.com/c/wrong' } },
-    { storage: { 'conversation:conv_refresh': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/wrong' } } }
+    { tab: { url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000001' } },
+    { storage: { 'conversation:conv_refresh': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000001' } } }
   ]) {
     const harness = refreshHarness(options)
     const response = await harness.request('conversation_refresh', refreshParams)
@@ -861,7 +974,7 @@ test('conversation_refresh binds receipt replay to every caller identity and wri
   assert.equal((await harness.request('conversation_refresh', refreshParams)).ok, true)
   for (const changed of [
     { conversationId: 'other-conversation' },
-    { externalUrl: 'https://chatgpt.com/c/other' },
+    { externalUrl: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000002' },
     { expectedUserMessageId: 'other-user' },
     { expectedAssistantMessageId: null },
     { writerEpoch: 2 }
@@ -954,7 +1067,7 @@ test('duplicate request identity is deduplicated at the Extension before a secon
 
   const duplicate = await harness.request('conversation_send', params)
   assert.equal(duplicate.ok, true)
-  assert.equal(duplicate.result.userMessageId, 'user-turn_dedupe')
+  assert.equal(duplicate.result.userMessageId, '00000000-0000-4000-8000-000000000001')
   assert.equal(harness.sentToTabs.filter(entry => entry.message.type === 'conversation_prepare').length, prepareCount)
   assert.equal(harness.sentToTabs.filter(entry => entry.message.type === 'conversation_submit').length, submitCount)
 
@@ -989,7 +1102,7 @@ test('lost native acceptance after browser effect keeps receipt and never synthe
     }
   })
 
-  assert.equal(harness.storageState['effect-receipt:effect-ack-lost']?.userMessageId, 'user-turn_ack_lost')
+  assert.equal(harness.storageState['effect-receipt:effect-ack-lost']?.userMessageId, '00000000-0000-4000-8000-000000000001')
   assert.equal(harness.nativeMessages.filter(message => message.requestId === 'native-ack-lost').length, 0)
 })
 
@@ -1035,7 +1148,7 @@ test('definite pre-submit failure emits durable terminal evidence and releases p
 
 test('two local conversation IDs cannot mutate the same active browser tab', async () => {
   let release
-  const externalUrl = 'https://chatgpt.com/c/shared-thread'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000003'
   const harness = makeHarness({
     prepareGate: new Promise(resolve => { release = resolve }),
     storage: {
@@ -1075,8 +1188,8 @@ test('project_find scans existing ChatGPT tabs and returns a canonical matching 
   const harness = makeHarness({
     windows: [{ id: 10 }, { id: 11 }],
     tabs: [
-      { id: 20, windowId: 10, url: 'https://chatgpt.com/c/other', projectName: 'agent', projectUrl: 'https://chatgpt.com/g/g-p-agent-test/project' },
-      { id: 21, windowId: 11, url: 'https://chatgpt.com/c/current', projectName: 'subagents', projectUrl }
+      { id: 20, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000002', projectName: 'agent', projectUrl: 'https://chatgpt.com/g/g-p-agent-test/project' },
+      { id: 21, windowId: 11, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000004', projectName: 'subagents', projectUrl }
     ]
   })
 
@@ -1095,7 +1208,7 @@ test('conversation_create rejects a legacy bare window0 and creates a new owned 
   const harness = makeHarness({
     storage: { window0: { windowId: 10 } },
     windows: [{ id: 10, focused: true, state: 'normal' }],
-    tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/c/human-current', active: true }]
+    tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000005', active: true }]
   })
 
   const response = await harness.request('conversation_create', {
@@ -1166,7 +1279,7 @@ test('project_create opens one root tab in window0 and returns its canonical Pro
 
 test('conversation_create prefers an existing same-Project conversation as the healthy bootstrap seed', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
-  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/c/thread-existing'
+  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/c/10000000-0000-4000-8000-000000000006'
   const harness = makeHarness({
     storage: { window0: { windowId: 10, sentinelTabId: 19 } },
     windows: [{ id: 10 }],
@@ -1194,7 +1307,7 @@ test('conversation_create prefers an existing same-Project conversation as the h
 
 test('conversation_create is idempotent for the same logical conversation attachment', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
-  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/c/thread-existing'
+  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/c/10000000-0000-4000-8000-000000000006'
   const harness = makeHarness({
     storage: { window0: { windowId: 10, sentinelTabId: 19 } },
     windows: [{ id: 10 }],
@@ -1218,7 +1331,7 @@ test('conversation_create is idempotent for the same logical conversation attach
 })
 
 test('conversation_create replay rehomes a legacy human-window binding into the owned automation window', async () => {
-  const externalUrl = 'https://chatgpt.com/g/g-p-rehome-test/c/thread-existing'
+  const externalUrl = 'https://chatgpt.com/g/g-p-rehome-test/c/10000000-0000-4000-8000-000000000006'
   const sentinelUrl = 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html'
   const harness = makeHarness({
     storage: {
@@ -1247,7 +1360,7 @@ test('conversation_create replay rehomes a legacy human-window binding into the 
 
 test('conversation_create replay reopens its materialized exact thread instead of allocating a new Project draft', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
-  const threadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-materialized'
+  const threadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/10000000-0000-4000-8000-000000000007'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -1273,7 +1386,7 @@ test('conversation_create replay reopens its materialized exact thread instead o
 
 test('conversation_create reuses a persisted same-Project conversation when no matching tab is live', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
-  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-persisted'
+  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/10000000-0000-4000-8000-000000000008'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -1296,7 +1409,7 @@ test('conversation_create reuses a persisted same-Project conversation when no m
 
 test('conversation_create accepts Project navigation when the message channel closes after link click', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
-  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-existing'
+  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/10000000-0000-4000-8000-000000000006'
   const harness = makeHarness({
     storage: { window0: { windowId: 10 } },
     windows: [{ id: 10 }],
@@ -1395,7 +1508,7 @@ test('Project listener recovery is bounded once and denies changed target or sta
 
 test('conversation_create reloads an incomplete Project draft surface once', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
-  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-existing'
+  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/10000000-0000-4000-8000-000000000006'
   const harness = makeHarness({
     storage: { window0: { windowId: 10 } },
     windows: [{ id: 10 }],
@@ -1413,9 +1526,177 @@ test('conversation_create reloads an incomplete Project draft surface once', asy
   assert.deepEqual(harness.reloadedTabs, [harness.createdTabs[0].id])
 })
 
+const persistentSendUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/6abfe3a7-9f60-83e8-880b-58a25b1901f9'
+const provisionalSendUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/local-chatgpt%3A7611e69c-88dd-4b54-99ab-56258c3c6643'
+const sendDraftUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+
+function persistentSendHarness(options = {}) {
+  return makeHarness({
+    storage: { 'conversation:conv_persistent_send': { windowId: 10, tabId: 20, url: sendDraftUrl } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: sendDraftUrl }],
+    fastConversationUrlClock: true,
+    ...options
+  })
+}
+
+const persistentSendParams = {
+  conversationId: 'conv_persistent_send', turnId: 'turn_persistent_send',
+  requestId: 'request-persistent-send', text: 'seed once', externalUrl: sendDraftUrl, existingOnly: true
+}
+
+test('send binds receipt only after committed persistent UUID URL replaces the optimistic local thread', async () => {
+  let observations = 0
+  const harness = persistentSendHarness({
+    submitNavigatesTo: provisionalSendUrl,
+    submitPendingUrl: persistentSendUrl,
+    onSubmittedTabGet(tab, storage) {
+      observations += 1
+      assert.equal(storage['effect-receipt:request-persistent-send'], undefined)
+      assert.equal(storage['conversation:conv_persistent_send'].url, sendDraftUrl)
+      if (observations >= 2) {
+        tab.url = persistentSendUrl
+        delete tab.pendingUrl
+      }
+    }
+  })
+  const response = await harness.request('conversation_send', persistentSendParams)
+  assert.equal(response.ok, true)
+  assert.equal(observations, 3)
+  assert.equal(response.result.url, persistentSendUrl)
+  assert.equal(harness.storageState['effect-receipt:request-persistent-send'].externalUrl, persistentSendUrl)
+  assert.equal(harness.storageState['conversation:conv_persistent_send'].url, persistentSendUrl)
+  assert.equal(harness.sentToTabs.filter(item => item.message.type === 'conversation_submit').length, 1)
+  assert.equal(harness.sentToTabs.filter(item => item.message.type === 'conversation_monitor_start').length, 1)
+})
+
+test('send without a committed persistent URL stays uncertain with pending state and no receipt or monitor', async () => {
+  for (const unresolvedUrl of [sendDraftUrl, provisionalSendUrl, provisionalSendUrl.replace('%3A', ':'), persistentSendUrl + '/unexpected']) {
+    const harness = persistentSendHarness({
+      submitNavigatesTo: unresolvedUrl,
+      submitPendingUrl: persistentSendUrl
+    })
+    const response = await harness.request('conversation_send', persistentSendParams)
+    assert.equal(response.ok, false, unresolvedUrl)
+    assert.equal(response.errorCode, 'DELIVERY_UNCERTAIN', unresolvedUrl)
+    assert.equal(harness.storageState['pending:conv_persistent_send'].phase, 'submitting')
+    assert.equal(harness.storageState['conversation:conv_persistent_send'].url, sendDraftUrl)
+    assert.equal(harness.storageState['effect-receipt:request-persistent-send'], undefined)
+    assert.equal(harness.sentToTabs.filter(item => item.message.type === 'conversation_monitor_start').length, 0)
+    assert.equal(Object.keys(harness.storageState).some(key => key.startsWith('outbox:')), false)
+    const duplicate = await harness.request('conversation_send', persistentSendParams)
+    assert.equal(duplicate.errorCode, 'DELIVERY_UNCERTAIN')
+    assert.equal(harness.sentToTabs.filter(item => item.message.type === 'conversation_submit').length, 1)
+  }
+})
+
+test('send preserves both prior and acknowledged persistent UUIDs despite a matching user on another thread', async () => {
+  const otherUrl = persistentSendUrl.replace('1901f9', '1901f8')
+  for (const { prior, acknowledged, committed } of [
+    { prior: sendDraftUrl, acknowledged: persistentSendUrl, committed: otherUrl },
+    { prior: persistentSendUrl, acknowledged: otherUrl, committed: persistentSendUrl },
+    { prior: persistentSendUrl, acknowledged: persistentSendUrl, committed: otherUrl }
+  ]) {
+    const harness = persistentSendHarness({
+      storage: { 'conversation:conv_persistent_send': { windowId: 10, tabId: 20, url: prior } },
+      tabs: [{ id: 20, windowId: 10, url: prior }],
+      submitResponseUrl: acknowledged,
+      submitNavigatesTo: committed
+    })
+    const response = await harness.request('conversation_send', { ...persistentSendParams, externalUrl: prior })
+    assert.equal(response.ok, false, JSON.stringify({ prior, acknowledged, committed }))
+    assert.equal(response.errorCode, 'DELIVERY_UNCERTAIN')
+    assert.equal(harness.storageState['pending:conv_persistent_send'].phase, 'submitting')
+    assert.equal(harness.storageState['effect-receipt:request-persistent-send'], undefined)
+    assert.equal(harness.storageState['conversation:conv_persistent_send'].url, prior)
+    assert.equal(harness.sentToTabs.filter(item => item.message.type === 'conversation_monitor_start').length, 0)
+    assert.equal(harness.sentToTabs.filter(item => item.message.type === 'conversation_submit').length, 1)
+  }
+})
+
+test('first persistent ACK UUID can bind its matching committed thread after fresh user proof', async () => {
+  const harness = persistentSendHarness({ submitResponseUrl: persistentSendUrl, submitNavigatesTo: persistentSendUrl })
+  const response = await harness.request('conversation_send', persistentSendParams)
+  assert.equal(response.ok, true)
+  assert.equal(response.result.url, persistentSendUrl)
+  assert.equal(harness.storageState['effect-receipt:request-persistent-send'].externalUrl, persistentSendUrl)
+  assert.equal(harness.storageState['pending:conv_persistent_send'].phase, 'submitted')
+})
+
+test('new-thread receipt requires the acknowledged user UUID on the committed thread', async () => {
+  for (const mismatch of ['missing-user', 'wrong-observer-url', 'tab-changed-after-observation']) {
+    const harness = persistentSendHarness({
+      submitNavigatesTo: persistentSendUrl,
+      onSubmittedTabGet(tab) {
+        if (mismatch === 'missing-user') tab.userMessageId = '00000000-0000-4000-8000-000000000099'
+        if (mismatch === 'wrong-observer-url') tab.stateObservedUrl = persistentSendUrl.replace('1901f9', '1901f8')
+      },
+      onStateObservation() {
+        if (mismatch === 'tab-changed-after-observation') void harness.updateTab(20, { url: persistentSendUrl.replace('1901f9', '1901f8') })
+      }
+    })
+    const response = await harness.request('conversation_send', persistentSendParams)
+    assert.equal(response.ok, false, mismatch)
+    assert.equal(response.errorCode, 'DELIVERY_UNCERTAIN')
+    assert.equal(harness.storageState['pending:conv_persistent_send'].phase, 'submitting')
+    assert.equal(harness.storageState['effect-receipt:request-persistent-send'], undefined)
+    assert.equal(harness.storageState['conversation:conv_persistent_send'].url, sendDraftUrl)
+    assert.equal(harness.sentToTabs.filter(item => item.message.type === 'conversation_monitor_start').length, 0)
+  }
+})
+
+test('submit acknowledgement without a persistent message UUID creates no delivered receipt or monitor', async () => {
+  for (const submitUserMessageId of ['', 'local-user:7611e69c-88dd-4b54-99ab-56258c3c6643', 'user-turn-unknown']) {
+    const harness = persistentSendHarness({ submitNavigatesTo: persistentSendUrl, submitUserMessageId })
+    const response = await harness.request('conversation_send', persistentSendParams)
+    assert.equal(response.ok, false, submitUserMessageId)
+    assert.equal(response.errorCode, 'DELIVERY_UNCERTAIN')
+    assert.equal(harness.storageState['pending:conv_persistent_send'].phase, 'submitting')
+    assert.equal(harness.storageState['effect-receipt:request-persistent-send'], undefined)
+    assert.equal(harness.sentToTabs.filter(item => item.message.type === 'conversation_monitor_start').length, 0)
+  }
+})
+
+test('a committed UUID alone cannot recover a submitting turn before its submission proof', async () => {
+  const pending = { conversationId: 'conv_persistent_send', turnId: 'turn_persistent_send', tabId: 20, phase: 'submitting', monitorVersion: 1 }
+  const harness = makeHarness({
+    storage: {
+      'conversation:conv_persistent_send': { windowId: 10, tabId: 20, url: sendDraftUrl },
+      'pending:conv_persistent_send': pending
+    },
+    tabs: [{ id: 20, windowId: 10, url: persistentSendUrl }]
+  })
+  const claimed = await harness.emitRuntimeMessage({ kind: 'pending_turn_lookup' }, { tab: { id: 20, url: persistentSendUrl } })
+  assert.equal(claimed, null)
+  await harness.updateTab(20, { url: persistentSendUrl })
+  assert.equal(harness.storageState['conversation:conv_persistent_send'].url, sendDraftUrl)
+  assert.deepEqual(harness.storageState['pending:conv_persistent_send'], pending)
+  assert.equal(harness.sentToTabs.filter(item => item.message.type === 'conversation_monitor_start').length, 0)
+})
+
+test('same-tab pending recovery rejects provisional and changed persistent conversation UUIDs', async () => {
+  const changedUrl = persistentSendUrl.replace('6abfe3a7-9f60-83e8-880b-58a25b1901f9', '6abfe3a7-9f60-83e8-880b-58a25b1901f8')
+  for (const observedUrl of [provisionalSendUrl, changedUrl]) {
+    const pending = { conversationId: 'conv_persistent_send', turnId: 'turn_persistent_send', tabId: 20, phase: 'submitting', monitorVersion: 1 }
+    const harness = makeHarness({
+      storage: {
+        'conversation:conv_persistent_send': { windowId: 10, tabId: 20, url: persistentSendUrl },
+        'pending:conv_persistent_send': pending
+      },
+      tabs: [{ id: 20, windowId: 10, url: observedUrl, pendingUrl: persistentSendUrl }]
+    })
+    const claimed = await harness.emitRuntimeMessage({ kind: 'pending_turn_lookup' }, { tab: { id: 20, url: observedUrl, pendingUrl: persistentSendUrl } })
+    assert.equal(claimed, null, observedUrl)
+    assert.deepEqual(harness.storageState['pending:conv_persistent_send'], pending)
+    assert.equal(harness.storageState['conversation:conv_persistent_send'].url, persistentSendUrl)
+    await harness.updateTab(20, { url: observedUrl })
+    assert.equal(harness.sentToTabs.filter(item => item.message.type === 'conversation_monitor_start').length, 0)
+  }
+})
+
 test('conversation_send captures the stable conversation URL after Project submit navigation', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
-  const threadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/thread-new'
+  const threadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/10000000-0000-4000-8000-000000000009'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -1439,7 +1720,7 @@ test('conversation_send captures the stable conversation URL after Project submi
 })
 
 test('send forwards a per-message app selection to the content-script prepare step', async () => {
-  const externalUrl = 'https://chatgpt.com/c/app-selection-123'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000010'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10, sentinelTabId: 19 },
@@ -1468,7 +1749,7 @@ test('send forwards a per-message app selection to the content-script prepare st
 })
 
 test('send forwards authoritative state ownership to prepare and submit without changing legacy default', async () => {
-  const externalUrl = 'https://chatgpt.com/c/authoritative-guard'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000011'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -1495,7 +1776,7 @@ test('send forwards authoritative state ownership to prepare and submit without 
 })
 
 test('managed writer command fails closed when Extension authority is missing while untouched legacy remains compatible', async () => {
-  const externalUrl = 'https://chatgpt.com/c/writer-authority-missing'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000012'
   const make = conversationId => makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -1523,7 +1804,7 @@ test('managed writer command fails closed when Extension authority is missing wh
 })
 
 test('writer epoch claim fences stale browser commands at the Extension sink', async () => {
-  const externalUrl = 'https://chatgpt.com/c/writer-epoch-fence'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000013'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -1565,7 +1846,7 @@ test('writer epoch claim fences stale browser commands at the Extension sink', a
 test('writer epoch claim is serialized behind an older in-flight writer command', async () => {
   let releasePrepare
   const prepareGate = new Promise(resolve => { releasePrepare = resolve })
-  const externalUrl = 'https://chatgpt.com/c/writer-epoch-order'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000014'
   const harness = makeHarness({
     prepareGate,
     storage: {
@@ -1613,7 +1894,7 @@ test('writer_quiesce waits for a content-script promise after caller timeout and
   let releasePrepare
   const prepareGate = new Promise(resolve => { releasePrepare = resolve })
   t.after(() => releasePrepare())
-  const externalUrl = 'https://chatgpt.com/c/quiesce-late-effect'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000015'
   const harness = makeHarness({
     prepareGate, expirePrepare: true,
     storage: {
@@ -1706,15 +1987,15 @@ test('writer epoch claim waits for the actual timed-out content-script promise b
     prepareGate: new Promise(resolve => { releasePrepare = resolve }), expirePrepare: true,
     storage: {
       'writer:authority': { version: 1, epoch: 3 },
-      'conversation:conv_claim_drain': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/claim-drain' }
+      'conversation:conv_claim_drain': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000016' }
     },
     windows: [{ id: 10 }],
-    tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/c/claim-drain' }]
+    tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000016' }]
   })
   t.after(() => releasePrepare())
   const failed = await harness.request('conversation_send', {
     conversationId: 'conv_claim_drain', turnId: 'turn_timeout', requestId: 'claim-drain-send',
-    text: 'held old writer', externalUrl: 'https://chatgpt.com/c/claim-drain', writerEpoch: 3
+    text: 'held old writer', externalUrl: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000016', writerEpoch: 3
   })
   assert.equal(failed.errorCode, 'DELIVERY_UNCERTAIN')
   await harness.sendNativeMessage({ kind: 'request', requestId: 'claim-drain', method: 'writer_epoch_claim', params: { writerEpoch: 4 } })
@@ -1762,16 +2043,16 @@ test('writer quiesce and epoch claim barriers block extension reload while actua
       stopGate: new Promise(resolve => { releaseStop = resolve }), fastStopTimeout: true,
       storage: {
         'writer:authority': { version: 1, epoch: 3 },
-        'conversation:conv_barrier_reload': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/barrier-reload' }
+        'conversation:conv_barrier_reload': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000017' }
       },
       windows: [{ id: 10 }],
-      tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/c/barrier-reload', generating: true, userMessageId: 'user-barrier' }]
+      tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000017', generating: true, userMessageId: 'user-barrier' }]
     })
     t.after(() => releaseStop())
     assert.equal((await harness.request('conversation_stop', {
       conversationId: 'conv_barrier_reload', turnId: 'turn_timeout', requestId: 'barrier-reload-stop',
       expected: { userMessageId: 'user-barrier', assistantMessageId: null },
-      externalUrl: 'https://chatgpt.com/c/barrier-reload', writerEpoch: 3
+      externalUrl: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000017', writerEpoch: 3
     })).errorCode, 'DELIVERY_UNCERTAIN')
     await harness.sendNativeMessage({
       kind: 'request', requestId: 'held-barrier', method, params: { writerEpoch: method === 'writer_quiesce' ? 3 : 4 }
@@ -2043,7 +2324,7 @@ test('writer_quiesce validates current durable epoch without changing authority'
 })
 
 test('writer epoch fences every Sidecar browser mutation command class', async () => {
-  const externalUrl = 'https://chatgpt.com/c/writer-epoch-all-mutations'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000018'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2072,7 +2353,7 @@ test('writer epoch fences every Sidecar browser mutation command class', async (
 })
 
 test('send persists pending state before the irreversible submit click', async () => {
-  const externalUrl = 'https://chatgpt.com/c/prepared-before-submit'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000019'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2101,7 +2382,7 @@ test('send persists pending state before the irreversible submit click', async (
 })
 
 test('send preserves recoverable pending state when submit response is lost during navigation', async () => {
-  const externalUrl = 'https://chatgpt.com/c/submit-response-lost'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000020'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2126,7 +2407,7 @@ test('send preserves recoverable pending state when submit response is lost duri
 })
 
 test('webgpt shift probe reuses an existing ChatGPT tab without creating a tab', async () => {
-  const externalUrl = 'https://chatgpt.com/c/profile-test'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000021'
   const harness = makeHarness({
     storage: { window0: { windowId: 10 } },
     windows: [{ id: 10 }],
@@ -2146,7 +2427,7 @@ test('webgpt shift probe reuses an existing ChatGPT tab without creating a tab',
 
 test('webgpt shift probe prefers a managed ChatGPT tab over an active unmanaged tab', async () => {
   const managedUrl = 'https://chatgpt.com/g/g-p-project/project'
-  const unmanagedUrl = 'https://chatgpt.com/c/unmanaged-active'
+  const unmanagedUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000022'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2168,8 +2449,8 @@ test('webgpt shift probe prefers a managed ChatGPT tab over an active unmanaged 
 })
 
 test('webgpt shift probe targets an exact managed conversation when target_url is provided', async () => {
-  const targetUrl = 'https://chatgpt.com/g/g-p-project/c/thread-target'
-  const otherUrl = 'https://chatgpt.com/g/g-p-project/c/thread-other'
+  const targetUrl = 'https://chatgpt.com/g/g-p-project/c/10000000-0000-4000-8000-000000000023'
+  const otherUrl = 'https://chatgpt.com/g/g-p-project/c/10000000-0000-4000-8000-000000000024'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2196,7 +2477,7 @@ test('webgpt shift probe targets an exact managed conversation when target_url i
 })
 
 test('webgpt shift probe targets the exact allocated managed tab when target_tab_id is provided', async () => {
-  const firstUrl = 'https://chatgpt.com/g/g-p-project/c/thread-first'
+  const firstUrl = 'https://chatgpt.com/g/g-p-project/c/10000000-0000-4000-8000-000000000025'
   const childUrl = 'https://chatgpt.com/g/g-p-project/project'
   const harness = makeHarness({
     storage: {
@@ -2225,10 +2506,10 @@ test('webgpt shift probe targets the exact allocated managed tab when target_tab
 
 test('webgpt shift probe targets an explicit unmanaged tab in a different window without window0', async () => {
   const harness = makeHarness({
-    storage: { 'conversation:conv_other': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/other' } },
+    storage: { 'conversation:conv_other': { windowId: 10, tabId: 20, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000002' } },
     windows: [{ id: 10 }, { id: 11 }],
     tabs: [
-      { id: 20, windowId: 10, url: 'https://chatgpt.com/c/other', active: true },
+      { id: 20, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000002', active: true },
       { id: 21, windowId: 11, url: 'https://chatgpt.com/', active: false }
     ]
   })
@@ -2259,11 +2540,11 @@ test('webgpt shift probe rejects an explicit tab when target_url names another p
   const harness = makeHarness({
     storage: { window0: { windowId: 10 } },
     windows: [{ id: 10 }],
-    tabs: [{ id: 21, windowId: 10, url: 'https://chatgpt.com/c/actual', active: true }]
+    tabs: [{ id: 21, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000026', active: true }]
   })
 
   const response = await harness.request('webgpt_shift_test', {
-    target: 'Medium', target_tab_id: 21, target_url: 'https://chatgpt.com/c/expected'
+    target: 'Medium', target_tab_id: 21, target_url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000027'
   })
 
   assert.equal(response.ok, false)
@@ -2274,7 +2555,7 @@ test('webgpt shift probe rejects an explicit tab when target_url names another p
 test('webgpt shift probe rejects arbitrary ChatGPT routes and a missing explicit tab without fallback', async () => {
   for (const target of [
     { id: 21, url: 'https://chatgpt.com/settings' },
-    { id: 21, url: 'https://chatgpt.com/c/actual/extra' },
+    { id: 21, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000026/extra' },
     { id: 21, url: 'https://example.com/' },
     null
   ]) {
@@ -2293,7 +2574,7 @@ test('webgpt shift probe rejects arbitrary ChatGPT routes and a missing explicit
 })
 
 test('webgpt shift probe bounds a missing content-script response', async () => {
-  const externalUrl = 'https://chatgpt.com/c/profile-test'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000021'
   const harness = makeHarness({
     storage: { window0: { windowId: 10 } },
     windows: [{ id: 10 }],
@@ -2316,7 +2597,7 @@ test('webgpt shift probe bounds a missing content-script response', async () => 
 })
 
 test('send reloads a matching tab whose content script was invalidated by extension reload', async () => {
-  const externalUrl = 'https://chatgpt.com/c/pre-reload-123'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000028'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10, sentinelTabId: 19 },
@@ -2347,7 +2628,7 @@ test('send reloads a matching tab whose content script was invalidated by extens
 })
 
 test('send reattaches a project conversation to an already-open matching project thread', async () => {
-  const externalUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-456'
+  const externalUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/10000000-0000-4000-8000-000000000029'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10, sentinelTabId: 19 },
@@ -2374,7 +2655,7 @@ test('send reattaches a project conversation to an already-open matching project
 })
 
 test('send reattaches a stale tab binding to an already-open matching ChatGPT conversation', async () => {
-  const externalUrl = 'https://chatgpt.com/c/persistent-123'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000030'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10, sentinelTabId: 19 },
@@ -2405,7 +2686,7 @@ test('send reattaches a stale tab binding to an already-open matching ChatGPT co
 })
 
 test('send rehomes a legacy conversation binding out of the human window into the owned automation window', async () => {
-  const externalUrl = 'https://chatgpt.com/c/legacy-human-bound'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000031'
   const sentinelUrl = 'chrome-extension://cfifihieaffhniimpimnfmignbbdaalb/automation-window.html'
   const harness = makeHarness({
     storage: {
@@ -2439,14 +2720,14 @@ test('send rehomes a legacy conversation binding out of the human window into th
 })
 
 test('send reopens the stable ChatGPT conversation URL when no matching tab remains', async () => {
-  const externalUrl = 'https://chatgpt.com/c/persistent-456'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000032'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
       'conversation:conv_existing': { windowId: 10, tabId: 20, url: externalUrl }
     },
     windows: [{ id: 10 }],
-    tabs: [{ id: 31, windowId: 10, url: 'https://chatgpt.com/c/unrelated' }]
+    tabs: [{ id: 31, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000033' }]
   })
 
   const response = await harness.request('conversation_send', {
@@ -2464,7 +2745,7 @@ test('send reopens the stable ChatGPT conversation URL when no matching tab rema
 })
 
 test('send replaces stale physical window0 with an owned sentinel window and reopens the exact conversation in a child tab', async () => {
-  const externalUrl = 'https://chatgpt.com/c/persistent-789'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000034'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2498,7 +2779,7 @@ test('send replaces stale physical window0 with an owned sentinel window and reo
 })
 
 test('terminal events stay in a durable outbox until the native host acknowledges them', async () => {
-  const externalUrl = 'https://chatgpt.com/c/outbox-123'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000035'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2543,7 +2824,7 @@ test('terminal events stay in a durable outbox until the native host acknowledge
 })
 
 test('replayed durable terminal event clears the matching ghost pending turn', async () => {
-  const externalUrl = 'https://chatgpt.com/c/durable-replay'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000036'
   const eventId = 'terminal:conv_existing:turn_replay:response_completed'
   const terminalEvent = {
     type: 'response_completed',
@@ -2580,13 +2861,13 @@ test('replayed durable terminal event clears the matching ghost pending turn', a
 })
 
 test('conversation state observation wraps exact bound-tab facts in v1 envelope', async () => {
-  const externalUrl = 'https://chatgpt.com/g/g-p-project/c/exact-state'
+  const externalUrl = 'https://chatgpt.com/g/g-p-project/c/10000000-0000-4000-8000-000000000037'
   const harness = makeHarness({
     storage: { window0: { windowId: 10 }, 'conversation:conv_state': { windowId: 10, tabId: 30, url: externalUrl } },
     windows: [{ id: 10 }],
     tabs: [
       { id: 30, windowId: 10, url: externalUrl, userMessageId: 'user-1', assistantMessageId: 'assistant-1', assistantText: 'FULL RESPONSE', generating: false, terminal: true, body: 'substantive', humanGate: false },
-      { id: 31, windowId: 10, url: 'https://chatgpt.com/c/other', userMessageId: 'user-1', assistantText: 'WRONG' }
+      { id: 31, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000002', userMessageId: 'user-1', assistantText: 'WRONG' }
     ]
   })
   const response = await harness.request('conversation_state_observe', {
@@ -2610,7 +2891,7 @@ test('conversation state observation wraps exact bound-tab facts in v1 envelope'
 })
 
 test('latest human state observation preserves the v1 envelope and forwards the explicit read-only proof request', async () => {
-  const externalUrl = 'https://chatgpt.com/c/exact-latest-state'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000038'
   const latestUser = '40000000-0000-4000-8000-000000000001'
   const harness = makeHarness({
     storage: { 'conversation:conv_state': { windowId: 10, tabId: 30, url: externalUrl } },
@@ -2644,7 +2925,7 @@ test('latest human state observation preserves the v1 envelope and forwards the 
 })
 
 test('latest human state observation reports a typed missing-known-anchor diagnostic without extending v1 facts', async () => {
-  const externalUrl = 'https://chatgpt.com/c/exact-latest-anchor-missing'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000039'
   const harness = makeHarness({ storage: { 'conversation:conv_state': { windowId: 10, tabId: 30, url: externalUrl } },
     windows: [{ id: 10 }], tabs: [{ id: 30, windowId: 10, url: externalUrl, stateReadable: false, stateReason: 'human_turn_anchor_unavailable' }] })
   const response = await harness.request('conversation_state_observe', { conversationId: 'conv_state', externalUrl,
@@ -2657,7 +2938,7 @@ test('latest human state observation reports a typed missing-known-anchor diagno
 })
 
 test('latest human state observation rejects a synthetic user identity at the worker boundary', async () => {
-  const externalUrl = 'https://chatgpt.com/c/exact-latest-invalid'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000040'
   const harness = makeHarness({ storage: { 'conversation:conv_state': { windowId: 10, tabId: 30, url: externalUrl } },
     windows: [{ id: 10 }], tabs: [{ id: 30, windowId: 10, url: externalUrl, userMessageId: 'synthetic-new-user', body: 'empty' }] })
   const response = await harness.request('conversation_state_observe', { conversationId: 'conv_state', externalUrl,
@@ -2668,7 +2949,7 @@ test('latest human state observation rejects a synthetic user identity at the wo
 })
 
 test('conversation state observation fails closed when expected user identity is absent', async () => {
-  const externalUrl = 'https://chatgpt.com/c/exact-state-missing'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000041'
   const harness = makeHarness({
     storage: { window0: { windowId: 10 }, 'conversation:conv_state': { windowId: 10, tabId: 30, url: externalUrl } },
     windows: [{ id: 10 }],
@@ -2685,7 +2966,7 @@ test('conversation state observation fails closed when expected user identity is
 })
 
 test('conversation snapshot reads only the exact already-bound conversation tab', async () => {
-  const externalUrl = 'https://chatgpt.com/g/g-p-project/c/exact-read'
+  const externalUrl = 'https://chatgpt.com/g/g-p-project/c/10000000-0000-4000-8000-000000000042'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2694,7 +2975,7 @@ test('conversation snapshot reads only the exact already-bound conversation tab'
     windows: [{ id: 10 }],
     tabs: [
       { id: 30, windowId: 10, url: externalUrl, assistantText: 'FULL RESPONSE', generating: false },
-      { id: 31, windowId: 10, url: 'https://chatgpt.com/c/other', assistantText: 'WRONG', generating: false }
+      { id: 31, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000002', assistantText: 'WRONG', generating: false }
     ]
   })
 
@@ -2717,7 +2998,7 @@ test('conversation snapshot reads only the exact already-bound conversation tab'
 })
 
 test('need_continue stays in the durable terminal outbox until native acknowledgement', async () => {
-  const externalUrl = 'https://chatgpt.com/c/need-continue-123'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000043'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2788,7 +3069,7 @@ test('reload remains scheduled when the accepted native response transport is lo
 })
 
 test('reload admission blocks a terminal event that arrives before the deferred runtime reload', async () => {
-  const externalUrl = 'https://chatgpt.com/c/reload-race'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000044'
   const harness = makeHarness({
     deferReloadTimer: true,
     storage: {
@@ -2842,7 +3123,7 @@ test('reload admission blocks a terminal event that arrives before the deferred 
 })
 
 test('terminal runtime events acknowledge only after the durable outbox write', async () => {
-  const externalUrl = 'https://chatgpt.com/c/durable-ack'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000045'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2878,7 +3159,7 @@ test('terminal runtime events acknowledge only after the durable outbox write', 
 })
 
 test('terminal event from the wrong tab cannot mutate attachment, pending, or outbox', async () => {
-  const externalUrl = 'https://chatgpt.com/c/right-thread'
+  const externalUrl = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000046'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2894,7 +3175,7 @@ test('terminal event from the wrong tab cannot mutate attachment, pending, or ou
     windows: [{ id: 10 }],
     tabs: [
       { id: 30, windowId: 10, url: externalUrl },
-      { id: 31, windowId: 10, url: 'https://chatgpt.com/c/wrong-thread' }
+      { id: 31, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000047' }
     ]
   })
 
@@ -2905,9 +3186,9 @@ test('terminal event from the wrong tab cannot mutate attachment, pending, or ou
       conversationId: 'conv_existing',
       turnId: 'turn_right',
       text: 'wrong source',
-      externalUrl: 'https://chatgpt.com/c/wrong-thread'
+      externalUrl: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000047'
     }
-  }, { tab: { id: 31, windowId: 10, url: 'https://chatgpt.com/c/wrong-thread' } })
+  }, { tab: { id: 31, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000047' } })
 
   assert.equal(response?.durable, false)
   assert.equal(response?.reason, 'stale_source')
@@ -2919,7 +3200,7 @@ test('terminal event from the wrong tab cannot mutate attachment, pending, or ou
 
 test('navigation recovery claims a newer monitor owner and rejects the stale project monitor terminal', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-project123-agent/project'
-  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-owned'
+  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/10000000-0000-4000-8000-000000000048'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -2980,7 +3261,7 @@ test('navigation recovery claims a newer monitor owner and rejects the stale pro
 })
 
 test('closed submitted pending can be claimed by a new tab for the exact same conversation', async () => {
-  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-rebind'
+  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/10000000-0000-4000-8000-000000000049'
   const harness = makeHarness({
     storage: {
       'conversation:conv_existing': { windowId: 10, tabId: 30, url: threadUrl },
@@ -3018,7 +3299,7 @@ test('closed submitted pending can be claimed by a new tab for the exact same co
 })
 
 test('submitted pending cannot be stolen while its original tab is still live', async () => {
-  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-live-owner'
+  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/10000000-0000-4000-8000-000000000050'
   const harness = makeHarness({
     storage: {
       'conversation:conv_existing': { windowId: 10, tabId: 30, url: threadUrl },
@@ -3057,7 +3338,7 @@ test('submitted pending cannot be stolen while its original tab is still live', 
 
 test('same-document thread URL transition claims recovery ownership and updates attachment', async () => {
   const projectUrl = 'https://chatgpt.com/g/g-p-project123-agent/project'
-  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/thread-spa'
+  const threadUrl = 'https://chatgpt.com/g/g-p-project123-agent/c/10000000-0000-4000-8000-000000000051'
   const harness = makeHarness({
     storage: {
       window0: { windowId: 10 },
@@ -3103,7 +3384,7 @@ test('completion events persist the canonical ChatGPT URL before forwarding the 
       }
     },
     windows: [{ id: 10 }],
-    tabs: [{ id: 30, windowId: 10, url: 'https://chatgpt.com/c/canonical-123' }]
+    tabs: [{ id: 30, windowId: 10, url: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000052' }]
   })
 
   await harness.emitRuntimeMessage({
@@ -3113,13 +3394,13 @@ test('completion events persist the canonical ChatGPT URL before forwarding the 
       conversationId: 'conv_existing',
       turnId: 'turn_4',
       text: 'done',
-      externalUrl: 'https://chatgpt.com/c/canonical-123'
+      externalUrl: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000052'
     }
   }, { tab: { id: 30, windowId: 10 } })
 
   assert.equal(
     harness.storageState['conversation:conv_existing'].url,
-    'https://chatgpt.com/c/canonical-123'
+    'https://chatgpt.com/c/10000000-0000-4000-8000-000000000052'
   )
   assert.equal(harness.storageState['conversation:conv_existing'].tabId, 30)
   assert.equal(harness.storageState['pending:conv_existing'], undefined)
