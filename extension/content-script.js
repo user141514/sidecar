@@ -1277,7 +1277,7 @@ function processSidecarMessage(message, sender, sendResponse) {
   if (message?.type === 'sidecar_effect_document') {
     void chrome.runtime.sendMessage({ kind: 'content_effect_document', token: message.token }).then(identity => {
       if (identity?.token === message.token && Number.isInteger(identity.tabId) &&
-          typeof identity.documentId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(identity.documentId)) {
+          typeof identity.documentId === 'string' && /^[0-9a-f]{32}$/i.test(identity.documentId)) {
         contentEffects.documentId = identity.documentId
         contentEffects.tabId = identity.tabId
         sendResponse(identity)

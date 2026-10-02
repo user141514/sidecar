@@ -191,8 +191,9 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         sentToTabs.push({ tabId, message, options, storageSnapshot: structuredClone(storageState) })
         const sender = {
           id: chrome.runtime.id, tab: { ...tab }, frameId: 0,
-          documentId: tab.documentId ?? '30000000-0000-4000-8000-' + String(tabId).padStart(12, '0')
+          documentId: tab.documentId ?? '30000000000040008000' + String(tabId).padStart(12, '0')
         }
+        if (options.documentId !== undefined && (typeof options.documentId !== 'string' || !/^[0-9a-f]{32}$/i.test(options.documentId))) throw new Error('Invalid Chromium documentId')
         if (options.documentId && options.documentId !== sender.documentId) throw new Error('Exact target document is unavailable')
         const runtime = async notification => {
           let response
@@ -1690,11 +1691,43 @@ test('writer quiesce and epoch claim barriers block extension reload while actua
   }
 })
 
-const effectDocument = '30000000-0000-4000-8000-000000000020'
+const effectDocument = '30000000000040008000000000000020'
 const heldContentEffect = {
   version: 1, token: 'held-effect-token', tabId: 20, documentId: effectDocument,
   registrationId: writerRegistration, writerEpoch: 3, method: 'conversation_stop', instanceId: 'old-worker'
 }
+
+test('content document handshake accepts Chromium 32-hex IDs and preserves exact case through journal and targeting', async () => {
+  const documentId = 'ABCDEF1234567890ABCDEF1234567890'
+  const harness = refreshHarness({ tab: { documentId }, loseContentCompletion: true })
+  const shifted = await harness.request('webgpt_shift_test', { target: 'Medium', target_tab_id: 20,
+    writerEpoch: 3, registrationId: writerRegistration })
+  assert.equal(shifted.ok, true)
+  const dispatched = harness.sentToTabs.find(({ message }) => message.type === 'webgpt_shift_test')
+  assert.equal(dispatched.options.documentId, documentId)
+  assert.equal(dispatched.message.contentEffect.documentId, documentId)
+  assert.equal(dispatched.message.contentEffect.registrationId, writerRegistration)
+  const effect = dispatched.message.contentEffect
+  assert.equal(harness.storageState['content-effect:' + effect.token].documentId, documentId)
+  const complete = await harness.emitRuntimeMessage({ kind: 'content_effect_complete', effect }, {
+    id: 'cfifihieaffhniimpimnfmignbbdaalb', tab: { id: 20 }, frameId: 0, documentId
+  })
+  assert.equal(complete.settled, true)
+  assert.equal(harness.storageState['content-effect:' + effect.token], undefined)
+})
+
+test('content document handshake rejects malformed Chromium IDs and untrusted sender metadata', async () => {
+  const harness = refreshHarness()
+  const trusted = { id: 'cfifihieaffhniimpimnfmignbbdaalb', tab: { id: 20, url: refreshUrl }, frameId: 0, documentId: effectDocument }
+  for (const sender of [
+    ...['30000000-0000-4000-8000-000000000020', 'a'.repeat(31), 'a'.repeat(33), 'g'.repeat(32), '', null, 12].map(documentId => ({ ...trusted, documentId })),
+    { ...trusted, id: 'another-extension' }, { ...trusted, frameId: 1 }, { ...trusted, tab: { id: '20' } }
+  ]) {
+    const result = await harness.emitRuntimeMessage({ kind: 'content_effect_document', token: 'probe' }, sender)
+    assert.equal(result.ready, false)
+    assert.equal(result.documentId, undefined)
+  }
+})
 
 test('unresolved content effects prevent refresh despite a fresh inactive DOM and preserve read-only observations', async () => {
   const harness = refreshHarness({ storage: { 'content-effect:held-effect-token': heldContentEffect } })
@@ -1871,6 +1904,8 @@ test('only exact trusted content completion clears a durable effect after worker
     [heldContentEffect, { ...exactSender, tab: { id: 21 } }],
     [heldContentEffect, { ...exactSender, documentId: effectDocument.replace('0020', '0021') }],
     [heldContentEffect, { ...exactSender, frameId: 1 }],
+    [heldContentEffect, { ...exactSender, id: 'another-extension' }],
+    ...['30000000-0000-4000-8000-000000000020', 'a'.repeat(31), 'a'.repeat(33), 'g'.repeat(32)].map(documentId => [heldContentEffect, { ...exactSender, documentId }]),
     [{ ...heldContentEffect, registrationId: '20000000-0000-4000-8000-000000000094' }, exactSender],
     [{ ...heldContentEffect, writerEpoch: 2 }, exactSender]
   ]) {

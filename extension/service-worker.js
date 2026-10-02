@@ -110,7 +110,7 @@ function contentEffectIdentityMatches(left, right) {
 
 function trustedContentSender(sender) {
   return sender?.id === chrome.runtime.id && Number.isInteger(sender.tab?.id) && sender.frameId === 0 &&
-    typeof sender.documentId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sender.documentId)
+    typeof sender.documentId === 'string' && /^[0-9a-f]{32}$/i.test(sender.documentId)
 }
 
 async function settleContentEffect(effect, sender) {
@@ -141,7 +141,7 @@ async function recoverSettledContentEffects() {
   const pending = Object.entries(stored).filter(([key]) => key.startsWith(CONTENT_EFFECT_PREFIX))
   await Promise.all(pending.map(async ([, effect]) => {
     if (!Number.isInteger(effect?.tabId) || typeof effect?.documentId !== 'string' ||
-        !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(effect.documentId)) return
+        !/^[0-9a-f]{32}$/i.test(effect.documentId)) return
     try {
       // This exact-document read retries only already-settled completion
       // metadata. The trusted runtime completion handler remains the clearer.
@@ -232,7 +232,7 @@ async function boundedMessage(tabId, message, timeoutMs, onLateResponse, writerP
       const token = crypto.randomUUID()
       const document = await boundedMessage(tabId, { type: 'sidecar_effect_document', token }, 2000)
       if (document?.token !== token || document.tabId !== tabId ||
-          typeof document.documentId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(document.documentId) ||
+          typeof document.documentId !== 'string' || !/^[0-9a-f]{32}$/i.test(document.documentId) ||
           !webGptShiftPageUrl(document.url)) throw deliveryUncertain('Exact content document unavailable')
       await assertNoUnsettledEffectsForTab(tabId)
       effect = {

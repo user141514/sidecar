@@ -90,7 +90,7 @@ async function runSubmitFixture({ clickTakesEffect, requestSubmitTakesEffect = f
   })
 }
 
-async function runStopFixture({ expectedUserMessageId = 'user-active', expectedAssistantMessageId = null, previousAssistant = false, humanGate = false, contentEffect = null, completionInitiallyUnavailable = false, reinjectAfterCompletionFailure = false, dropOriginalResponse = false, probeAfterCompletionFailure = null } = {}) {
+async function runStopFixture({ expectedUserMessageId = 'user-active', expectedAssistantMessageId = null, previousAssistant = false, humanGate = false, contentEffect = null, completionInitiallyUnavailable = false, reinjectAfterCompletionFailure = false, dropOriginalResponse = false, probeAfterCompletionFailure = null, handshakeDocumentId = '30000000000040008000000000000020' } = {}) {
   let runtimeListener = null
   let generating = true
   let clicks = 0
@@ -162,7 +162,7 @@ async function runStopFixture({ expectedUserMessageId = 'user-active', expectedA
       runtime: {
         async sendMessage(message) {
           if (message.kind === 'content_effect_document') return {
-            token: message.token, tabId: 20, documentId: '30000000-0000-4000-8000-000000000020',
+            token: message.token, tabId: 20, documentId: handshakeDocumentId,
             url: 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000041'
           }
           if (message.kind === 'content_effect_complete') {
@@ -229,9 +229,28 @@ async function runStopFixture({ expectedUserMessageId = 'user-active', expectedA
 }
 
 const journalEffect = {
-  version: 1, token: 'content-stop-token', tabId: 20, documentId: '30000000-0000-4000-8000-000000000020',
+  version: 1, token: 'content-stop-token', tabId: 20, documentId: '30000000000040008000000000000020',
   registrationId: '20000000-0000-4000-8000-000000000095', writerEpoch: 3, method: 'conversation_stop', instanceId: 'old-worker'
 }
+
+test('content handshake preserves Chromium 32-hex document identity exactly', async () => {
+  const documentId = 'ABCDEF1234567890ABCDEF1234567890'
+  const effect = { ...journalEffect, documentId }
+  const result = await runStopFixture({ contentEffect: effect, handshakeDocumentId: documentId })
+  assert.equal(result.response.accepted, true)
+  assert.equal(result.clicks, 1)
+  assert.equal(result.response.contentEffectSettled.documentId, documentId)
+  assert.equal(result.successfulCompletions[0].effect.documentId, documentId)
+})
+
+test('content handshake rejects hyphenated UUID and malformed Chromium document identities without effects', async () => {
+  for (const documentId of ['30000000-0000-4000-8000-000000000020', 'a'.repeat(31), 'a'.repeat(33), 'g'.repeat(32), '', null, 12]) {
+    const result = await runStopFixture({ contentEffect: { ...journalEffect, documentId }, handshakeDocumentId: documentId })
+    assert.equal(result.response.accepted, false)
+    assert.equal(result.clicks, 0)
+    assert.equal(result.successfulCompletions.length, 0)
+  }
+})
 
 test('content effect completion reports exact identity only after the guarded DOM operation settles', async () => {
   const result = await runStopFixture({ contentEffect: journalEffect })
