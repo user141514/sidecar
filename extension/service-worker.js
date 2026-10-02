@@ -715,6 +715,17 @@ async function waitForProjectDraftSurface(tabId, expectedProjectUrl) {
   let lastUrl = null
   let lastError = null
   let reloaded = false
+  let reinjected = false
+  const sameProject = url => {
+    const projectUrl = projectHomeUrl(url)
+    return projectUrl !== null && chatGptPageUrl(projectUrl) === expectedRoute
+  }
+  const freshPage = page => page?.ready === true && page.buildId === globalThis.__sidecarBuildId && sameProject(page.url)
+  const currentProjectTab = async () => {
+    const current = await chrome.tabs.get(tabId)
+    if (current.id !== tabId || !sameProject(tabPageUrl(current))) throw new Error('Project draft target changed')
+    return current
+  }
   const deadline = Date.now() + 20_000
   while (Date.now() < deadline) {
     const tab = await chrome.tabs.get(tabId)
@@ -723,8 +734,9 @@ async function waitForProjectDraftSurface(tabId, expectedProjectUrl) {
     if (actualProjectUrl && chatGptPageUrl(actualProjectUrl) === expectedRoute) {
       try {
         const page = await boundedMessage(tabId, { type: 'sidecar_ping' }, Math.min(2000, Math.max(1, deadline - Date.now())))
-        if (page?.ready === true && page?.composerPresent === true) return actualProjectUrl
-        if (page?.ready === true && page?.composerPresent !== true && !reloaded) {
+        const current = await currentProjectTab()
+        if (freshPage(page) && page.composerPresent === true) return projectHomeUrl(tabPageUrl(current))
+        if (freshPage(page) && page.composerPresent !== true && !reloaded && !reinjected) {
           reloaded = true
           try {
             await chrome.tabs.reload(tabId)
@@ -734,6 +746,17 @@ async function waitForProjectDraftSurface(tabId, expectedProjectUrl) {
         }
       } catch (error) {
         lastError = error
+        if (!reinjected && /receiving end does not exist/i.test(error instanceof Error ? error.message : String(error)) && chrome.scripting?.executeScript) {
+          reinjected = true
+          await currentProjectTab()
+          await chrome.scripting.executeScript({
+            target: { tabId, frameIds: [0] }, files: ['build-info.js', 'content-script.js']
+          })
+          await currentProjectTab()
+          const page = await boundedMessage(tabId, { type: 'sidecar_ping' }, Math.min(2000, Math.max(1, deadline - Date.now())))
+          const current = await currentProjectTab()
+          if (freshPage(page) && page.composerPresent === true) return projectHomeUrl(tabPageUrl(current))
+        }
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 250))
@@ -949,16 +972,19 @@ async function inspectSupervision(params) {
   const persistentId = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)
   const assistantMessageId = snapshot?.assistantMessageId || null
   if (snapshot?.ready !== true || exactAdoptionUuid(snapshot.url) !== uuid ||
-      pageIdentity(snapshot.url) !== pageIdentity(tabPageUrl(tab)) ||
-      !persistentId(snapshot.userMessageId) || (assistantMessageId !== null && !persistentId(assistantMessageId))) {
+      pageIdentity(snapshot.url) !== pageIdentity(tabPageUrl(tab))) {
     return { found: false, reason: 'supervision_identity_mismatch' }
+  }
+  if (snapshot.readable !== true || !persistentId(snapshot.userMessageId) ||
+      (assistantMessageId !== null && !persistentId(assistantMessageId))) {
+    return { found: false, reason: 'persistent_turn_identity_unavailable' }
   }
   let current
   try { current = await chrome.tabs.get(tab.id) } catch { return { found: false, reason: 'exact_tab_unavailable' } }
   if (exactAdoptionUuid(tabPageUrl(current)) !== uuid || pageIdentity(tabPageUrl(current)) !== pageIdentity(snapshot.url)) {
     return { found: false, reason: 'supervision_target_changed' }
   }
-  return { found: true, url: snapshot.url, userMessageId: snapshot.userMessageId, assistantMessageId }
+  return { found: true, readable: true, url: snapshot.url, userMessageId: snapshot.userMessageId, assistantMessageId }
 }
 
 async function inspectAdoption(params) {

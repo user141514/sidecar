@@ -1340,7 +1340,17 @@ function dispatchSidecarMessage(message, _sender, sendResponse) {
   }
 
   if (message?.type === 'conversation_observe') {
-    sendResponse(writerObservation(null, message.authoritativeState !== true, message.authoritativeState !== true))
+    const observation = writerObservation(null, message.authoritativeState !== true, message.authoritativeState !== true)
+    if (message.authoritativeState === true) {
+      const current = readConversationStateObservation(observation.userMessageId, true)
+      observation.readable = current.readable === true && (current.assistantMessageId === null ||
+        (typeof current.assistantMessageId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(current.assistantMessageId)))
+      if (observation.readable) {
+        observation.userMessageId = current.userMessageId
+        observation.assistantMessageId = current.assistantMessageId
+      }
+    }
+    sendResponse(observation)
     return
   }
 

@@ -35,12 +35,13 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
 
 let harnessEffectToken = 0
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
   const tabMap = new Map(tabs.map((tab) => [tab.id, { ...tab }]))
   const nativeMessages = []
+  let draftClock = Date.now()
   const runtimeMessageListeners = []
   let tabUpdatedListener = null
   const sentToTabs = []
@@ -108,7 +109,10 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         scriptingCalls.push(options)
         if (Array.isArray(options?.files) && options.files.includes('content-script.js')) {
           const tabId = options?.target?.tabId
-          if (Number.isInteger(tabId)) staleContentScriptTabs.delete(tabId)
+          if (Number.isInteger(tabId)) {
+            staleContentScriptTabs.delete(tabId)
+            onContentScriptInjection?.(tabMap.get(tabId), staleContentScriptTabs)
+          }
         }
         return [{ result: webGptDiagnostic }]
       }
@@ -209,14 +213,18 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         try {
         const result = await (async () => {
         if (message.type === 'sidecar_ping') {
-          if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
+          if (staleContentScriptTabs.has(tabId)) {
+            onMissingContentPing?.(tab)
+            throw new Error('Could not establish connection. Receiving end does not exist.')
+          }
           if (completedEffectOnPing) await runtime({ kind: 'content_effect_complete', effect: completedEffectOnPing })
-          return { ready: true, url: tab.url, buildId: 'a'.repeat(64), composerPresent: tab.composerPresent === true }
+          return { ready: tab.pingReady !== false, url: tab.pingUrl ?? tab.url, buildId: tab.pingBuildId ?? 'a'.repeat(64), composerPresent: tab.composerPresent === true }
         }
         if (message.type === 'conversation_observe') {
           if (staleContentScriptTabs.has(tabId)) throw new Error('Could not establish connection. Receiving end does not exist.')
           return {
             ready: tab.observationReady !== false, url: tab.observedUrl ?? tab.url,
+            readable: Object.hasOwn(tab, 'observationReadable') ? tab.observationReadable : /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(tab.userMessageId ?? ''),
             allowed: tab.generating !== true, reason: tab.generating === true ? 'assistant_active' : null,
             userMessageId: tab.userMessageId ?? '', assistantMessageId: tab.assistantMessageId ?? ''
           }
@@ -253,6 +261,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           }
           tab.url = message.projectUrl
           tab.composerPresent = !projectDraftRequiresReload
+          if (projectOpenInvalidatesContent) staleContentScriptTabs.add(tabId)
           if (projectOpenChannelClosesAfterNavigation) {
             throw new Error('A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received')
           }
@@ -334,7 +343,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     },
     console,
     URL,
-    Date,
+    Date: fastProjectDraftClock ? class extends Date { static now() { draftClock += 1000; return draftClock } } : Date,
     Promise,
     Object,
     setTimeout(callback, ms) {
@@ -448,6 +457,7 @@ test('conversation_supervision_inspect discovers current persistent anchors on o
 
   assert.equal(inspected.ok, true)
   assert.equal(inspected.result.found, true)
+  assert.equal(inspected.result.readable, true)
   assert.equal(inspected.result.userMessageId, adoptionUser)
   assert.equal(inspected.result.assistantMessageId, null)
   assert.equal(inspected.result.url, adoptionTarget)
@@ -462,6 +472,8 @@ test('conversation_supervision_inspect fails closed for missing, ambiguous, unre
   for (const tabs of [
     [], [adoptionTab, { ...adoptionTab, id: 62 }],
     [{ ...adoptionTab, observationReady: false }],
+    [{ ...adoptionTab, observationReadable: false }],
+    [{ ...adoptionTab, observationReadable: undefined }],
     [{ ...adoptionTab, userMessageId: '' }],
     [{ ...adoptionTab, userMessageId: 'synthetic-user' }],
     [{ ...adoptionTab, assistantMessageId: 'synthetic-assistant' }],
@@ -471,6 +483,10 @@ test('conversation_supervision_inspect fails closed for missing, ambiguous, unre
     const inspected = await h.request('conversation_supervision_inspect', { externalUrl: adoptionTarget, writerEpoch: 3 })
     assert.equal(inspected.ok, true)
     assert.equal(inspected.result.found, false, JSON.stringify(tabs))
+    if (tabs.length === 1 && tabs[0].observationReady !== false && !tabs[0].observedUrl) {
+      assert.equal(inspected.result.reason, 'persistent_turn_identity_unavailable')
+    }
+    if (tabs.length === 1 && tabs[0].observedUrl) assert.equal(inspected.result.reason, 'supervision_identity_mismatch')
     assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length, 0)
   }
 })
@@ -1293,6 +1309,44 @@ test('conversation_create accepts Project navigation when the message channel cl
 
   assert.equal(response.ok, true)
   assert.equal(response.result.url, projectUrl)
+})
+
+test('conversation_create recovers one missing Project draft listener by exact-tab read-only reinjection', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const harness = makeHarness({ fastProjectDraftClock: true, projectOpenInvalidatesContent: true })
+  const response = await harness.request('conversation_create', { conversationId: 'conv_project_reinject', url: projectUrl })
+  assert.equal(response.ok, true)
+  assert.equal(response.result.url, projectUrl)
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.reloadedTabs.length, 0)
+  assert.equal(harness.sentToTabs.filter(({ message }) => message.type === 'project_open').length, 1)
+  assert.equal(harness.scriptingCalls.length, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.scriptingCalls[0])), {
+    target: { tabId: harness.createdTabs[0].id, frameIds: [0] }, files: ['build-info.js', 'content-script.js']
+  })
+})
+
+test('Project listener recovery is bounded once and denies changed target or stale fresh evidence without further effects', async () => {
+  for (const options of [
+    { onMissingContentPing(tab) { tab.url = 'https://chatgpt.com/g/g-p-other/project' } },
+    { onContentScriptInjection(tab) { tab.url = 'https://chatgpt.com/g/g-p-other/project' } },
+    { onContentScriptInjection(tab) { tab.pingBuildId = 'old-build' } },
+    { onContentScriptInjection(tab) { tab.pingUrl = 'https://chatgpt.com/g/g-p-other/project' } },
+    { onContentScriptInjection(tab) { tab.pingReady = false } },
+    { onContentScriptInjection(tab) { tab.composerPresent = false } },
+    { onContentScriptInjection(tab, stale) { stale.add(tab.id) } }
+  ]) {
+    const harness = makeHarness({ fastProjectDraftClock: true, projectOpenInvalidatesContent: true, ...options })
+    const response = await harness.request('conversation_create', { conversationId: 'conv_project_reinject_deny',
+      url: 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project' })
+    assert.equal(response.ok, false)
+    assert.equal(harness.storageState['conversation:conv_project_reinject_deny'], undefined)
+    assert.equal(harness.createdTabs.length, 1)
+    assert.equal(harness.reloadedTabs.length, 0)
+    assert.equal(harness.sentToTabs.filter(({ message }) => message.type === 'project_open').length, 1)
+    assert.ok(harness.scriptingCalls.length <= 1)
+    assert.equal(harness.scriptingCalls.some(call => call.target.tabId !== harness.createdTabs[0].id), false)
+  }
 })
 
 test('conversation_create reloads an incomplete Project draft surface once', async () => {

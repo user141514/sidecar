@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
-function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, interrupted = false, finalized = true, needsInputText = false, latestUserId = 'u-later', latestAssistantId = 'a-later', latestAssistantPresent = true } = {}) {
+function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, interrupted = false, finalized = true, needsInputText = false, latestUserId = 'u-later', latestAssistantId = 'a-later', latestAssistantPresent = true, messageDomUnavailable = false } = {}) {
   let listener, clicks = 0, pending = false, active = false, gate = false, submitted = false
   class Editor {
     _value = ''
@@ -39,8 +39,9 @@ function fixture({ normalizeWrites = false, bodyMode = null, laterTurn = false, 
       return null
     },
     querySelectorAll(s) {
-      if (s === '[data-message-author-role="assistant"]') return laterTurn && latestAssistantPresent ? [assistant, laterAssistant] : [assistant]
+      if (s === '[data-message-author-role="assistant"]') return messageDomUnavailable ? [] : laterTurn && latestAssistantPresent ? [assistant, laterAssistant] : [assistant]
       if (s === '[data-message-author-role="user"]') {
+        if (messageDomUnavailable) return []
         const base = submitted ? [user, submittedUser] : [user]
         return laterTurn ? [...base, laterUser] : base
       }
@@ -152,6 +153,30 @@ test('legacy writer guard still requires local terminal evidence', async () => {
   })
   assert.equal(prepared.prepared, false)
   assert.equal(f.clicks, 0)
+})
+
+test('authoritative supervision readability comes from fresh persistent current-turn DOM evidence', async () => {
+  const valid = fixture({ laterTurn: true, latestUserId: latestUserUuid, latestAssistantId: latestAssistantUuid })
+  const observed = await valid.call({ type: 'conversation_observe', authoritativeState: true })
+  assert.equal(observed.readable, true)
+  assert.equal(observed.userMessageId, latestUserUuid)
+  assert.equal(observed.assistantMessageId, latestAssistantUuid)
+  assert.equal(valid.clicks, 0)
+
+  const active = fixture({ laterTurn: true, latestUserId: latestUserUuid, latestAssistantPresent: false })
+  active.active = true
+  const pending = await active.call({ type: 'conversation_observe', authoritativeState: true })
+  assert.equal(pending.readable, true)
+  assert.equal(pending.allowed, false)
+  assert.equal(pending.assistantMessageId, null)
+
+  for (const options of [{}, { messageDomUnavailable: true }, { laterTurn: true, latestUserId: latestUserUuid, latestAssistantId: 'synthetic-assistant' }]) {
+    const f = fixture(options)
+    const unreadable = await f.call({ type: 'conversation_observe', authoritativeState: true })
+    assert.equal(unreadable.ready, true)
+    assert.equal(unreadable.readable, false)
+    assert.equal(f.clicks, 0)
+  }
 })
 
 test('authoritative writer observation delegates lifecycle finality but preserves live effect safety', async () => {
