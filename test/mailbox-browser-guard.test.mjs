@@ -270,13 +270,19 @@ test('guarded prepare never overwrites an existing human draft', async () => {
   assert.equal(f.editor.value, 'human draft')
 })
 
-test('guarded send owns the composer representation produced synchronously by the editor', async () => {
+test('guarded send owns the rendered draft but a changed transmitted prompt remains uncertain', async () => {
   const f = fixture({ normalizeWrites: true })
   const prepared = await f.call({ type: 'conversation_prepare', guarded: true, turnId: 't1', text: 'line one\nline two', expected: { userMessageId: 'u1', assistantMessageId: 'a1' } })
   assert.equal(prepared.prepared, true)
+  assert.equal(f.editor.value, 'line one\n\nline two')
+  // This fixture changes the transmitted value, whereas the observed
+  // ProseMirror paragraph expansion changes only the editor's innerText.
   const submitted = await f.call({ type: 'conversation_submit', guarded: true, turnId: 't1' })
-  assert.equal(submitted.accepted, true)
-  assert.equal(f.clicks, 1)
+  assert.equal(submitted.accepted, false)
+  assert.equal(submitted.deliveryUncertain, true)
+  assert.equal(submitted.userMessageId, undefined)
+  assert.match(submitted.error, /no observable submission progress/i)
+  assert.equal(f.clicks, 1, 'the matching rendered draft must still pass its pre-click ownership guard')
 })
 
 test('matching prepared command clicks once and active generation or human gate never clicks', async () => {
