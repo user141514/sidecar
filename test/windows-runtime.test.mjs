@@ -5,7 +5,10 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { encodeNativeMessage } from '../src/native-messaging.mjs'
 
-const { name: serviceName } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+const { name: packageName } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+// The full Runtime distribution keeps the integrated service identity while
+// its package name distinguishes it from the source and standalone provider.
+const serviceName = packageName === 'conversation-sidecar-agent-runtime' ? 'conversation-sidecar' : packageName
 const serviceMarker = `"service":${JSON.stringify(serviceName)}`
 
 async function read(relativePath) {
