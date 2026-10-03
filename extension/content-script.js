@@ -3,6 +3,10 @@ try { globalThis.__sidecarContentRuntime?.dispose() } catch {
   // The prior listener belongs to an extension context Chrome has invalidated.
 }
 let contentDisposed = false
+let modeDocumentRetired = false
+const retireModeDocument = () => { modeDocumentRetired = true }
+const modeFenceInstalled = typeof globalThis.addEventListener === 'function'
+if (modeFenceInstalled) globalThis.addEventListener('pagehide', retireModeDocument)
 let preparedSend = null
 const contentBuildId = globalThis.__sidecarBuildId ?? 'unversioned'
 const contentEffects = globalThis.__sidecarContentEffects ??= { documentId: null, tabId: null, operations: new Map(), completed: new Map() }
@@ -14,6 +18,7 @@ globalThis.__sidecarContentRuntime = {
   readTurnObservation,
   dispose() {
     contentDisposed = true
+    globalThis.removeEventListener?.('pagehide', retireModeDocument)
     chrome.runtime.onMessage.removeListener?.(onSidecarMessage)
   }
 }
@@ -98,7 +103,7 @@ async function waitAndSubmit(beforeClick = null) {
       const form = button.closest?.('form')
       if (form && typeof form.requestSubmit === 'function') form.requestSubmit(button)
       else button.click()
-      for (let confirm = 0; confirm < 20; confirm += 1) {
+      for (let confirm = 0; confirm < 40; confirm += 1) {
         const latest = userMessages().at(-1)
         const userMessageId = persistentMessageId(latest)
         if (PERSISTENT_MESSAGE_UUID.test(userMessageId ?? '') && !baselineUserIds.has(userMessageId) &&
@@ -171,7 +176,7 @@ async function selectComposerMode(mode) {
   const deadline = Date.now() + 5000
   let controls = null, lastError = null
   while (Date.now() < deadline) {
-    if (contentDisposed) throw new Error('Content runtime was disposed')
+    if (contentDisposed || modeDocumentRetired) throw new Error('Composer mode document was retired')
     try {
       controls = findComposerModeControls()
     } catch (error) {
@@ -186,6 +191,7 @@ async function selectComposerMode(mode) {
   if (controls[mode].getAttribute('aria-pressed') === 'true') {
     return { selected: true, mode, url: location.href }
   }
+  if (contentDisposed || modeDocumentRetired) throw new Error('Composer mode document was retired')
   controls[mode].click()
   for (let attempt = 0; attempt < 20; attempt += 1) {
     await yieldWebGptUi()
@@ -195,6 +201,19 @@ async function selectComposerMode(mode) {
     }
   }
   throw new Error('Composer mode did not read back target: ' + mode)
+}
+
+function readComposerMode() {
+  try {
+    if (contentDisposed || modeDocumentRetired) throw new Error('Composer mode document was retired')
+    const controls = findComposerModeControls()
+    if (!controls) throw new Error('Composer mode is unavailable')
+    return { selected: true, mode: controls.chat.getAttribute('aria-pressed') === 'true' ? 'chat' : 'work',
+      url: location.href, buildId: contentBuildId }
+  } catch (error) {
+    return { selected: false, mode: null, url: location.href, buildId: contentBuildId,
+      error: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 function findToolsButton() {
@@ -1473,7 +1492,7 @@ async function reportContentEffectCompletion(completion) {
 
 function onSidecarMessage(message, sender, sendResponse) {
   if (contentDisposed) return
-  const completionProbe = ['sidecar_ping', 'sidecar_effect_document', 'conversation_observe', 'conversation_state_observe', 'conversation_snapshot'].includes(message?.type)
+  const completionProbe = ['sidecar_ping', 'sidecar_effect_document', 'conversation_mode_observe', 'conversation_observe', 'conversation_state_observe', 'conversation_snapshot'].includes(message?.type)
   const completions = completionProbe ? [...contentEffects.completed.values()] : []
   if (completions.length) {
     // A read-only probe can recover exhausted delivery retries. Its response
@@ -1494,7 +1513,7 @@ function processSidecarMessage(message, sender, sendResponse) {
           typeof identity.documentId === 'string' && /^[0-9a-f]{32}$/i.test(identity.documentId)) {
         contentEffects.documentId = identity.documentId
         contentEffects.tabId = identity.tabId
-        sendResponse(identity)
+        sendResponse({ ...identity, buildId: contentBuildId, modeDocumentFence: modeFenceInstalled && !modeDocumentRetired })
       } else sendResponse({ ready: false })
     }).catch(() => sendResponse({ ready: false }))
     return true
@@ -1581,6 +1600,11 @@ function dispatchSidecarMessage(message, _sender, sendResponse) {
       generating: isGenerating(),
       assistantText: bodySnapshot(last).bodyText
     })
+    return
+  }
+
+  if (message?.type === 'conversation_mode_observe') {
+    sendResponse(readComposerMode())
     return
   }
 

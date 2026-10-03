@@ -162,6 +162,158 @@ test('create selects the requested composer mode before publishing the draft bin
   assert.equal(h.storageState['conversation:mode-create'].mode, 'chat')
 })
 
+test('create mode channel-close reads the exact replacement document without another mode click', async () => {
+  const project = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const canonicalProject = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
+  for (const mode of ['chat', 'work']) {
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } },
+      modeSelectChannelClosesAfterNavigation: true, loseModeSelectCompletion: true,
+      modeSelectReplacement: { documentId: 'b'.repeat(32), url: canonicalProject } })
+    const created = await h.request('conversation_create', { conversationId: 'mode-reload', url: project, mode, writerEpoch: 3 })
+    assert.equal(created.ok, true, created.error)
+    assert.equal(created.result.mode, mode)
+    assert.equal(created.result.tabId, h.createdTabs[0].id)
+    assert.equal(created.result.url, canonicalProject)
+    const selection = h.sentToTabs.filter(entry => entry.message.type === 'conversation_mode_select')
+    const observations = h.sentToTabs.filter(entry => entry.message.type === 'conversation_mode_observe')
+    assert.equal(selection.length, 1)
+    assert.equal(observations.length, 1)
+    assert.notEqual(selection[0].message.contentEffect.documentId, 'b'.repeat(32))
+    assert.equal(observations[0].options.documentId, 'b'.repeat(32))
+    assert.equal(observations[0].message.contentEffect, undefined, 'readback is not a new effect')
+    assert.equal(h.storageState['conversation:mode-reload'].mode, mode)
+    const audit = h.storageState['effect-receipt:mode:' + selection[0].message.contentEffect.token]
+    assert.equal(audit.action, 'mode_select')
+    assert.equal(audit.resolution, 'post_navigation_readback')
+    assert.deepEqual(audit.effect, selection[0].message.contentEffect)
+    assert.equal(audit.proof.mode, mode)
+    assert.equal(audit.proof.documentId, 'b'.repeat(32))
+    assert.equal(Object.keys(h.storageState).some(key => key.startsWith('content-effect:')), false)
+    assert.ok(Object.keys(observations[0].storageSnapshot).some(key => key.startsWith('content-effect:')),
+      'the lost original completion must leave a real journal for exact mode reconciliation')
+    assert.equal(h.sentToTabs.some(entry => ['conversation_prepare', 'conversation_submit'].includes(entry.message.type)), false)
+    assert.equal(h.createdTabs.length, 1)
+    assert.equal(h.reloadedTabs.length, 0)
+  }
+})
+
+test('create mode channel-close fails closed for wrong mode target build original document or another unsettled effect', async () => {
+  const project = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
+  for (const fault of ['wrong-mode', 'wrong-target', 'wrong-dom-target', 'wrong-build', 'original-document', 'another-unsettled-effect', 'invalid-document', 'changed-intent']) {
+    const replacement = fault === 'original-document' ? null : { documentId: 'b'.repeat(32) }
+    if (fault === 'wrong-mode') replacement.mode = 'work'
+    if (fault === 'wrong-target') replacement.url = 'https://chatgpt.com/g/g-p-ffffffffffffffffffffffffffffffff/project'
+    if (fault === 'wrong-dom-target') replacement.modeObservedUrl = 'https://chatgpt.com/'
+    if (fault === 'wrong-build') replacement.modeBuildId = 'c'.repeat(64)
+    if (fault === 'invalid-document') replacement.documentId = 'temporary-document'
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } },
+      modeSelectChannelClosesAfterNavigation: true, modeSelectReplacement: replacement,
+      sortStorageKeys: fault === 'changed-intent', loseModeSelectCompletion: true,
+      onModeObservation(_tab, stored) {
+        if (fault === 'another-unsettled-effect') stored['content-effect:other-prepare'] = { version: 1, token: 'other-prepare', tabId: _tab.id, documentId: 'd'.repeat(32), registrationId: null, writerEpoch: 3, method: 'conversation_prepare', instanceId: 'other-instance' }
+        if (fault === 'changed-intent') {
+          const record = Object.values(stored).find(record => record?.method === 'conversation_mode_select')
+          record.modeIntent = { ...record.modeIntent, mode: 'work' }
+        }
+      } })
+    const created = await h.request('conversation_create', { conversationId: 'mode-denied', url: project, mode: 'chat', writerEpoch: 3 })
+    assert.equal(created.ok, false, fault)
+    assert.equal(h.storageState['conversation:mode-denied'], undefined, fault)
+    assert.equal(h.sentToTabs.filter(entry => entry.message.type === 'conversation_mode_select').length, 1, fault)
+    assert.equal(h.sentToTabs.some(entry => ['conversation_prepare', 'conversation_submit'].includes(entry.message.type)), false, fault)
+    if (fault === 'another-unsettled-effect') {
+      const selection = h.sentToTabs.find(entry => entry.message.type === 'conversation_mode_select')
+      assert.deepEqual(h.storageState['content-effect:' + selection.message.contentEffect.token], selection.message.contentEffect)
+    }
+  }
+})
+
+test('create mode replacement readback rejects a document that changes again before binding publication', async () => {
+  const project = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
+  const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } },
+    modeSelectChannelClosesAfterNavigation: true, modeSelectReplacement: { documentId: 'b'.repeat(32) },
+    onModeObservation(tab) { tab.documentId = 'c'.repeat(32) } })
+  const created = await h.request('conversation_create', { conversationId: 'mode-late-document', url: project, mode: 'chat', writerEpoch: 3 })
+  assert.equal(created.ok, false)
+  assert.equal(h.storageState['conversation:mode-late-document'], undefined)
+  assert.equal(h.sentToTabs.filter(entry => entry.message.type === 'conversation_mode_select').length, 1)
+})
+
+test('create mode normal failures never enter navigation readback or repeat the mode effect', async () => {
+  for (const error of ['mode unavailable', 'Content script response timeout: conversation_mode_select']) {
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } },
+      modeSelectError: error, modeSelectReplacement: { documentId: 'b'.repeat(32) } })
+    const created = await h.request('conversation_create', { conversationId: 'mode-normal-failure', mode: 'chat', writerEpoch: 3 })
+    assert.equal(created.ok, false)
+    assert.equal(h.storageState['conversation:mode-normal-failure'], undefined)
+    assert.equal(h.sentToTabs.filter(entry => entry.message.type === 'conversation_mode_select').length, 1)
+    assert.equal(h.sentToTabs.some(entry => entry.message.type === 'conversation_mode_observe'), false)
+  }
+})
+
+test('create mode requires same-build document fence capability before dispatching its effect', async () => {
+  for (const fault of [{ modeDocumentFence: false }, { modeDocumentBuildId: 'c'.repeat(64) }]) {
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, ...fault })
+    const created = await h.request('conversation_create', { conversationId: 'mode-fence-denied', mode: 'chat', writerEpoch: 3 })
+    assert.equal(created.ok, false)
+    assert.equal(h.storageState['conversation:mode-fence-denied'], undefined)
+    assert.equal(h.sentToTabs.some(entry => entry.message.type === 'conversation_mode_select'), false)
+    assert.equal(Object.keys(h.storageState).some(key => key.startsWith('content-effect:')), false)
+  }
+})
+
+test('closed legacy mode-only effect is audited by existing quiesce without claiming a selected mode', async () => {
+  const effect = { version: 1, token: 'legacy-closed-mode', tabId: 91, documentId: '9'.repeat(32),
+    registrationId: null, writerEpoch: 3, method: 'conversation_mode_select', instanceId: 'old-native-instance' }
+  const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 }, 'content-effect:legacy-closed-mode': effect } })
+  const quiesced = await h.request('writer_quiesce', { writerEpoch: 3 })
+  assert.equal(quiesced.ok, true, quiesced.error)
+  assert.equal(quiesced.result.quiescent, true)
+  assert.equal(h.storageState['content-effect:legacy-closed-mode'], undefined)
+  const audit = h.storageState['effect-receipt:mode:legacy-closed-mode']
+  assert.equal(audit.action, 'mode_select')
+  assert.equal(audit.resolution, 'closed_tab')
+  assert.equal(audit.phase, 'settled')
+  assert.equal(audit.proof.tabAbsent, true)
+  assert.deepEqual(audit.effect, effect)
+  assert.equal(Object.hasOwn(audit.proof, 'mode'), false, 'legacy mode is never inferred')
+  assert.equal(Object.hasOwn(audit.proof, 'target'), false, 'legacy target is never invented')
+  assert.equal(Object.hasOwn(audit, 'userMessageId'), false)
+  assert.equal((await h.request('writer_quiesce', { writerEpoch: 3 })).ok, true)
+  assert.equal(h.sentToTabs.length + h.reloadedTabs.length + h.createdTabs.length, 0)
+})
+
+test('closed mode cleanup preserves every other effect and unknown pending record', async () => {
+  const mode = { version: 1, token: 'closed-mode', tabId: 91, documentId: '9'.repeat(32),
+    registrationId: null, writerEpoch: 3, method: 'conversation_mode_select', instanceId: 'old-native-instance' }
+  const storage = { 'writer:authority': { version: 1, epoch: 3 }, 'content-effect:closed-mode': mode }
+  for (const method of ['conversation_prepare', 'conversation_submit', 'webgpt_shift_test', 'project_open']) {
+    storage['content-effect:' + method] = { ...mode, method, token: method }
+    storage['pending:' + method] = { conversationId: method, turnId: 'unknown-' + method, tabId: 91, phase: 'submitting' }
+  }
+  const original = structuredClone(storage)
+  const h = makeHarness({ storage })
+  const quiesced = await h.request('writer_quiesce', { writerEpoch: 3 })
+  assert.equal(quiesced.ok, false)
+  assert.equal(h.storageState['content-effect:closed-mode'], undefined)
+  assert.equal(h.storageState['effect-receipt:mode:closed-mode'].resolution, 'closed_tab')
+  for (const key of Object.keys(original).filter(key => key !== 'content-effect:closed-mode')) assert.deepEqual(h.storageState[key], original[key])
+})
+
+test('closed mode cleanup requires a valid exact record and tab absence and durable audit publication', async () => {
+  const effect = { version: 1, token: 'closed-mode-denied', tabId: 91, documentId: '9'.repeat(32),
+    registrationId: null, writerEpoch: 3, method: 'conversation_mode_select', instanceId: 'old-native-instance' }
+  for (const fault of ['live-tab', 'invalid-document', 'audit-storage-failed', 'clear-failed']) {
+    const original = fault === 'invalid-document' ? { ...effect, documentId: 'unknown' } : effect
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 }, 'content-effect:closed-mode-denied': original },
+      tabs: fault === 'live-tab' ? [{ id: 91, windowId: 9, url: 'https://chatgpt.com/' }] : [],
+      failModeAuditStorage: fault === 'audit-storage-failed', failContentEffectClear: fault === 'clear-failed' })
+    const quiesced = await h.request('writer_quiesce', { writerEpoch: 3 })
+    assert.equal(quiesced.ok, false, fault)
+    assert.deepEqual(h.storageState['content-effect:closed-mode-denied'], original, fault)
+  }
+})
+
 test('draft send retains its created mode and forwards exact expectedMode through prepare and submit', async () => {
   const project = 'https://chatgpt.com/g/g-p-test-subagents/project'
   for (const mode of ['chat', 'work']) {
@@ -903,7 +1055,7 @@ test('real host ledger and native retirement compose for legacy pending without 
   assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length + h.sentToTabs.length, 0)
 })
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null, fastConversationUrlClock = false, onSubmittedTabGet = null, submitPendingUrl = null, submitUserMessageId = '00000000-0000-4000-8000-000000000001', contentMessageProvider = null, submitResponseUrl = null, submitNewTabs = [], ...retirementFaults } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, modeSelectChannelClosesAfterNavigation = false, modeSelectReplacement = null, loseModeSelectCompletion = false, modeSelectError = null, onModeObservation = null, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null, fastConversationUrlClock = false, onSubmittedTabGet = null, submitPendingUrl = null, submitUserMessageId = '00000000-0000-4000-8000-000000000001', contentMessageProvider = null, submitResponseUrl = null, submitNewTabs = [], ...retirementFaults } = {}) {
   // Chrome's storage dictionary roundtrip does not preserve object insertion order.
   const storageRoundTrip = value => retirementFaults.sortStorageKeys
     ? JSON.parse(JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
@@ -1002,6 +1154,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           throw new Error(`Unsupported storage.get key: ${String(key)}`)
         },
         async set(values) {
+          if (retirementFaults.failModeAuditStorage && Object.keys(values).some(key => key.startsWith('effect-receipt:mode:'))) throw new Error('Mode audit storage unavailable')
           if (Object.keys(values).some(key => key.startsWith('outbox:'))) await retirementFaults.beforeOutboxWrite?.(values)
           if (Object.keys(values).some(key => key.startsWith('pending-retirement'))) {
             if (retirementFaults.failRetirementWrite) throw new Error('Retirement storage unavailable')
@@ -1091,7 +1244,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         if (message.type === 'sidecar_effect_document') {
           const result = await runtime({ kind: 'content_effect_document', token: message.token })
           onContentDocumentProbe?.(storageState)
-          return result
+          return { ...result, buildId: retirementFaults.modeDocumentBuildId ?? 'a'.repeat(64), modeDocumentFence: retirementFaults.modeDocumentFence !== false }
         }
         try {
         const result = await (async () => {
@@ -1168,7 +1321,15 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         }
         if (message.type === 'conversation_mode_select') {
           tab.mode = message.mode
+          if (modeSelectReplacement) Object.assign(tab, modeSelectReplacement)
+          if (modeSelectError) throw new Error(modeSelectError)
+          if (modeSelectChannelClosesAfterNavigation) throw new Error('A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received')
           return { selected: true, mode: tab.mode, url: tab.url }
+        }
+        if (message.type === 'conversation_mode_observe') {
+          const result = { selected: true, mode: tab.mode, url: tab.modeObservedUrl ?? tab.url, buildId: tab.modeBuildId ?? 'a'.repeat(64) }
+          onModeObservation?.(tab, storageState)
+          return result
         }
         if (message.type === 'conversation_prepare') {
           if (prepareGate) await prepareGate
@@ -1211,7 +1372,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         if (message.contentEffect && !loseContentCompletion) await runtime({ kind: 'content_effect_complete', effect: message.contentEffect })
         return message.contentEffect && !loseContentCompletion ? { ...result, contentEffectSettled: message.contentEffect } : result
         } catch (error) {
-          if (message.contentEffect && !loseContentCompletion) await runtime({ kind: 'content_effect_complete', effect: message.contentEffect })
+          if (message.contentEffect && !loseContentCompletion && !(loseModeSelectCompletion && message.type === 'conversation_mode_select')) await runtime({ kind: 'content_effect_complete', effect: message.contentEffect })
           throw error
         }
       }

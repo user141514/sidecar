@@ -92,7 +92,7 @@ test('draft expected composer mode permits matching Chat and Work without clicki
 
 function composerModeReadinessFixture(t, onSleep = () => {}) {
   const fixture = nativeContentFixture({ submitted: false })
-  let listener, clock = 0
+  let listener, clock = 0, pageHideListener = null
   const context = vm.createContext({
     document: fixture.document, location: fixture.location,
     chrome: { runtime: { sendMessage: async () => ({}),
@@ -100,6 +100,8 @@ function composerModeReadinessFixture(t, onSleep = () => {}) {
     HTMLTextAreaElement: class {}, HTMLInputElement: class {}, InputEvent: class {}, URL,
     getComputedStyle(node) { return { display: node.shown ? 'block' : 'none', visibility: 'visible', opacity: '1' } },
     Date: class extends Date { static now() { return clock } },
+    addEventListener(type, listener) { if (type === 'pagehide') pageHideListener = listener },
+    removeEventListener(type, listener) { if (type === 'pagehide' && pageHideListener === listener) pageHideListener = null },
     setTimeout(callback, ms) {
       clock += ms
       assert.ok(clock <= 5000, 'mode readiness must stay within its five-second budget')
@@ -113,6 +115,7 @@ function composerModeReadinessFixture(t, onSleep = () => {}) {
   t.after(() => { context.__sidecarContentRuntime.dispose(); fixture.dispose() })
   return { ...fixture, get elapsed() { return clock }, get clicks() { return fixture.clicks },
     get runtime() { return context.__sidecarContentRuntime },
+    retireDocument() { pageHideListener?.() },
     call(message) { return new Promise(resolve => listener(message, {}, resolve)) } }
 }
 
@@ -190,6 +193,54 @@ test('composer mode creation readiness cannot click after its content runtime is
   assert.equal(result.selected, false)
   assert.equal(controls.clicks, 0)
   assert.equal(fixture.clicks, 0)
+})
+
+test('composer mode pagehide fence permanently denies an old document before its pending mode click', async t => {
+  let controls
+  const fixture = composerModeReadinessFixture(t, () => {
+    controls.work.disabled = false
+    fixture.retireDocument()
+  })
+  controls = addComposerMode(fixture)
+  controls.work.disabled = true
+  const pending = await callComposerMode(fixture, { mode: 'work' })
+  assert.equal(pending.selected, false)
+  assert.equal(controls.clicks, 0)
+  const replay = await callComposerMode(fixture, { mode: 'work' })
+  assert.equal(replay.selected, false)
+  assert.equal(controls.clicks, 0)
+  assert.equal(fixture.clicks, 0)
+})
+
+test('composer mode observe reads exact selected Chat and Work controls without any UI effect', async t => {
+  for (const mode of ['chat', 'work']) {
+    const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+    const controls = addComposerMode(fixture, { selected: mode })
+    fixture.editor.textContent = 'untouched user draft'
+    const result = await callComposerMode({ call: message => fixture.call({ ...message, type: 'conversation_mode_observe' }) }, {})
+    assert.equal(result.selected, true)
+    assert.equal(result.mode, mode)
+    assert.equal(result.url, fixture.location.href)
+    assert.equal(result.buildId, 'a'.repeat(64))
+    assert.equal(controls.clicks, 0)
+    assert.equal(fixture.clicks, 0)
+    assert.equal(fixture.editor.textContent, 'untouched user draft')
+  }
+})
+
+test('composer mode observe fails closed for missing disabled or ambiguous controls without clicking', async t => {
+  for (const fault of ['missing', 'disabled', 'ambiguous']) {
+    const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+    const controls = fault === 'missing' ? null : addComposerMode(fixture)
+    if (fault === 'disabled') controls.work.disabled = true
+    if (fault === 'ambiguous') addComposerMode(fixture)
+    const result = await callComposerMode({ call: message => fixture.call({ ...message, type: 'conversation_mode_observe' }) }, {})
+    assert.equal(result.selected, false)
+    assert.equal(result.mode, null)
+    assert.match(result.error, /mode/i)
+    assert.equal(controls?.clicks ?? 0, 0)
+    assert.equal(fixture.clicks, 0)
+  }
 })
 
 test('composer mode selects the scoped Work button and reads its final mode and URL', async t => {
@@ -967,6 +1018,78 @@ test('conversation_submit prefers native form submission when button click is ig
   const response = await runSubmitFixture({ clickTakesEffect: false, requestSubmitTakesEffect: true })
   assert.equal(response.accepted, true)
   assert.equal(response.userMessageId, '11111111-1111-4111-8111-111111111111')
+})
+
+function submitConfirmationFixture(t, { submissionId = '22222222-2222-4222-8222-222222222222', submissionText = null } = {}) {
+  const fixture = nativeContentFixture({ submitted: true, collapsedUser: true, submissionId, submissionText })
+  let listener, clock = 0, submittedAt = null
+  fixture.configureOnSubmit(() => { submittedAt = clock; fixture.setSubmitted(false) })
+  const context = vm.createContext({
+    document: fixture.document, location: fixture.location,
+    chrome: { runtime: { sendMessage: async () => null,
+      onMessage: { addListener(fn) { listener = fn }, removeListener() {} } } },
+    HTMLTextAreaElement: class {}, HTMLInputElement: class {}, InputEvent: class {}, URL,
+    getComputedStyle(node) { return { display: node.shown ? 'block' : 'none', visibility: 'visible', opacity: '1' } },
+    Date: class extends Date { static now() { return clock } },
+    addEventListener() {}, removeEventListener() {},
+    setTimeout(callback, ms) {
+      clock += ms
+      assert.ok(clock <= 5000, 'submission confirmation must stop within five seconds')
+      if (submittedAt !== null && clock - submittedAt >= 3500) fixture.setSubmitted(true)
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  })
+  vm.runInContext(source, context)
+  t.after(() => { context.__sidecarContentRuntime.dispose(); fixture.dispose() })
+  return {
+    call(message) { return new Promise(resolve => listener(message, {}, resolve)) },
+    get clicks() { return fixture.clicks },
+    get elapsed() { return clock - submittedAt }
+  }
+}
+
+test('submit confirmation accepts a new exact persistent user record arriving 3.5 seconds after one click', async t => {
+  const fixture = submitConfirmationFixture(t)
+  const prepared = await fixture.call({ type: 'conversation_prepare', guarded: true, authoritativeState: true,
+    turnId: 'delayed-review', text: 'Owned REVIEW\nCheck the completed ACTION.' })
+  assert.equal(prepared.prepared, true)
+  const result = await fixture.call({ type: 'conversation_submit', guarded: true, turnId: 'delayed-review' })
+  assert.equal(fixture.clicks, 1)
+  assert.equal(result.accepted, true, result.error)
+  assert.equal(result.userMessageId, '22222222-2222-4222-8222-222222222222')
+  assert.equal(fixture.elapsed, 3500)
+})
+
+test('submit confirmation remains uncertain without a fresh persistent UUID and never repeats the click', async t => {
+  for (const submissionId of ['local-message:temporary', 'dc791b85-4e62-4628-8ecf-79c5a745a05a']) {
+    const fixture = submitConfirmationFixture(t, { submissionId })
+    const prepared = await fixture.call({ type: 'conversation_prepare', guarded: true, authoritativeState: true,
+      turnId: 'missing-fresh-review-id', text: 'Owned REVIEW\nCheck the completed ACTION.' })
+    assert.equal(prepared.prepared, true)
+    const result = await fixture.call({ type: 'conversation_submit', guarded: true, turnId: 'missing-fresh-review-id' })
+    assert.equal(result.accepted, false, submissionId)
+    assert.equal(result.deliveryUncertain, true, submissionId)
+    assert.equal(result.userMessageId, undefined)
+    assert.match(result.error, /no observable submission progress/i)
+    assert.ok(fixture.elapsed > 0 && fixture.elapsed <= 5000)
+    assert.equal(fixture.clicks, 1, submissionId)
+  }
+})
+
+test('submit confirmation remains uncertain for a delayed authentic UUID with different text without another click', async t => {
+  const fixture = submitConfirmationFixture(t, { submissionText: 'Unrelated human prompt' })
+  const prepared = await fixture.call({ type: 'conversation_prepare', guarded: true, authoritativeState: true,
+    turnId: 'wrong-review-text', text: 'Owned REVIEW\nCheck the completed ACTION.' })
+  assert.equal(prepared.prepared, true)
+  const result = await fixture.call({ type: 'conversation_submit', guarded: true, turnId: 'wrong-review-text' })
+  assert.equal(result.accepted, false)
+  assert.equal(result.deliveryUncertain, true)
+  assert.equal(result.userMessageId, undefined)
+  assert.match(result.error, /no observable submission progress/i)
+  assert.ok(fixture.elapsed > 0 && fixture.elapsed <= 5000)
+  assert.equal(fixture.clicks, 1)
 })
 
 test('conversation_prepare selects a requested ChatGPT app before writing prompt text', async () => {

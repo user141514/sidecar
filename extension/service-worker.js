@@ -136,10 +136,58 @@ async function assertNoPendingContentEffects() {
   }
 }
 
+function validModeContentEffect(effect) {
+  return effect?.version === 1 && effect.method === 'conversation_mode_select' &&
+    typeof effect.token === 'string' && effect.token.length > 0 && effect.token.length <= 256 &&
+    Number.isInteger(effect.tabId) && typeof effect.documentId === 'string' && /^[0-9a-f]{32}$/i.test(effect.documentId) &&
+    typeof effect.instanceId === 'string' && effect.instanceId.length > 0 &&
+    (effect.writerEpoch === null || (Number.isInteger(effect.writerEpoch) && effect.writerEpoch > 0)) &&
+    (effect.registrationId === null || (typeof effect.registrationId === 'string' &&
+      /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(effect.registrationId)))
+}
+
+async function settleModeContentEffect(effect, resolution, proof, revalidate) {
+  if (!validModeContentEffect(effect)) throw deliveryUncertain('Invalid composer mode effect')
+  await revalidate()
+  const key = CONTENT_EFFECT_PREFIX + effect.token
+  const stored = await chrome.storage.local.get(null)
+  if (!stored[key]) return // The original trusted content completion already settled it.
+  if (await pendingDigest(stored[key]) !== await pendingDigest(effect)) throw deliveryUncertain('Composer mode effect changed')
+  if (resolution === 'post_navigation_readback' && Object.entries(stored).some(([otherKey, record]) =>
+      otherKey !== key && record?.tabId === effect.tabId &&
+      (otherKey.startsWith(CONTENT_EFFECT_PREFIX) || (otherKey.startsWith(EFFECT_RECEIPT_PREFIX) &&
+        record.action === 'refresh' && !['applied', 'denied'].includes(record.phase))))) {
+    throw deliveryUncertain('Composer mode tab has another unsettled effect')
+  }
+  const requestId = 'mode:' + effect.token
+  const previous = await loadEffectReceipt(requestId)
+  if (previous && (previous.action !== 'mode_select' || previous.phase !== 'settled' ||
+      !['closed_tab', 'post_navigation_readback'].includes(previous.resolution) ||
+      await pendingDigest(previous.effect) !== await pendingDigest(effect))) throw deliveryUncertain('Composer mode audit conflict')
+  const receipt = previous ?? { requestId, action: 'mode_select', phase: 'settled', resolution, effect, proof,
+    resolvedByInstanceId: extensionInstanceId, buildId: globalThis.__sidecarBuildId }
+  await saveEffectReceipt(receipt)
+  if (await pendingDigest(await loadEffectReceipt(requestId)) !== await pendingDigest(receipt)) {
+    throw deliveryUncertain('Composer mode audit readback failed')
+  }
+  await revalidate()
+  const current = (await chrome.storage.local.get(key))[key]
+  if (!current) return
+  if (await pendingDigest(current) !== await pendingDigest(effect)) throw deliveryUncertain('Composer mode effect changed before settlement')
+  await chrome.storage.local.remove(key)
+  if ((await chrome.storage.local.get(key))[key]) throw deliveryUncertain('Composer mode effect settlement failed')
+}
+
 async function recoverSettledContentEffects() {
   const stored = await chrome.storage.local.get(null)
   const pending = Object.entries(stored).filter(([key]) => key.startsWith(CONTENT_EFFECT_PREFIX))
   await Promise.all(pending.map(async ([, effect]) => {
+    if (validModeContentEffect(effect) && !(await chrome.tabs.query({})).some(tab => tab.id === effect.tabId)) {
+      await settleModeContentEffect(effect, 'closed_tab', { tabAbsent: true }, async () => {
+        if ((await chrome.tabs.query({})).some(tab => tab.id === effect.tabId)) throw deliveryUncertain('Composer mode tab is still present')
+      })
+      return
+    }
     if (!Number.isInteger(effect?.tabId) || typeof effect?.documentId !== 'string' ||
         !/^[0-9a-f]{32}$/i.test(effect.documentId)) return
     try {
@@ -385,6 +433,12 @@ async function boundedMessage(tabId, message, timeoutMs, onLateResponse, writerP
         registrationId: writerRegistrationId(writerParams), writerEpoch: writerParams.writerEpoch ?? null,
         method: message.type, instanceId: extensionInstanceId
       }
+      if (message.type === 'conversation_mode_select') {
+        if (document.buildId !== globalThis.__sidecarBuildId || document.modeDocumentFence !== true ||
+            !tabMatchesExpectedUrl({ url: document.url }, message.expectedUrl)) throw new Error('Exact composer mode document unavailable')
+        effect.modeIntent = { mode: message.mode, target: pageIdentity(message.expectedUrl),
+          buildId: document.buildId, documentFence: 'pagehide-v1' }
+      }
       await chrome.storage.local.set({ [CONTENT_EFFECT_PREFIX + token]: effect })
     } finally { contentEffectReservations.delete(tabId) }
   }
@@ -412,6 +466,11 @@ async function boundedMessage(tabId, message, timeoutMs, onLateResponse, writerP
       settled,
       new Promise((_, reject) => { timer = setTimeout(() => { expired = true; reject(new Error(`Content script response timeout: ${message.type}`)) }, timeoutMs) })
     ])
+  } catch (error) {
+    if (effect?.method === 'conversation_mode_select') {
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), { contentEffect: effect })
+    }
+    throw error
   } finally { clearTimeout(timer) }
 }
 
@@ -1055,9 +1114,58 @@ async function reuseAllocatedConversationAttachment(conversationId, requestedUrl
   return null
 }
 
+async function readCreatedModeAfterNavigation(state, mode, effect) {
+  if (!validModeContentEffect(effect) || effect.tabId !== state.tabId ||
+      effect.modeIntent?.mode !== mode || effect.modeIntent.target !== pageIdentity(state.url) ||
+      effect.modeIntent.buildId !== globalThis.__sidecarBuildId || effect.modeIntent.documentFence !== 'pagehide-v1') {
+    throw deliveryUncertain('Exact composer mode intent unavailable')
+  }
+  await waitForContentScript(state.tabId, 20)
+  const token = crypto.randomUUID()
+  const document = await boundedMessage(state.tabId, { type: 'sidecar_effect_document', token }, 2000)
+  if (document?.token !== token || document.tabId !== state.tabId || document.documentId === effect.documentId ||
+      typeof document.documentId !== 'string' || !/^[0-9a-f]{32}$/i.test(document.documentId) ||
+      document.buildId !== globalThis.__sidecarBuildId || document.modeDocumentFence !== true ||
+      !tabMatchesExpectedUrl({ url: document.url }, state.url)) throw deliveryUncertain('Composer mode replacement document unavailable')
+  const deadline = Date.now() + 5000
+  let selected
+  while (Date.now() < deadline) {
+    selected = await boundedMessage(state.tabId, { type: 'conversation_mode_observe' },
+      Math.min(2000, Math.max(1, deadline - Date.now())), undefined, {}, document.documentId)
+    if (selected?.buildId !== globalThis.__sidecarBuildId || !tabMatchesExpectedUrl({ url: selected?.url }, state.url)) {
+      throw deliveryUncertain('Composer mode readback target changed')
+    }
+    if (selected.selected === true) break
+    if (!/mode.*unavailable/i.test(selected.error ?? '')) throw deliveryUncertain(selected.error || 'Composer mode readback unavailable')
+    await new Promise(resolve => setTimeout(resolve, Math.min(250, Math.max(0, deadline - Date.now()))))
+  }
+  if (selected?.selected !== true || selected.mode !== mode || Date.now() >= deadline) {
+    throw deliveryUncertain('Composer mode target was not read back')
+  }
+  const revalidate = async () => {
+    const token = crypto.randomUUID()
+    const current = await boundedMessage(state.tabId, { type: 'sidecar_effect_document', token }, 2000, undefined, {}, document.documentId)
+    const tab = await chrome.tabs.get(state.tabId)
+    if (current?.token !== token || current.tabId !== state.tabId || current.documentId !== document.documentId ||
+        current.buildId !== globalThis.__sidecarBuildId || current.modeDocumentFence !== true ||
+        tab.windowId !== state.windowId || !tabMatchesExpectedUrl(tab, state.url) ||
+        !tabMatchesExpectedUrl({ url: current.url }, state.url)) throw deliveryUncertain('Composer mode readback document changed')
+  }
+  await settleModeContentEffect(effect, 'post_navigation_readback',
+    { mode, target: effect.modeIntent.target, documentId: document.documentId, previousDocumentId: effect.documentId }, revalidate)
+  await assertNoUnsettledEffectsForTab(state.tabId)
+  return selected
+}
+
 async function selectCreatedConversationMode(state, mode, params) {
   await waitForContentScript(state.tabId)
-  const selected = await boundedMessage(state.tabId, { type: 'conversation_mode_select', mode }, 10_000, undefined, params)
+  let selected
+  try {
+    selected = await boundedMessage(state.tabId, { type: 'conversation_mode_select', mode, expectedUrl: state.url }, 10_000, undefined, params)
+  } catch (error) {
+    if (!/message (?:channel|port) closed.*response/i.test(error?.message ?? String(error))) throw error
+    selected = await readCreatedModeAfterNavigation(state, mode, error.contentEffect)
+  }
   const tab = await chrome.tabs.get(state.tabId)
   if (selected?.selected !== true || selected.mode !== mode ||
       pageIdentity(selected.url) !== pageIdentity(tab.url) || !tabMatchesExpectedUrl(tab, state.url)) {
