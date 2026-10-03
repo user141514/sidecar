@@ -167,9 +167,22 @@ function assertExpectedComposerMode(mode) {
 
 async function selectComposerMode(mode) {
   if (mode !== 'chat' && mode !== 'work') throw new Error('Composer mode must be chat or work')
-  const controls = findComposerModeControls()
+  // Project composer readiness can precede availability of its mode buttons.
+  const deadline = Date.now() + 5000
+  let controls = null, lastError = null
+  while (Date.now() < deadline) {
+    if (contentDisposed) throw new Error('Content runtime was disposed')
+    try {
+      controls = findComposerModeControls()
+    } catch (error) {
+      if (error.message !== 'Composer mode controls are unavailable') throw error
+      lastError = error
+    }
+    if (controls) break
+    await sleep(Math.min(250, Math.max(0, deadline - Date.now())))
+  }
   // A missing toggle does not prove a legacy Chat surface.
-  if (!controls) throw new Error('Composer mode is unavailable')
+  if (!controls || Date.now() >= deadline) throw lastError || new Error('Composer mode is unavailable')
   if (controls[mode].getAttribute('aria-pressed') === 'true') {
     return { selected: true, mode, url: location.href }
   }

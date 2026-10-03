@@ -90,6 +90,108 @@ test('draft expected composer mode permits matching Chat and Work without clicki
   }
 })
 
+function composerModeReadinessFixture(t, onSleep = () => {}) {
+  const fixture = nativeContentFixture({ submitted: false })
+  let listener, clock = 0
+  const context = vm.createContext({
+    document: fixture.document, location: fixture.location,
+    chrome: { runtime: { sendMessage: async () => ({}),
+      onMessage: { addListener(fn) { listener = fn }, removeListener() {} } } },
+    HTMLTextAreaElement: class {}, HTMLInputElement: class {}, InputEvent: class {}, URL,
+    getComputedStyle(node) { return { display: node.shown ? 'block' : 'none', visibility: 'visible', opacity: '1' } },
+    Date: class extends Date { static now() { return clock } },
+    setTimeout(callback, ms) {
+      clock += ms
+      assert.ok(clock <= 5000, 'mode readiness must stay within its five-second budget')
+      onSleep(clock)
+      queueMicrotask(callback)
+      return 1
+    },
+    clearTimeout() {}
+  })
+  vm.runInContext(source, context)
+  t.after(() => { context.__sidecarContentRuntime.dispose(); fixture.dispose() })
+  return { ...fixture, get elapsed() { return clock }, get clicks() { return fixture.clicks },
+    get runtime() { return context.__sidecarContentRuntime },
+    call(message) { return new Promise(resolve => listener(message, {}, resolve)) } }
+}
+
+test('composer mode creation readiness waits for a missing exact group before one click', async t => {
+  let controls
+  const fixture = composerModeReadinessFixture(t, elapsed => {
+    if (elapsed >= 500 && !controls) controls = addComposerMode(fixture)
+  })
+  const result = await callComposerMode(fixture, { mode: 'work' })
+  assert.equal(result.selected, true, result.error)
+  assert.equal(result.mode, 'work')
+  assert.ok(fixture.elapsed >= 500 && fixture.elapsed < 5000)
+  assert.equal(controls.clicks, 1)
+  assert.equal(fixture.clicks, 0)
+  assert.equal(fixture.editor.textContent, '')
+})
+
+test('composer mode creation readiness waits for temporarily unavailable controls before one click', async t => {
+  let controls
+  const fixture = composerModeReadinessFixture(t, elapsed => {
+    if (elapsed >= 750) controls.work.disabled = false
+  })
+  controls = addComposerMode(fixture)
+  controls.work.disabled = true
+  const result = await callComposerMode(fixture, { mode: 'work' })
+  assert.equal(result.selected, true, result.error)
+  assert.ok(fixture.elapsed >= 750 && fixture.elapsed < 5000)
+  assert.equal(controls.clicks, 1)
+  assert.equal(fixture.clicks, 0)
+})
+
+test('composer mode creation readiness fails within five seconds with no click for persistent unavailability', async t => {
+  for (const fault of ['missing', 'disabled', 'hidden', 'available-at-deadline']) {
+    let controls
+    const fixture = composerModeReadinessFixture(t, elapsed => {
+      if (fault === 'available-at-deadline' && elapsed >= 5000) controls.work.disabled = false
+    })
+    if (fault !== 'missing') controls = addComposerMode(fixture)
+    if (fault === 'hidden') controls.work.shown = false
+    if (fault === 'disabled' || fault === 'available-at-deadline') controls.work.disabled = true
+    const result = await callComposerMode(fixture, { mode: 'work' })
+    assert.equal(result.selected, false, fault)
+    assert.match(result.error, /mode.*unavailable/i)
+    assert.ok(fixture.elapsed > 0 && fixture.elapsed <= 5000, fault)
+    assert.equal(controls?.clicks ?? 0, 0, fault)
+    assert.equal(fixture.clicks, 0, fault)
+    assert.equal(fixture.editor.textContent, '', fault)
+  }
+})
+
+test('composer mode creation readiness rejects ambiguous evidence immediately without waiting or clicking', async t => {
+  for (const fault of ['duplicate-group', 'ambiguous-selection', 'unknown-label']) {
+    const fixture = composerModeReadinessFixture(t, () => assert.fail('ambiguous mode evidence must not be retried'))
+    const controls = addComposerMode(fixture)
+    if (fault === 'duplicate-group') addComposerMode(fixture)
+    if (fault === 'ambiguous-selection') controls.work.attrs['aria-pressed'] = 'true'
+    if (fault === 'unknown-label') controls.work.ownText = 'Work preview '
+    const result = await callComposerMode(fixture, { mode: 'work' })
+    assert.equal(result.selected, false)
+    assert.match(result.error, /ambiguous/i)
+    assert.equal(fixture.elapsed, 0)
+    assert.equal(controls.clicks, 0)
+  }
+})
+
+test('composer mode creation readiness cannot click after its content runtime is disposed', async t => {
+  let controls
+  const fixture = composerModeReadinessFixture(t, () => {
+    controls.work.disabled = false
+    fixture.runtime.dispose()
+  })
+  controls = addComposerMode(fixture)
+  controls.work.disabled = true
+  const result = await callComposerMode(fixture, { mode: 'work' })
+  assert.equal(result.selected, false)
+  assert.equal(controls.clicks, 0)
+  assert.equal(fixture.clicks, 0)
+})
+
 test('composer mode selects the scoped Work button and reads its final mode and URL', async t => {
   const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
   const controls = addComposerMode(fixture)
