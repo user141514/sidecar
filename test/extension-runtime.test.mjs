@@ -251,12 +251,57 @@ test('create mode normal failures never enter navigation readback or repeat the 
   }
 })
 
-test('create mode requires same-build document fence capability before dispatching its effect', async () => {
-  for (const fault of [{ modeDocumentFence: false }, { modeDocumentBuildId: 'c'.repeat(64) }]) {
-    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, ...fault })
+test('create mode waits only for readonly exact document metadata before persisting and clicking once', async () => {
+  for (const fault of ['build', 'fence', 'target']) {
+    let probes = 0
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, fastModeDocumentClock: true,
+      contentDocumentProbeProvider(tab, metadata) {
+        probes += 1
+        if (probes !== 1) return metadata
+        tab.documentId = 'b'.repeat(32)
+        return { ...metadata, ...(fault === 'build' ? { buildId: 'c'.repeat(64) } :
+          fault === 'fence' ? { modeDocumentFence: false } : { url: 'https://chatgpt.com/g/g-p-ffffffffffffffffffffffffffffffff/project' }) }
+      } })
+    const created = await h.request('conversation_create', { conversationId: 'mode-metadata-wait', mode: 'chat', writerEpoch: 3 })
+    assert.equal(created.ok, true, created.error)
+    const selections = h.sentToTabs.filter(entry => entry.message.type === 'conversation_mode_select')
+    assert.equal(selections.length, 1)
+    assert.equal(selections[0].options.documentId, 'b'.repeat(32))
+    assert.equal(selections[0].message.contentEffect.modeIntent.mode, 'chat')
+    assert.equal(selections[0].message.contentEffect.modeIntent.target, 'https://chatgpt.com/')
+    assert.equal(h.sentToTabs.filter(entry => entry.message.type === 'sidecar_effect_document').length, 2)
+    for (const probe of h.sentToTabs.filter(entry => entry.message.type === 'sidecar_effect_document')) {
+      assert.equal(Object.keys(probe.storageSnapshot).some(key => key.startsWith('content-effect:')), false)
+    }
+    assert.ok(h.modeDocumentElapsed > 0 && h.modeDocumentElapsed <= 5000)
+    assert.equal(h.sentToTabs.some(entry => ['conversation_prepare', 'conversation_submit'].includes(entry.message.type)), false)
+  }
+})
+
+test('create mode does not issue another probe or effect when metadata becomes ready exactly at the deadline', async () => {
+  let lateProbes = 0
+  const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, fastModeDocumentClock: true,
+    contentDocumentProbeProvider(_tab, metadata) {
+      if (h.modeDocumentElapsed >= 5000) { lateProbes += 1; return metadata }
+      return { ...metadata, modeDocumentFence: false }
+    } })
+  const created = await h.request('conversation_create', { conversationId: 'mode-at-deadline', mode: 'chat', writerEpoch: 3 })
+  assert.equal(created.ok, false)
+  assert.equal(lateProbes, 0)
+  assert.ok(h.modeDocumentElapsed <= 5000)
+  assert.equal(h.sentToTabs.some(entry => entry.message.type === 'conversation_mode_select'), false)
+  assert.equal(Object.keys(h.storageState).some(key => key.startsWith('content-effect:')), false)
+})
+
+test('create mode requires exact target same-build document fence within its bounded predispatch wait', async () => {
+  for (const [predicate, fault] of [['fence', { modeDocumentFence: false }], ['build', { modeDocumentBuildId: 'c'.repeat(64) }],
+    ['target', { contentDocumentProbeProvider(_tab, metadata) { return { ...metadata, url: 'https://chatgpt.com/g/g-p-ffffffffffffffffffffffffffffffff/project' } } }]]) {
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, fastModeDocumentClock: true, ...fault })
     const created = await h.request('conversation_create', { conversationId: 'mode-fence-denied', mode: 'chat', writerEpoch: 3 })
     assert.equal(created.ok, false)
     assert.equal(h.storageState['conversation:mode-fence-denied'], undefined)
+    assert.match(created.error, new RegExp('mismatch.*' + predicate))
+    assert.ok(h.modeDocumentElapsed > 0 && h.modeDocumentElapsed <= 5000)
     assert.equal(h.sentToTabs.some(entry => entry.message.type === 'conversation_mode_select'), false)
     assert.equal(Object.keys(h.storageState).some(key => key.startsWith('content-effect:')), false)
   }
@@ -1068,6 +1113,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
   const nativeMessages = []
   const submittedTabs = new Set()
   let draftClock = Date.now()
+  const initialModeDocumentClock = draftClock
   const runtimeMessageListeners = []
   let tabUpdatedListener = null
   const sentToTabs = []
@@ -1244,7 +1290,8 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         if (message.type === 'sidecar_effect_document') {
           const result = await runtime({ kind: 'content_effect_document', token: message.token })
           onContentDocumentProbe?.(storageState)
-          return { ...result, buildId: retirementFaults.modeDocumentBuildId ?? 'a'.repeat(64), modeDocumentFence: retirementFaults.modeDocumentFence !== false }
+          const metadata = { ...result, buildId: retirementFaults.modeDocumentBuildId ?? 'a'.repeat(64), modeDocumentFence: retirementFaults.modeDocumentFence !== false }
+          return retirementFaults.contentDocumentProbeProvider?.(tab, metadata) ?? metadata
         }
         try {
         const result = await (async () => {
@@ -1399,10 +1446,16 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     },
     console,
     URL,
-    Date: (fastProjectDraftClock || fastConversationUrlClock) ? class extends Date { static now() { draftClock += 1000; return draftClock } } : Date,
+    Date: (fastProjectDraftClock || fastConversationUrlClock || retirementFaults.fastModeDocumentClock) ? class extends Date {
+      static now() { if (!retirementFaults.fastModeDocumentClock) draftClock += 1000; return draftClock }
+    } : Date,
     Promise,
     Object,
     setTimeout(callback, ms) {
+      if (retirementFaults.fastModeDocumentClock) {
+        if (callback.length === 1 && ms < 2000) { draftClock += ms; return fastSetTimeout(callback) }
+        return setTimeout(callback, ms)
+      }
       if (deferReloadTimer && ms === 250) {
         deferredReloadTimers.push(callback)
         return deferredReloadTimers.length
@@ -1488,6 +1541,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
       if (!callback) throw new Error('No deferred reload timer')
       callback()
     },
+    get modeDocumentElapsed() { return draftClock - initialModeDocumentClock },
     get runtimeReloadCount() {
       return runtimeReloadCount
     },

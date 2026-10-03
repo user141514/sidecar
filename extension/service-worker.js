@@ -423,10 +423,25 @@ async function boundedMessage(tabId, message, timeoutMs, onLateResponse, writerP
     try {
       await assertNoUnsettledEffectsForTab(tabId)
       const token = crypto.randomUUID()
-      const document = await boundedMessage(tabId, { type: 'sidecar_effect_document', token }, 2000)
-      if (document?.token !== token || document.tabId !== tabId ||
-          typeof document.documentId !== 'string' || !/^[0-9a-f]{32}$/i.test(document.documentId) ||
-          !webGptShiftPageUrl(document.url)) throw deliveryUncertain('Exact content document unavailable')
+      const modeDeadline = message.type === 'conversation_mode_select' ? Date.now() + 5000 : null
+      let document, firstMismatch = null, mismatches = []
+      const unavailableModeDocument = () => new Error(`Exact composer mode document unavailable; first mismatch=${firstMismatch ?? 'deadline'}; current mismatch=${mismatches.join(',') || 'deadline'}; build=${document?.buildId ?? 'missing'}; fence=${document?.modeDocumentFence === true}; URL=${pageIdentity(document?.url)}; expected=${pageIdentity(message.expectedUrl)}`)
+      while (true) {
+        if (modeDeadline !== null && Date.now() >= modeDeadline) throw unavailableModeDocument()
+        document = await boundedMessage(tabId, { type: 'sidecar_effect_document', token },
+          modeDeadline === null ? 2000 : Math.min(2000, Math.max(1, modeDeadline - Date.now())))
+        if (document?.token !== token || document.tabId !== tabId ||
+            typeof document.documentId !== 'string' || !/^[0-9a-f]{32}$/i.test(document.documentId) ||
+            !webGptShiftPageUrl(document.url)) throw deliveryUncertain('Exact content document unavailable')
+        if (modeDeadline === null) break
+        mismatches = [document.buildId !== globalThis.__sidecarBuildId ? 'build' : null,
+          document.modeDocumentFence !== true ? 'fence' : null,
+          !tabMatchesExpectedUrl({ url: document.url }, message.expectedUrl) ? 'target' : null].filter(Boolean)
+        if (!mismatches.length && Date.now() < modeDeadline) break
+        firstMismatch ??= mismatches.join(',') || 'deadline'
+        if (Date.now() >= modeDeadline) throw unavailableModeDocument()
+        await new Promise(resolve => setTimeout(resolve, Math.min(250, Math.max(0, modeDeadline - Date.now()))))
+      }
       await assertNoUnsettledEffectsForTab(tabId)
       effect = {
         version: 1, token, tabId, documentId: document.documentId,
@@ -434,8 +449,6 @@ async function boundedMessage(tabId, message, timeoutMs, onLateResponse, writerP
         method: message.type, instanceId: extensionInstanceId
       }
       if (message.type === 'conversation_mode_select') {
-        if (document.buildId !== globalThis.__sidecarBuildId || document.modeDocumentFence !== true ||
-            !tabMatchesExpectedUrl({ url: document.url }, message.expectedUrl)) throw new Error('Exact composer mode document unavailable')
         effect.modeIntent = { mode: message.mode, target: pageIdentity(message.expectedUrl),
           buildId: document.buildId, documentFence: 'pagehide-v1' }
       }
