@@ -194,6 +194,56 @@ test('closed uncertain retirement retains exact pending, releases only its block
   assert.equal((await restarted.request('extension_status', {})).result.blockingPendingCount, 1)
 })
 
+test('retirement publishes on the first attempt after Chrome storage reorders nested object keys', async () => {
+  const storage = retirementStorage()
+  const originalPending = structuredClone(storage['pending:retire-conv'])
+  const h = makeHarness({ storage, sortStorageKeys: true })
+  const params = await retirementRequest(h)
+
+  const retired = await h.request('pending_retire', params)
+
+  assert.equal(retired.ok, true, retired.error)
+  assert.equal(retired.result.retired, true)
+  assert.equal(retired.result.delivery, 'unknown')
+  const receipt = h.storageState['pending-retirement:retire-conv']
+  assert.equal(receipt.operationId, 'retirement-op')
+  assert.equal(receipt.requestId, 'retire-send')
+  assert.equal(receipt.proof.writerDrained, true)
+  assert.deepEqual(Object.keys(receipt), Object.keys(receipt).sort())
+  assert.deepEqual(Object.keys(receipt.proof), Object.keys(receipt.proof).sort())
+  assert.deepEqual(h.storageState['pending:retire-conv'], originalPending)
+  assert.equal(h.storageState['effect-receipt:retire-send'], undefined)
+  const status = (await h.request('extension_status', {})).result
+  assert.deepEqual([status.pendingCount, status.retiredPendingCount, status.blockingPendingCount], [1, 1, 0])
+  assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length + h.sentToTabs.length, 0)
+})
+
+test('retirement rejects changed staged contents after Chrome storage serialization', async t => {
+  for (const changed of ['timestamp', 'proof']) await t.test(changed, async () => {
+    const storage = retirementStorage()
+    const originalPending = structuredClone(storage['pending:retire-conv'])
+    const h = makeHarness({ storage, sortStorageKeys: true, beforeRetirementWrite: values => {
+      const key = 'pending-retirement-staged:retire-conv'
+      const candidate = values[key]
+      if (!candidate) return
+      values[key] = changed === 'timestamp'
+        ? { ...candidate, retiredAt: candidate.retiredAt + 1 }
+        : { ...candidate, proof: { ...candidate.proof, outboxCount: 1 } }
+    } })
+    const params = await retirementRequest(h)
+
+    const retired = await h.request('pending_retire', params)
+
+    assert.equal(retired.ok, false)
+    assert.match(retired.error, /Retirement persistence verification failed/)
+    assert.equal(h.storageState['pending-retirement:retire-conv'], undefined)
+    assert.deepEqual(h.storageState['pending:retire-conv'], originalPending)
+    assert.equal(h.storageState['effect-receipt:retire-send'], undefined)
+    const status = (await h.request('extension_status', {})).result
+    assert.deepEqual([status.pendingCount, status.retiredPendingCount, status.blockingPendingCount], [1, 0, 1])
+  })
+})
+
 test('an incomplete durable retirement candidate blocks fresh adoption and late events while preserving reload blocker', async () => {
   const h = makeHarness({ storage: retirementStorage() })
   const params = await retirementRequest(h)
@@ -444,7 +494,12 @@ test('real host ledger and native retirement compose for legacy pending without 
 })
 
 function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null, fastConversationUrlClock = false, onSubmittedTabGet = null, submitPendingUrl = null, submitUserMessageId = '00000000-0000-4000-8000-000000000001', contentMessageProvider = null, submitResponseUrl = null, ...retirementFaults } = {}) {
-  const storageState = { ...storage }
+  // Chrome's storage dictionary roundtrip does not preserve object insertion order.
+  const storageRoundTrip = value => retirementFaults.sortStorageKeys
+    ? JSON.parse(JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+      ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item))
+    : value
+  const storageState = { ...storageRoundTrip(storage) }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
   const tabMap = new Map(tabs.map((tab) => [tab.id, { ...tab }]))
@@ -530,9 +585,9 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
       local: {
         async get(key) {
           if (retirementFaults.failRetirementRead && Object.keys(storageState).some(key => key.startsWith('pending-retirement-staged:'))) throw new Error('Retirement readback failed')
-          if (key === null) return { ...storageState }
+          if (key === null) return storageRoundTrip({ ...storageState })
           if (typeof key === 'string') {
-            return Object.hasOwn(storageState, key) ? { [key]: storageState[key] } : {}
+            return storageRoundTrip(Object.hasOwn(storageState, key) ? { [key]: storageState[key] } : {})
           }
           throw new Error(`Unsupported storage.get key: ${String(key)}`)
         },
@@ -544,7 +599,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           }
           if (failRevocationStorage && Object.keys(values).some(key => key.startsWith('writer:revoked-registration:'))) throw new Error('Revocation storage unavailable')
           if (failContentEffectStorage && Object.keys(values).some(key => key.startsWith('content-effect:'))) throw new Error('Content effect storage unavailable')
-          Object.assign(storageState, values)
+          Object.assign(storageState, storageRoundTrip(values))
           for (const receipt of Object.values(values)) {
             if (receipt?.action === 'refresh' && receipt.phase === 'issued' && refreshAdmissionTabChanges) {
               Object.assign(tabMap.get(receipt.tabId), refreshAdmissionTabChanges)

@@ -333,7 +333,8 @@ async function retirePending(params) {
   const candidate = priorCandidate ?? receipt
   await chrome.storage.local.set({ [stagedKey]: candidate })
   const persisted = await chrome.storage.local.get(null)
-  if (JSON.stringify(persisted[stagedKey]) !== JSON.stringify(candidate) ||
+  // Storage dictionary serialization may reorder keys; verify the complete canonical contents.
+  if (await pendingDigest(persisted[stagedKey]) !== await pendingDigest(candidate) ||
       !await validPendingRetirement({ ...persisted, [`pending-retirement:${params.conversationId}`]: candidate }, persisted[pendingKey(params.conversationId)])) {
     throw new Error('Retirement persistence verification failed')
   }
