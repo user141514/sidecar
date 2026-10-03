@@ -44,7 +44,7 @@ async function setupNew(t, { admitted = true, sendUncertain = false } = {}) {
   let submitted = null
   bridge.request = async (method, params) => {
     bridge.calls.push({ method, params })
-    if (method === 'conversation_create') return { windowId: 10, tabId: 20, url: managedProjectUrl }
+    if (method === 'conversation_create') return { windowId: 10, tabId: 20, url: managedProjectUrl, mode: 'chat' }
     if (method === 'conversation_send') {
       submitted = params
       if (sendUncertain) {
@@ -649,6 +649,9 @@ test('v1 NEW replays and restarts to the same logical child with one browser all
   assert.equal(admission.calls, 1)
 
   const stored = await store.read(first.conversationId)
+  assert.equal(bridge.calls.find(call => call.method === 'conversation_create').params.mode, 'chat')
+  assert.equal(bridge.calls.find(call => call.method === 'conversation_create').params.url, managedProjectUrl)
+  assert.equal(stored.events.find(event => event.type === 'browser_attached').mode, 'chat')
   const sent = stored.events.find(event => event.type === 'send_intent' && event.turnId === first.turnId)
   assert.equal(sent.source, 'human')
   assert.equal(sent.requestId, payload.intentId)

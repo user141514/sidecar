@@ -17,7 +17,7 @@ const EFFECT_RECEIPT_PREFIX = 'effect-receipt:'
 const WRITER_AUTHORITY_KEY = 'writer:authority'
 const REVOKED_REGISTRATION_PREFIX = 'writer:revoked-registration:'
 const CONTENT_EFFECT_PREFIX = 'content-effect:'
-const CONTENT_EFFECT_METHODS = new Set(['conversation_prepare', 'conversation_submit', 'conversation_stop', 'webgpt_shift_test', 'project_open', 'project_create'])
+const CONTENT_EFFECT_METHODS = new Set(['conversation_prepare', 'conversation_submit', 'conversation_stop', 'conversation_mode_select', 'webgpt_shift_test', 'project_open', 'project_create'])
 const WINDOW0_KEY = 'window0'
 const AUTOMATION_WINDOW_SENTINEL = 'automation-window.html'
 
@@ -910,20 +910,48 @@ async function waitForProjectDraftSurface(tabId, expectedProjectUrl) {
   throw new Error(`ChatGPT Project draft surface did not become ready${lastUrl ? `; last URL was ${lastUrl}` : ''}${detail}`)
 }
 
-async function waitForConversationThreadUrl(tabId, fallbackUrl, timeoutMs = 5000) {
+function hasConversationBindingConflict(stored, conversationId, tabId, url) {
+  const uuid = exactAdoptionUuid(url)
+  return Object.entries(stored).some(([key, value]) =>
+    key.startsWith(STORAGE_PREFIX) && key !== storageKey(conversationId) &&
+    (value?.tabId === tabId || (uuid && exactAdoptionUuid(value?.url) === uuid)))
+}
+
+async function waitForSubmittedConversationTab(source, fallbackUrl, priorTabIds, conversationId, timeoutMs = 5000) {
   const existing = stableConversationUrl(fallbackUrl)
+  const expectedProject = projectHomeUrl(fallbackUrl)
   const deadline = Date.now() + timeoutMs
   let lastUrl = fallbackUrl
   while (Date.now() < deadline) {
-    let tab
-    try { tab = await chrome.tabs.get(tabId) } catch (error) { throw deliveryUncertain(error) }
-    lastUrl = tab.url || lastUrl
-    const stable = stableConversationUrl(tab.url)
-    if (stable) {
-      if (existing && exactAdoptionUuid(existing) !== exactAdoptionUuid(stable)) {
+    let original
+    try { original = await chrome.tabs.get(source.tabId) } catch {}
+    lastUrl = original?.url || lastUrl
+    const originalUrl = stableConversationUrl(original?.url)
+    if (originalUrl) {
+      if (existing && exactAdoptionUuid(existing) !== exactAdoptionUuid(originalUrl)) {
         throw deliveryUncertain('Submitted tab changed persistent conversation identity')
       }
-      return stable
+      return { tabId: original.id, windowId: original.windowId, url: originalUrl }
+    }
+    // Only this action's newly opened, directly related tabs may replace the source.
+    // The exact submit UUID is still verified on the selected document before binding.
+    let tabs
+    try { tabs = await chrome.tabs.query({}) } catch (error) { throw deliveryUncertain(error) }
+    const children = tabs.filter(tab => !priorTabIds.has(tab.id) && tab.openerTabId === source.tabId && stableConversationUrl(tab.url))
+    if (children.length > 1) throw deliveryUncertain('Submission opened multiple possible conversation tabs')
+    if (children.length === 1) {
+      const tab = children[0], url = stableConversationUrl(tab.url)
+      if (expectedProject && pageIdentity(url).replace(/\/c\/[^/]+$/, '/project') !== pageIdentity(expectedProject)) {
+        throw deliveryUncertain('Submission opened a tab outside the requested Project')
+      }
+      const stored = await chrome.storage.local.get(null)
+      if ((tabOwners.has(tab.id) && tabOwners.get(tab.id) !== conversationId) ||
+          hasConversationBindingConflict(stored, conversationId, tab.id, url) ||
+          Object.entries(stored).some(([key, value]) => key.startsWith(PENDING_PREFIX) &&
+            key !== pendingKey(conversationId) && value?.tabId === tab.id)) {
+        throw deliveryUncertain('Submission tab already belongs to another conversation')
+      }
+      return { tabId: tab.id, windowId: tab.windowId, url }
     }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
@@ -1011,10 +1039,28 @@ async function reuseAllocatedConversationAttachment(conversationId, requestedUrl
   return null
 }
 
+async function selectCreatedConversationMode(state, mode, params) {
+  await waitForContentScript(state.tabId)
+  const selected = await boundedMessage(state.tabId, { type: 'conversation_mode_select', mode }, 10_000, undefined, params)
+  const tab = await chrome.tabs.get(state.tabId)
+  if (selected?.selected !== true || selected.mode !== mode ||
+      pageIdentity(selected.url) !== pageIdentity(tab.url) || !tabMatchesExpectedUrl(tab, state.url)) {
+    throw new Error(selected?.error || 'ChatGPT composer mode was not confirmed on the allocated tab')
+  }
+  return { ...state, windowId: tab.windowId, url: chooseConversationUrl(tab.url, state.url), mode }
+}
+
 async function createConversation(params) {
+  const mode = params.mode ?? 'chat'
+  if (!['chat', 'work'].includes(mode)) throw new Error('Conversation mode must be chat or work')
+  if (await loadPendingTurn(params.conversationId)) throw deliveryUncertain('Conversation has unresolved pending work; its mode cannot be changed')
   const url = params.url || CHATGPT_URL
   const existing = await reuseAllocatedConversationAttachment(params.conversationId, url)
-  if (existing) return existing
+  if (existing) {
+    const selected = await selectCreatedConversationMode(existing, mode, params)
+    await saveConversation(params.conversationId, selected)
+    return selected
+  }
   const projectUrl = projectHomeUrl(url)
   const projectSeedUrl = projectUrl ? await findProjectConversationSeedUrl(projectUrl) : null
   const initialUrl = projectUrl ? (projectSeedUrl || CHATGPT_URL) : url
@@ -1047,11 +1093,11 @@ async function createConversation(params) {
     }
   }
 
-  const state = {
+  const state = await selectCreatedConversationMode({
     windowId: window0.windowId,
     tabId: tab.id,
     url: attachedUrl
-  }
+  }, mode, params)
   await saveConversation(params.conversationId, state)
   return state
 }
@@ -1168,9 +1214,7 @@ async function adoptConversation(params) {
   tabOwners.set(live.tabId, params.conversationId)
   try {
     const all = await chrome.storage.local.get(null)
-    const conflict = Object.entries(all).some(([key, value]) =>
-      key.startsWith(STORAGE_PREFIX) && key !== storageKey(params.conversationId) &&
-      (value?.tabId === live.tabId || exactAdoptionUuid(value?.url) === uuid))
+    const conflict = hasConversationBindingConflict(all, params.conversationId, live.tabId, live.url)
     if (conflict) return { accepted: false, reason: 'browser_binding_conflict' }
     if (Object.entries(all).some(([key, value]) => key.startsWith(PENDING_PREFIX) && value?.tabId === live.tabId)) {
       return { accepted: false, reason: 'pending_browser_operation' }
@@ -1500,6 +1544,7 @@ async function performSend(params, operation) {
   }
   await savePendingTurn(pending)
 
+  const priorTabIds = new Set((await chrome.tabs.query({})).map(tab => tab.id))
   pending = { ...pending, phase: 'submitting' }
   await savePendingTurn(pending)
   operation.phase = 'submitting'
@@ -1519,7 +1564,14 @@ async function performSend(params, operation) {
   if (typeof submitted.userMessageId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(submitted.userMessageId)) {
     throw deliveryUncertain('Submit acknowledgement lacked stable user message identity')
   }
-  const submittedUrl = await waitForConversationThreadUrl(currentState.tabId, currentState.url)
+  const submittedAttachment = await waitForSubmittedConversationTab(currentState, currentState.url, priorTabIds, params.conversationId)
+  const submittedUrl = submittedAttachment.url
+  if (submittedAttachment.tabId !== currentState.tabId) {
+    if (tabOwners.has(submittedAttachment.tabId)) throw deliveryUncertain('Submission tab has an active browser send')
+    tabOwners.set(submittedAttachment.tabId, params.conversationId)
+    if (tabOwners.get(currentState.tabId) === params.conversationId) tabOwners.delete(currentState.tabId)
+    operation.tabId = submittedAttachment.tabId
+  }
   const knownUrls = [stableConversationUrl(state.url), stableConversationUrl(submitted.url)]
   if (knownUrls.some(url => url && exactAdoptionUuid(url) !== exactAdoptionUuid(submittedUrl))) {
     throw deliveryUncertain('Committed conversation UUID conflicts with the prior binding or submission acknowledgement')
@@ -1527,19 +1579,27 @@ async function performSend(params, operation) {
   let observed
   let committedTab
   try {
-    observed = await boundedMessage(currentState.tabId, {
+    observed = await boundedMessage(submittedAttachment.tabId, {
       type: 'conversation_state_observe', expectedUserMessageId: submitted.userMessageId
     }, 2000)
-    committedTab = await chrome.tabs.get(currentState.tabId)
+    committedTab = await chrome.tabs.get(submittedAttachment.tabId)
   } catch (error) { throw deliveryUncertain(error) }
   if (observed?.ready !== true || observed.readable !== true || observed.userMessageId !== submitted.userMessageId ||
       pageIdentity(stableConversationUrl(observed.url)) !== pageIdentity(submittedUrl) ||
       pageIdentity(stableConversationUrl(committedTab.url)) !== pageIdentity(submittedUrl)) {
     throw deliveryUncertain('Submitted user UUID was not observed on the committed conversation')
   }
+  if (submittedAttachment.tabId !== currentState.tabId) {
+    const stored = await chrome.storage.local.get(null)
+    if (hasConversationBindingConflict(stored, params.conversationId, submittedAttachment.tabId, submittedUrl) ||
+        Object.entries(stored).some(([key, value]) => key.startsWith(PENDING_PREFIX) &&
+          key !== pendingKey(params.conversationId) && value?.tabId === submittedAttachment.tabId)) {
+      throw deliveryUncertain('Submission target acquired another conversation owner')
+    }
+  }
   const submittedState = {
     ...currentState,
-    url: submittedUrl
+    ...submittedAttachment
   }
   await saveConversation(params.conversationId, submittedState)
   if (typeof params.requestId === 'string' && params.requestId) {
@@ -1551,7 +1611,7 @@ async function performSend(params, operation) {
       externalUrl: submittedUrl
     })
   }
-  pending = { ...pending, phase: 'submitted' }
+  pending = { ...pending, tabId: submittedState.tabId, phase: 'submitted' }
   const currentPending = await loadPendingTurn(params.conversationId)
   if (currentPending?.turnId !== params.turnId) return { accepted: true, ...submittedState, reattached }
   pending.monitorVersion = currentPending.monitorVersion

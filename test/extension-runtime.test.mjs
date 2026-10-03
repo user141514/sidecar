@@ -144,6 +144,94 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
   assert.equal(harness.sentToTabs.length, 0)
 })
 
+
+test('create selects the requested composer mode before publishing the draft binding', async () => {
+  const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } } })
+  const created = await h.request('conversation_create', { conversationId: 'mode-create', url: 'https://chatgpt.com/g/g-p-test-subagents/project', mode: 'work', writerEpoch: 3 })
+  assert.equal(created.ok, true, created.error)
+  assert.equal(created.result.mode, 'work')
+  const selection = h.sentToTabs.find(entry => entry.message.type === 'conversation_mode_select')
+  assert.equal(selection.message.mode, 'work')
+  assert.equal(selection.storageSnapshot['conversation:mode-create'], undefined)
+  assert.ok(selection.message.contentEffect)
+  assert.equal(h.storageState['conversation:mode-create'].mode, 'work')
+  const reused = await h.request('conversation_create', { conversationId: 'mode-create', url: 'https://chatgpt.com/g/g-p-test-subagents/project', mode: 'chat', writerEpoch: 3 })
+  assert.equal(reused.result.mode, 'chat')
+  assert.equal(h.createdTabs.length, 1)
+  assert.equal(h.storageState['conversation:mode-create'].mode, 'chat')
+})
+
+test('invalid composer mode cannot allocate a browser tab', async () => {
+  const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } } })
+  const created = await h.request('conversation_create', { conversationId: 'invalid-mode', mode: 'worker', writerEpoch: 3 })
+  assert.equal(created.ok, false)
+  assert.match(created.error, /mode/)
+  assert.equal(h.createdTabs.length + h.createdWindows.length, 0)
+})
+
+test('submit follows a newly opened tab with the exact opener and committed user UUID', async () => {
+  const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 },
+    'conversation:handoff': { tabId: 20, windowId: 10, url: 'https://chatgpt.com/g/g-p-test-subagents/project' } },
+    tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/g/g-p-test-subagents/project' }], windows: [{ id: 10 }, { id: 12 }],
+    fastConversationUrlClock: true, submitNavigatesTo: 'https://chatgpt.com/c/local-chatgpt%3Atemporary',
+    submitNewTabs: [{ id: 21, windowId: 12, openerTabId: 20, url: 'https://chatgpt.com/g/g-p-test-subagents/c/00000000-0000-4000-8000-000000000007', userMessageId: '00000000-0000-4000-8000-000000000001' }] })
+  const sent = await h.request('conversation_send', { conversationId: 'handoff', turnId: 'handoff-turn', requestId: 'handoff-send',
+    externalUrl: 'https://chatgpt.com/g/g-p-test-subagents/project', existingOnly: true, writerEpoch: 3, text: 'one seed' })
+  assert.equal(sent.ok, true, sent.error)
+  assert.equal(sent.result.tabId, 21)
+  assert.equal(sent.result.windowId, 12)
+  assert.equal(h.storageState['conversation:handoff'].tabId, 21)
+  assert.equal(h.storageState['pending:handoff'].tabId, 21)
+  assert.equal(h.storageState['effect-receipt:handoff-send'].externalUrl, 'https://chatgpt.com/g/g-p-test-subagents/c/00000000-0000-4000-8000-000000000007')
+  assert.equal(h.sentToTabs.filter(entry => entry.message.type === 'conversation_submit').length, 1)
+  assert.equal(h.sentToTabs.find(entry => entry.message.type === 'conversation_monitor_start').tabId, 21)
+})
+
+test('new tab without unambiguous opener and exact identity cannot be adopted after submit', async t => {
+  const exact = { id: 21, windowId: 12, openerTabId: 20, url: 'https://chatgpt.com/g/g-p-test-subagents/c/00000000-0000-4000-8000-000000000007', userMessageId: '00000000-0000-4000-8000-000000000001' }
+  for (const [name, submitNewTabs] of [
+    ['no opener', [{ ...exact, openerTabId: undefined }]],
+    ['wrong opener', [{ ...exact, openerTabId: 99 }]],
+    ['ambiguous', [exact, { ...exact, id: 22 }]],
+    ['wrong user', [{ ...exact, userMessageId: '00000000-0000-4000-8000-000000000099' }]]
+  ]) await t.test(name, async () => {
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 },
+      'conversation:handoff': { tabId: 20, windowId: 10, url: 'https://chatgpt.com/g/g-p-test-subagents/project' } },
+      tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/g/g-p-test-subagents/project' }], windows: [{ id: 10 }, { id: 12 }],
+      fastConversationUrlClock: true, submitNavigatesTo: 'https://chatgpt.com/c/local-chatgpt%3Atemporary', submitNewTabs })
+    const sent = await h.request('conversation_send', { conversationId: 'handoff', turnId: 'handoff-turn', requestId: 'handoff-send',
+      externalUrl: 'https://chatgpt.com/g/g-p-test-subagents/project', existingOnly: true, writerEpoch: 3, text: 'one seed' })
+    assert.equal(sent.errorCode, 'DELIVERY_UNCERTAIN')
+    assert.equal(h.storageState['effect-receipt:handoff-send'], undefined)
+    assert.equal(h.storageState['conversation:handoff'].tabId, 20)
+    assert.equal(h.storageState['pending:handoff'].phase, 'submitting')
+    assert.equal(h.sentToTabs.filter(entry => entry.message.type === 'conversation_submit').length, 1)
+  })
+})
+
+
+test('handoff cannot duplicate a canonical conversation binding, including a late owner', async t => {
+  for (const late of [false, true]) await t.test(late ? 'owner added during observation' : 'closed-tab owner', async () => {
+    const thread = 'https://chatgpt.com/g/g-p-test-subagents/c/00000000-0000-4000-8000-000000000007'
+    const foreign = { tabId: 99, windowId: 10, url: thread }
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 },
+      'conversation:handoff': { tabId: 20, windowId: 10, url: 'https://chatgpt.com/g/g-p-test-subagents/project' },
+      ...(!late ? { 'conversation:another': foreign } : {}) },
+      tabs: [{ id: 20, windowId: 10, url: 'https://chatgpt.com/g/g-p-test-subagents/project' }],
+      windows: [{ id: 10 }, { id: 12 }], fastConversationUrlClock: true,
+      submitNavigatesTo: 'https://chatgpt.com/c/local-chatgpt%3Atemporary',
+      submitNewTabs: [{ id: 21, windowId: 12, openerTabId: 20, url: thread, userMessageId: '00000000-0000-4000-8000-000000000001' }],
+      onStateObservation: late ? storage => { storage['conversation:another'] = foreign } : null })
+    const sent = await h.request('conversation_send', { conversationId: 'handoff', turnId: 'handoff-turn', requestId: 'handoff-send',
+      externalUrl: 'https://chatgpt.com/g/g-p-test-subagents/project', existingOnly: true, writerEpoch: 3, text: 'one seed' })
+    assert.equal(sent.errorCode, 'DELIVERY_UNCERTAIN')
+    assert.equal(h.storageState['effect-receipt:handoff-send'], undefined)
+    assert.equal(h.storageState['conversation:handoff'].tabId, 20)
+    assert.equal(h.storageState['pending:handoff'].phase, 'submitting')
+    assert.equal(h.sentToTabs.filter(entry => entry.message.type === 'conversation_submit').length, 1)
+  })
+})
+
 let harnessEffectToken = 0
 
 const retirementIdentity = { conversationId: 'retire-conv', turnId: 'retire-turn', requestId: 'retire-send',
@@ -493,7 +581,7 @@ test('real host ledger and native retirement compose for legacy pending without 
   assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length + h.sentToTabs.length, 0)
 })
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null, fastConversationUrlClock = false, onSubmittedTabGet = null, submitPendingUrl = null, submitUserMessageId = '00000000-0000-4000-8000-000000000001', contentMessageProvider = null, submitResponseUrl = null, ...retirementFaults } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null, fastConversationUrlClock = false, onSubmittedTabGet = null, submitPendingUrl = null, submitUserMessageId = '00000000-0000-4000-8000-000000000001', contentMessageProvider = null, submitResponseUrl = null, submitNewTabs = [], ...retirementFaults } = {}) {
   // Chrome's storage dictionary roundtrip does not preserve object insertion order.
   const storageRoundTrip = value => retirementFaults.sortStorageKeys
     ? JSON.parse(JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
@@ -756,6 +844,10 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           }
           return { found: false, name: message.name }
         }
+        if (message.type === 'conversation_mode_select') {
+          tab.mode = message.mode
+          return { selected: true, mode: tab.mode, url: tab.url }
+        }
         if (message.type === 'conversation_prepare') {
           if (prepareGate) await prepareGate
           if (prepareTransportFailure) throw new Error('prepare response lost')
@@ -768,6 +860,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           if (submitNavigatesTo) tab.url = submitNavigatesTo
           if (submitPendingUrl) tab.pendingUrl = submitPendingUrl
           submittedTabs.add(tabId)
+          for (const opened of submitNewTabs) tabMap.set(opened.id, { ...opened })
           tab.userMessageId = submitUserMessageId
           return { accepted: true, userMessageId: submitUserMessageId, url: responseUrl }
         }

@@ -11,6 +11,16 @@ import { dispatchConversationTool } from '../src/conversation-tools.mjs'
 import { WorkController } from '../src/work-controller.mjs'
 import { WorkLedger } from '../src/work-ledger.mjs'
 
+
+test('create tool carries an explicit composer mode through the public boundary', async () => {
+  const calls = []
+  const host = { async create(payload) { calls.push(payload); return { mode: payload.mode ?? 'chat' } } }
+  assert.equal((await dispatchConversationTool(host, 'conversation_create', { project_url: 'https://chatgpt.com/g/g-p-subagents/project', mode: 'work' })).mode, 'work')
+  assert.deepEqual(calls[0], { projectUrl: 'https://chatgpt.com/g/g-p-subagents/project', mode: 'work' })
+  assert.throws(() => dispatchConversationTool(host, 'conversation_create', { mode: 'worker' }), /mode/)
+  assert.equal(calls.length, 1)
+})
+
 const target = 'https://chatgpt.com/c/00000000-0000-0000-0000-000000000011'
 const expected = { userMessageId: 'user-1', assistantMessageId: 'assistant-1' }
 const intent = { kind: 'continue', target, expected, text: 'continue bounded task' }

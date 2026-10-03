@@ -39,6 +39,41 @@ test('CLI maps stock DevSpace-friendly commands to shared provider MCP tools', a
   ])
 })
 
+test('CLI create forwards explicit chat/work mode with either project option order', async () => {
+  const calls = []
+  const fetchImpl = fakeFetch(calls)
+  await runCli(['create', '--mode', 'chat'], { fetchImpl })
+  await runCli(['create', '--mode', 'work'], { fetchImpl })
+  await runCli(['create', '--mode', 'chat', '--project', ' https://chatgpt.com/g/g-p-test/project '], { fetchImpl })
+  await runCli(['create', '--project', 'https://chatgpt.com/g/g-p-test/project', '--mode', 'work'], { fetchImpl })
+  assert.deepEqual(calls.map(call => [call.params.name, call.params.arguments]), [
+    ['conversation_create', { mode: 'chat' }],
+    ['conversation_create', { mode: 'work' }],
+    ['conversation_create', { mode: 'chat', project_url: 'https://chatgpt.com/g/g-p-test/project' }],
+    ['conversation_create', { project_url: 'https://chatgpt.com/g/g-p-test/project', mode: 'work' }]
+  ])
+})
+
+test('CLI create rejects malformed mode/project options before contacting the provider', async () => {
+  const calls = []
+  const fetchImpl = fakeFetch(calls)
+  for (const args of [
+    ['--mode'], ['--mode', ''], ['--mode', '   '],
+    ['--project'], ['--project', ''], ['--project', '   '],
+    ['--mode', '--project', 'https://chatgpt.com/g/g-p-test/project'],
+    ['--project', '--mode', 'chat'], ['--project', '--mode'], ['--project', '--unknown'],
+    ['--mode', 'other'], ['--mode', 'CHAT'],
+    ['--mode', 'chat', '--mode', 'work'],
+    ['--project', 'first', '--project', 'second'],
+    ['--mode', 'chat', '--unknown', 'value'],
+    ['--unknown', 'value'], ['positional'], ['constructor'], ['toString'], ['__proto__'],
+    ['--mode', 'chat', 'positional']
+  ]) {
+    await assert.rejects(runCli(['create', ...args], { fetchImpl }), TypeError)
+  }
+  assert.equal(calls.length, 0)
+})
+
 test('CLI forwards optional app selection and idempotent request identity', async () => {
   const calls = []
   const fetchImpl = fakeFetch(calls)
@@ -64,7 +99,7 @@ test('CLI prints help when invoked directly with Node on either OS', () => {
   const target = fileURLToPath(new URL('../src/cli.mjs', import.meta.url))
   const result = spawnSync(process.execPath, [target, '--help'], { encoding: 'utf8' })
   assert.equal(result.status, 0, result.stderr)
-  assert.match(result.stdout, /chatgpt-conversation create/)
+  assert.match(result.stdout, /chatgpt-conversation create \[--project <project_url>\] \[--mode <chat\|work>\]/)
   assert.match(result.stdout, /extension-update/)
 })
 

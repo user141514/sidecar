@@ -181,41 +181,47 @@ export class ChatGptConversationHost {
     return adoptExistingConversation(this, payload)
   }
 
-  async create({ projectUrl } = {}) {
+  async create({ projectUrl, mode = 'chat' } = {}) {
+    if (!['chat', 'work'].includes(mode)) throw new TypeError('Conversation mode must be chat or work')
     const pinnedProjectUrl = projectUrl ? null : await this.store.getDefaultProjectUrl()
     const createUrl = normalizeProjectHomeUrl(projectUrl || pinnedProjectUrl) || DEFAULT_CHATGPT_URL
     const created = await this.store.create({
       backend: 'chatgpt-web-extension',
       externalUrl: createUrl
     })
-    return this.#attachConversation(created, createUrl)
+    return this.#attachConversation(created, createUrl, mode)
   }
 
-  async #attachConversation(created, createUrl) {
+  async #attachConversation(created, createUrl, mode = 'chat') {
     const current = await this.store.read(created.id)
     const attached = [...(current.events || [])].reverse().find(event => event.type === 'browser_attached')
     if (attached) {
+      if (attached.mode !== mode) throw new Error('Previously allocated conversation mode does not match the request')
       return {
         ...created,
         phase: 'allocated',
         threadCreated: false,
         windowId: attached.windowId,
-        tabId: attached.tabId
+        tabId: attached.tabId,
+        mode: attached.mode
       }
     }
     try {
       const browser = await this.bridge.request('conversation_create', {
         conversationId: created.id,
         url: createUrl,
+        mode,
         writerEpoch: this.writer.epoch
       })
+      if (browser.mode !== mode) throw new Error('Conversation mode was not confirmed by the browser')
       await this.store.append(created.id, {
         type: 'browser_attached',
         windowId: browser.windowId,
         tabId: browser.tabId,
-        externalUrl: browser.url || createUrl
+        externalUrl: browser.url || createUrl,
+        mode: browser.mode
       })
-      return { ...created, phase: 'allocated', threadCreated: false, windowId: browser.windowId, tabId: browser.tabId }
+      return { ...created, phase: 'allocated', threadCreated: false, windowId: browser.windowId, tabId: browser.tabId, mode: browser.mode }
     } catch (error) {
       await this.store.append(created.id, {
         type: 'error',

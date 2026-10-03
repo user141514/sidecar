@@ -12,7 +12,7 @@ function usage() {
     'chatgpt-conversation project-create <name...>',
     'chatgpt-conversation project-find <name...>',
     'chatgpt-conversation project-pin <project_url>',
-    'chatgpt-conversation create [--project <project_url>]',
+    'chatgpt-conversation create [--project <project_url>] [--mode <chat|work>]',
     'chatgpt-conversation send <conversation_id> [--app <app_name>] [--request-id <id>] <prompt...>',
     'chatgpt-conversation read <conversation_id>',
     'chatgpt-conversation extension-status',
@@ -36,9 +36,19 @@ function commandToCall(argv) {
     return ['project_pin', { project_url: args[0].trim() }]
   }
   if (command === 'create') {
-    if (!args.length) return ['conversation_create', {}]
-    if (args.length === 2 && args[0] === '--project' && args[1].trim()) return ['conversation_create', { project_url: args[1].trim() }]
-    throw new TypeError(args[0] === '--project' ? 'create --project requires project_url' : 'create accepts only --project <project_url>')
+    const fields = { '--project': 'project_url', '--mode': 'mode' }
+    const payload = {}
+    for (let index = 0; index < args.length; index += 2) {
+      const flag = args[index]
+      if (!Object.hasOwn(fields, flag)) throw new TypeError('create accepts only --project <project_url> and --mode <chat|work>')
+      const field = fields[flag]
+      if (Object.hasOwn(payload, field)) throw new TypeError(`create ${flag} cannot be repeated`)
+      const value = args[index + 1]?.trim()
+      if (!value || value.startsWith('--')) throw new TypeError(`create ${flag} requires ${field}`)
+      if (field === 'mode' && !['chat', 'work'].includes(value)) throw new TypeError('create --mode requires chat or work')
+      payload[field] = value
+    }
+    return ['conversation_create', payload]
   }
   if (command === 'send') {
     const [conversationId, ...rest] = args

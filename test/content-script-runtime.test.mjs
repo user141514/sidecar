@@ -6,6 +6,159 @@ import { nativeContentFixture, MODERN_USER_ID, MODERN_ASSISTANT_ID } from './hel
 
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
 
+function addComposerMode(fixture, { english = false, selected = 'chat' } = {}) {
+  const group = fixture.addNode('div', { role: 'group', 'aria-label': english ? 'Composer mode' : '撰写器模式' }, fixture.main)
+  const chat = fixture.addNode('button', { type: 'button', 'aria-pressed': String(selected === 'chat') }, group, english ? 'Chat' : '聊天')
+  const work = fixture.addNode('button', { type: 'button', 'aria-pressed': String(selected === 'work') }, group)
+  fixture.addNode('span', {}, work, english ? 'Work' : '工作')
+  const controls = { group, chat, work, clicks: 0 }
+  for (const [mode, button] of [['chat', chat], ['work', work]]) button.click = () => {
+    controls.clicks += 1
+    chat.attrs['aria-pressed'] = String(mode === 'chat')
+    work.attrs['aria-pressed'] = String(mode === 'work')
+  }
+  return controls
+}
+
+async function callComposerMode(fixture, message) {
+  let timer
+  try {
+    return await Promise.race([
+      fixture.call({ type: 'conversation_mode_select', ...message }),
+      new Promise(resolve => { timer = setTimeout(() => resolve({ unanswered: true }), 50) })
+    ])
+  } finally { clearTimeout(timer) }
+}
+
+test('composer mode selects the scoped Work button and reads its final mode and URL', async t => {
+  const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+  const controls = addComposerMode(fixture)
+  const decoy = fixture.addNode('button', { role: 'tab', type: 'button', 'aria-pressed': 'true' }, fixture.main, '聊天')
+  decoy.click = () => assert.fail('foreign Chat tab must not be clicked')
+  controls.work.click = () => {
+    controls.clicks += 1
+    controls.chat.attrs['aria-pressed'] = 'false'; controls.work.attrs['aria-pressed'] = 'true'
+    fixture.location.href = 'https://chatgpt.com/c/11111111-1111-4111-8111-111111111111'
+  }
+  const result = await callComposerMode(fixture, { mode: 'work' })
+  assert.equal(result.selected, true)
+  assert.equal(result.mode, 'work')
+  assert.equal(result.url, 'https://chatgpt.com/c/11111111-1111-4111-8111-111111111111')
+  assert.equal(controls.clicks, 1)
+  assert.equal(fixture.clicks, 0, 'selecting a mode must not submit a prompt')
+})
+
+test('composer mode already selected is verified without clicking in both locales', async t => {
+  for (const english of [false, true]) for (const mode of ['chat', 'work']) {
+    const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+    const controls = addComposerMode(fixture, { english, selected: mode })
+    const result = await callComposerMode(fixture, { mode })
+    assert.equal(result.selected, true)
+    assert.equal(result.mode, mode)
+    assert.equal(controls.clicks, 0)
+  }
+})
+
+test('composer mode re-observes a replaced group after the selection click', async t => {
+  const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+  const controls = addComposerMode(fixture)
+  controls.work.click = () => {
+    controls.clicks += 1
+    controls.group.connected = controls.chat.connected = controls.work.connected = false
+    addComposerMode(fixture, { selected: 'work' })
+  }
+  const result = await callComposerMode(fixture, { mode: 'work' })
+  assert.equal(result.selected, true)
+  assert.equal(result.mode, 'work')
+  assert.equal(controls.clicks, 1)
+})
+
+test('composer mode rejects ambiguous hidden disabled and malformed controls before clicking', async t => {
+  const corruptions = [
+    fixture => { addComposerMode(fixture) },
+    (_fixture, controls) => { controls.group.shown = false },
+    (_fixture, controls) => { controls.work.shown = false },
+    (_fixture, controls) => { controls.work.disabled = true },
+    (_fixture, controls) => { controls.work.attrs['aria-disabled'] = 'true' },
+    (_fixture, controls) => { controls.group.attrs.inert = '' },
+    (_fixture, controls) => { controls.work.attrs['aria-pressed'] = 'true' },
+    (_fixture, controls) => { controls.chat.attrs['aria-pressed'] = 'false' },
+    (_fixture, controls) => { controls.chat.attrs['aria-pressed'] = 'yes' },
+    (_fixture, controls) => { controls.work.ownText = 'Work preview ' },
+    (fixture, controls) => { fixture.addNode('button', { type: 'button', 'aria-pressed': 'false' }, controls.group, '聊天') }
+  ]
+  for (const corrupt of corruptions) {
+    const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+    const controls = addComposerMode(fixture)
+    corrupt(fixture, controls)
+    const result = await callComposerMode(fixture, { mode: 'work' })
+    assert.equal(result.selected, false)
+    assert.equal(typeof result.error, 'string')
+    assert.equal(controls.clicks, 0)
+    assert.equal(fixture.clicks, 0)
+  }
+})
+
+test('composer mode rejects an already selected control inside a disabled fieldset', async t => {
+  const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+  const controls = addComposerMode(fixture, { selected: 'chat' })
+  controls.group.parentElement = fixture.addNode('fieldset', { disabled: '' }, fixture.main)
+  const result = await callComposerMode(fixture, { mode: 'chat' })
+  assert.equal(result.selected, false)
+  assert.equal(typeof result.error, 'string')
+  assert.equal(controls.clicks, 0)
+})
+
+test('composer mode does not infer Chat from a missing group even with a usable Work composer', async t => {
+  for (const mode of ['chat', 'work']) {
+    const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+    const result = await callComposerMode(fixture, { mode })
+    assert.equal(result.selected, false)
+    assert.match(result.error, /mode.*unavailable/i)
+    assert.equal(fixture.clicks, 0)
+  }
+})
+
+test('composer mode only accepts exact chat and work values before changing the UI', async t => {
+  for (const mode of [undefined, null, '', 'Chat', 'thinking', ' work ', 1]) {
+    const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+    const controls = addComposerMode(fixture)
+    const result = await callComposerMode(fixture, { mode })
+    assert.equal(result.selected, false)
+    assert.match(result.error, /mode/i)
+    assert.equal(controls.clicks, 0)
+  }
+})
+
+test('composer mode times out without repeated clicks when the selected state does not change', async t => {
+  const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+  const controls = addComposerMode(fixture)
+  controls.work.click = () => { controls.clicks += 1 }
+  const result = await callComposerMode(fixture, { mode: 'work' })
+  assert.equal(result.selected, false)
+  assert.match(result.error, /read back/i)
+  assert.equal(controls.clicks, 1)
+})
+
+test('composer mode journal replays the same failed readback without repeating the UI effect', async t => {
+  const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+  fixture.configureRuntimeTransport(async message => message.kind === 'content_effect_document'
+    ? { token: message.token, tabId: 41, documentId: 'a'.repeat(32), url: fixture.location.href }
+    : { settled: true, token: message.effect?.token })
+  await fixture.call({ type: 'sidecar_effect_document', token: 'mode-document' })
+  const controls = addComposerMode(fixture)
+  controls.work.click = () => { controls.clicks += 1 }
+  const effect = { version: 1, token: 'mode-effect', tabId: 41, documentId: 'a'.repeat(32),
+    registrationId: null, writerEpoch: 3, method: 'conversation_mode_select', instanceId: 'mode-instance' }
+  const first = await callComposerMode(fixture, { mode: 'work', contentEffect: effect })
+  const second = await callComposerMode(fixture, { mode: 'work', contentEffect: effect })
+  assert.equal(first.selected, false)
+  assert.match(first.error, /read back/i)
+  assert.equal(second.error, first.error)
+  assert.equal(controls.clicks, 1)
+  assert.equal(first.contentEffectSettled.token, 'mode-effect')
+})
+
 test('captured modern persistent units produce native readable body and same-turn terminal evidence', async t => {
   const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
   const raw = await fixture.call({ type: 'conversation_state_observe', expectedUserMessageId: MODERN_USER_ID })

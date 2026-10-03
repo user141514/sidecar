@@ -6,7 +6,7 @@ let contentDisposed = false
 let preparedSend = null
 const contentBuildId = globalThis.__sidecarBuildId ?? 'unversioned'
 const contentEffects = globalThis.__sidecarContentEffects ??= { documentId: null, tabId: null, operations: new Map(), completed: new Map() }
-const journaledMethods = new Set(['conversation_prepare', 'conversation_submit', 'conversation_stop', 'webgpt_shift_test', 'project_open', 'project_create'])
+const journaledMethods = new Set(['conversation_mode_select', 'conversation_prepare', 'conversation_submit', 'conversation_stop', 'webgpt_shift_test', 'project_open', 'project_create'])
 globalThis.__sidecarContentRuntime = {
   buildId: contentBuildId,
   monitorTurn,
@@ -120,6 +120,58 @@ function elementLabel(node) {
     node?.textContent ||
     ''
   ).trim()
+}
+
+function findComposerModeControls() {
+  const groups = [...document.querySelectorAll(
+    '[role="group"][aria-label="撰写器模式"], [role="group"][aria-label="Composer mode"]'
+  )].filter(visibleNode)
+  if (!groups.length) return null
+  if (groups.length !== 1) throw new Error('Composer mode group is ambiguous')
+  const group = groups[0]
+  if (group.closest('[role="dialog"], [inert], [aria-disabled="true"], fieldset[disabled]')) {
+    throw new Error('Composer mode group is unavailable')
+  }
+  const buttons = [...group.querySelectorAll('button[type="button"][aria-pressed]')]
+    .filter(button => button.getAttribute('role') !== 'tab')
+  if (buttons.length !== 2 || buttons.some(button =>
+    button.closest('[role="group"]') !== group || !visibleNode(button) || button.disabled ||
+    button.getAttribute('disabled') !== null || button.closest('[inert], [aria-disabled="true"]')
+  )) throw new Error('Composer mode controls are unavailable')
+  const controls = {}
+  for (const button of buttons) {
+    const label = elementLabel(button).toLowerCase()
+    const mode = label === 'chat' || label === '聊天' ? 'chat' :
+      label === 'work' || label === '工作' ? 'work' : null
+    if (!mode || controls[mode] || !['true', 'false'].includes(button.getAttribute('aria-pressed'))) {
+      throw new Error('Composer mode controls are ambiguous')
+    }
+    controls[mode] = button
+  }
+  if (!controls.chat || !controls.work ||
+      buttons.filter(button => button.getAttribute('aria-pressed') === 'true').length !== 1) {
+    throw new Error('Composer mode selection is ambiguous')
+  }
+  return controls
+}
+
+async function selectComposerMode(mode) {
+  if (mode !== 'chat' && mode !== 'work') throw new Error('Composer mode must be chat or work')
+  const controls = findComposerModeControls()
+  // A missing toggle does not prove a legacy Chat surface.
+  if (!controls) throw new Error('Composer mode is unavailable')
+  if (controls[mode].getAttribute('aria-pressed') === 'true') {
+    return { selected: true, mode, url: location.href }
+  }
+  controls[mode].click()
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await yieldWebGptUi()
+    const current = findComposerModeControls()
+    if (current?.[mode].getAttribute('aria-pressed') === 'true') {
+      return { selected: true, mode, url: location.href }
+    }
+  }
+  throw new Error('Composer mode did not read back target: ' + mode)
 }
 
 function findToolsButton() {
@@ -1503,6 +1555,16 @@ function dispatchSidecarMessage(message, _sender, sendResponse) {
       assistantText: bodySnapshot(last).bodyText
     })
     return
+  }
+
+  if (message?.type === 'conversation_mode_select') {
+    void selectComposerMode(message.mode)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({
+        selected: false,
+        error: error instanceof Error ? error.message : String(error)
+      }))
+    return true
   }
 
   if (message?.type === 'webgpt_shift_test') {

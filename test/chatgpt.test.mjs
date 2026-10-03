@@ -91,7 +91,7 @@ class FakeBridge extends EventEmitter {
       }
     }
     if (method === 'conversation_create') {
-      return { windowId: 101, tabId: 202, url: 'https://chatgpt.com/' }
+      return { windowId: 101, tabId: 202, url: 'https://chatgpt.com/', mode: params.mode ?? 'chat' }
     }
     if (method === 'conversation_send') {
       return { accepted: true, url: params.externalUrl || 'https://chatgpt.com/' }
@@ -232,6 +232,31 @@ test('project_create rejects a noncanonical Project URL returned by the browser'
   const host = new ChatGptConversationHost({ bridge, store: new MemoryStore() })
 
   await assert.rejects(host.createProject('subagents'), /Project home URL/)
+})
+
+
+test('create explicitly selects Chat or Work and rejects an unconfirmed native mode', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  for (const mode of ['chat', 'work']) {
+    const bridge = new FakeBridge(), store = new MemoryStore()
+    const host = new ChatGptConversationHost({ bridge, store })
+    const created = await host.create({ mode })
+    assert.equal(bridge.requests[0].params.mode, mode)
+    assert.equal(created.mode, mode)
+  }
+  const bridge = new FakeBridge()
+  bridge.request = async () => ({ tabId: 202, windowId: 101, url: 'https://chatgpt.com/', mode: 'chat' })
+  const host = new ChatGptConversationHost({ bridge, store: new MemoryStore() })
+  await assert.rejects(host.create({ mode: 'work' }), /mode.*confirm/i)
+})
+
+test('invalid create mode is rejected before allocating a durable conversation', async () => {
+  const { ChatGptConversationHost } = await loadChatGptModule()
+  const bridge = new FakeBridge(), store = new MemoryStore()
+  const host = new ChatGptConversationHost({ bridge, store })
+  await assert.rejects(host.create({ mode: 'worker' }), /mode/)
+  assert.equal(store.events.length, 0)
+  assert.equal(bridge.requests.length, 0)
 })
 
 test('create can target a specific ChatGPT Project home', async () => {
@@ -437,7 +462,7 @@ test('only one concurrent send may enter the browser for the same conversation',
   bridge.request = async (method, params) => {
     bridge.requests.push({ method, params })
     if (method === 'conversation_create') {
-      return { windowId: 101, tabId: 202, url: 'https://chatgpt.com/' }
+      return { windowId: 101, tabId: 202, url: 'https://chatgpt.com/', mode: params.mode ?? 'chat' }
     }
     if (method === 'conversation_send') {
       return new Promise((resolve) => {
