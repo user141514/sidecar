@@ -278,6 +278,75 @@ test('create mode waits only for readonly exact document metadata before persist
   }
 })
 
+test('Chat create retries only an absent readonly receiver before one exact mode effect', async () => {
+  for (const metadataTransient of [false, true]) {
+    let probes = 0
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, fastModeDocumentClock: true,
+      contentDocumentProbeProvider(tab, metadata) {
+        probes += 1
+        if (probes === 1) throw new Error('Could not establish connection. Receiving end does not exist.')
+        if (metadataTransient && probes === 2) return { ...metadata, modeDocumentFence: false }
+        tab.documentId = 'b'.repeat(32)
+        return { ...metadata, documentId: tab.documentId }
+      } })
+    const created = await h.request('conversation_create', { conversationId: 'chat-receiver-ready', mode: 'chat', writerEpoch: 3 })
+    assert.equal(created.ok, true, created.error)
+    assert.equal(created.result.mode, 'chat')
+    assert.equal(probes, metadataTransient ? 3 : 2)
+    const selections = h.sentToTabs.filter(entry => entry.message.type === 'conversation_mode_select')
+    assert.equal(selections.length, 1)
+    assert.equal(selections[0].options.documentId, 'b'.repeat(32))
+    assert.equal(selections[0].message.contentEffect.modeIntent.mode, 'chat')
+    assert.equal(h.storageState['conversation:chat-receiver-ready'].mode, 'chat')
+    for (const probe of h.sentToTabs.filter(entry => entry.message.type === 'sidecar_effect_document')) {
+      assert.equal(Object.keys(probe.storageSnapshot).some(key => key.startsWith('content-effect:')), false)
+    }
+    assert.ok(h.modeDocumentElapsed > 0 && h.modeDocumentElapsed < 5000)
+    assert.equal(h.sentToTabs.some(entry => ['conversation_prepare', 'conversation_submit'].includes(entry.message.type)), false)
+  }
+})
+
+test('Chat create receiver readiness shares the metadata deadline and preserves the first failure diagnostic', async () => {
+  for (const metadataNeverReady of [false, true]) {
+    let probes = 0
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, fastModeDocumentClock: true,
+      contentDocumentProbeProvider(_tab, metadata) {
+        probes += 1
+        if (probes === 1 || !metadataNeverReady) throw new Error('Could not establish connection. Receiving end does not exist.')
+        return { ...metadata, modeDocumentFence: false }
+      } })
+    const created = await h.request('conversation_create', { conversationId: 'chat-receiver-missing', mode: 'chat', writerEpoch: 3 })
+    assert.equal(created.ok, false)
+    assert.match(created.error, /first mismatch=receiver/)
+    assert.match(created.error, new RegExp('current mismatch=' + (metadataNeverReady ? 'fence' : 'receiver')))
+    assert.ok(probes > 1)
+    assert.equal(h.modeDocumentElapsed, 5000)
+    assert.equal(h.storageState['conversation:chat-receiver-missing'], undefined)
+    assert.equal(h.sentToTabs.some(entry => entry.message.type === 'conversation_mode_select'), false)
+    assert.equal(Object.keys(h.storageState).some(key => key.startsWith('content-effect:')), false)
+  }
+})
+
+test('Chat create does not retry ambiguous channel failures or malformed readonly document identity', async () => {
+  for (const fault of ['channel-close', 'decorated-receiver', 'malformed-document']) {
+    let probes = 0
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, fastModeDocumentClock: true,
+      contentDocumentProbeProvider(_tab, metadata) {
+        probes += 1
+        if (fault === 'channel-close') throw new Error('A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received')
+        if (fault === 'decorated-receiver') throw new Error('Could not establish connection. Receiving end does not exist. outcome unknown')
+        return { ...metadata, documentId: 'temporary-document' }
+      } })
+    const created = await h.request('conversation_create', { conversationId: 'chat-receiver-fail-closed', mode: 'chat', writerEpoch: 3 })
+    assert.equal(created.ok, false, fault)
+    assert.equal(probes, 1, fault)
+    assert.equal(h.modeDocumentElapsed, 0, fault)
+    assert.equal(h.storageState['conversation:chat-receiver-fail-closed'], undefined, fault)
+    assert.equal(h.sentToTabs.some(entry => entry.message.type === 'conversation_mode_select'), false, fault)
+    assert.equal(Object.keys(h.storageState).some(key => key.startsWith('content-effect:')), false, fault)
+  }
+})
+
 test('create mode does not issue another probe or effect when metadata becomes ready exactly at the deadline', async () => {
   let lateProbes = 0
   const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, fastModeDocumentClock: true,

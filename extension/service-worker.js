@@ -428,8 +428,18 @@ async function boundedMessage(tabId, message, timeoutMs, onLateResponse, writerP
       const unavailableModeDocument = () => new Error(`Exact composer mode document unavailable; first mismatch=${firstMismatch ?? 'deadline'}; current mismatch=${mismatches.join(',') || 'deadline'}; build=${document?.buildId ?? 'missing'}; fence=${document?.modeDocumentFence === true}; URL=${pageIdentity(document?.url)}; expected=${pageIdentity(message.expectedUrl)}`)
       while (true) {
         if (modeDeadline !== null && Date.now() >= modeDeadline) throw unavailableModeDocument()
-        document = await boundedMessage(tabId, { type: 'sidecar_effect_document', token },
-          modeDeadline === null ? 2000 : Math.min(2000, Math.max(1, modeDeadline - Date.now())))
+        try {
+          document = await boundedMessage(tabId, { type: 'sidecar_effect_document', token },
+            modeDeadline === null ? 2000 : Math.min(2000, Math.max(1, modeDeadline - Date.now())))
+        } catch (error) {
+          if (modeDeadline === null || error?.message !== 'Could not establish connection. Receiving end does not exist.') throw error
+          document = undefined
+          mismatches = ['receiver']
+          firstMismatch ??= 'receiver'
+          if (Date.now() >= modeDeadline) throw unavailableModeDocument()
+          await new Promise(resolve => setTimeout(resolve, Math.min(250, Math.max(0, modeDeadline - Date.now()))))
+          continue
+        }
         if (document?.token !== token || document.tabId !== tabId ||
             typeof document.documentId !== 'string' || !/^[0-9a-f]{32}$/i.test(document.documentId) ||
             !webGptShiftPageUrl(document.url)) throw deliveryUncertain('Exact content document unavailable')
