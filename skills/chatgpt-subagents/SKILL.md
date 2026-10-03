@@ -21,7 +21,9 @@ If bootstrap detects an existing working Native Messaging registration outside R
 
 Managed coordinator conversation workers use `conversation-work` / the `work_*` MCP tools. Their machine-readable worker kind is `conversation_worker` and backend is `sidecar`. `WorkController.dispatch()` is required to create every managed child inside the canonical `subagents` Project stored in Runtime Home config; missing Project identity is a hard error and must never fall back to root `https://chatgpt.com/`. Do not substitute DevSpace local provider workers (`host_worker`) or Orca workers for this route.
 
-Manual transport remains available through `chatgpt-conversation create [--project <project_url>]`, `send`, and `read`. Do not use manual root conversations as a substitute for managed worker dispatch.
+Manual transport remains available through `chatgpt-conversation create [--project <project_url>] [--mode chat|work]`, `send`, and `read`. `create` defaults to Chat; use `--mode work` only when Work is requested. Mode selection must be read back on the opened page before creation returns. Do not use manual root conversations as a substitute for managed worker dispatch.
+
+Thinking strength is a separate control on that opened conversation tab. Honor the requested Chat/Work mode, change strength on the exact returned tab, and read back both mode and strength there. Switching to Work is not part of changing Chat strength; a separate Work test must be identified as such.
 
 `send` acknowledges submission, not completion. Use `chatgpt-conversation read <conversation_id>` later or `conversation-work collect <work_id>` for managed work. Keep conversation and turn IDs; do not substitute tab/window IDs. A repeated `generating` ledger snapshot does not establish either live progress or a fault. Never infer failure from model latency or unchanged visible text alone.
 
