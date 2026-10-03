@@ -1092,6 +1092,77 @@ test('submit confirmation remains uncertain for a delayed authentic UUID with di
   assert.equal(fixture.clicks, 1)
 })
 
+function paragraphDraftSubmitFixture(t, { submissionText = null } = {}) {
+  const fixture = nativeContentFixture({ submitted: false, collapsedUser: true,
+    submissionId: '22222222-2222-4222-8222-222222222222', submissionText })
+  // Match the observed editor: rendered paragraph boundaries double each LF,
+  // while its submitted user record retains the original prompt bytes.
+  Object.defineProperty(fixture.editor, 'innerText', {
+    get() { return this.textContent.replace(/\n/g, '\n\n') }
+  })
+  t.after(() => fixture.dispose())
+  return fixture
+}
+
+for (const guarded of [true, false]) {
+  test('same-turn canonical multiline prompt confirms one ' + (guarded ? 'guarded' : 'unguarded') + ' submission', async t => {
+    const prompt = 'Owned REVIEW\nCheck the completed ACTION.\n\nKeep this intentional blank line.\nREVIEW_OK'
+    const fixture = paragraphDraftSubmitFixture(t)
+    const prepared = await fixture.call({ type: 'conversation_prepare', guarded, authoritativeState: true,
+      turnId: 'canonical-multiline', text: prompt })
+    assert.equal(prepared.prepared, true)
+    assert.notEqual(fixture.editor.innerText, prompt, 'fixture must reproduce rendered paragraph expansion')
+    const result = await fixture.call({ type: 'conversation_submit', guarded, turnId: 'canonical-multiline' })
+    assert.equal(result.accepted, true, result.error)
+    assert.equal(result.userMessageId, '22222222-2222-4222-8222-222222222222')
+    assert.equal(fixture.userBodies[0].textContent, prompt, 'intentional blank lines remain exact')
+    assert.equal(fixture.clicks, 1)
+  })
+}
+
+test('canonical multiline confirmation rejects changed text and collapsed intentional blank lines', async t => {
+  const prompt = 'Owned REVIEW\n\nKeep the deliberate blank line.\nREVIEW_OK'
+  for (const guarded of [true, false]) {
+    for (const submissionText of ['Unrelated human prompt', prompt.replace(/\n\n/g, '\n')]) {
+      const fixture = paragraphDraftSubmitFixture(t, { submissionText })
+      assert.equal((await fixture.call({ type: 'conversation_prepare', guarded, authoritativeState: true,
+        turnId: 'canonical-wrong-text', text: prompt })).prepared, true)
+      const result = await fixture.call({ type: 'conversation_submit', guarded, turnId: 'canonical-wrong-text' })
+      assert.equal(result.accepted, false)
+      assert.equal(result.deliveryUncertain, true)
+      assert.equal(result.userMessageId, undefined)
+      assert.equal(fixture.clicks, 1)
+    }
+  }
+})
+
+test('canonical prepared prompt is never reused by a different submit turn', async t => {
+  const prompt = 'Owned first turn\nREVIEW_OK'
+  for (const guarded of [true, false]) {
+    const fixture = paragraphDraftSubmitFixture(t, { submissionText: prompt })
+    assert.equal((await fixture.call({ type: 'conversation_prepare', guarded, authoritativeState: true,
+      turnId: 'canonical-original-turn', text: prompt })).prepared, true)
+    fixture.editor.textContent = 'A different current draft'
+    const result = await fixture.call({ type: 'conversation_submit', guarded, turnId: 'canonical-other-turn' })
+    assert.equal(result.accepted, false)
+    assert.equal(result.deliveryUncertain, !guarded)
+    assert.equal(fixture.clicks, guarded ? 0 : 1)
+    if (guarded) assert.match(result.error, /prepared_intent_missing/)
+  }
+})
+
+test('canonical confirmation keeps the rendered owned draft guard before the submit click', async t => {
+  const fixture = paragraphDraftSubmitFixture(t)
+  assert.equal((await fixture.call({ type: 'conversation_prepare', guarded: true, authoritativeState: true,
+    turnId: 'canonical-rendered-guard', text: 'Owned prompt\nSecond paragraph' })).prepared, true)
+  fixture.editor.textContent += '\nHuman change'
+  const result = await fixture.call({ type: 'conversation_submit', guarded: true, turnId: 'canonical-rendered-guard' })
+  assert.equal(result.accepted, false)
+  assert.equal(result.deliveryUncertain, false)
+  assert.match(result.error, /composer_changed/)
+  assert.equal(fixture.clicks, 0)
+})
+
 test('conversation_prepare selects a requested ChatGPT app before writing prompt text', async () => {
   let runtimeListener = null
   let menuOpen = false

@@ -93,13 +93,13 @@ function findSendButton() {
   })
 }
 
-async function waitAndSubmit(beforeClick = null) {
+async function waitAndSubmit(beforeClick = null, expectedPromptText = null) {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     const button = findSendButton()
     if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
       beforeClick?.()
       const baselineUserIds = new Set(userMessages().map(persistentMessageId))
-      const promptText = composerDraft().trim()
+      const promptText = (expectedPromptText ?? composerDraft()).trim()
       const form = button.closest?.('form')
       if (form && typeof form.requestSubmit === 'function') form.requestSubmit(button)
       else button.click()
@@ -1422,12 +1422,10 @@ async function handlePrepare(message) {
   const observation = message.guarded === true ? writerObservation(null, !authoritativeState, !authoritativeState) : null
   if (observation) assertWriterObservation(observation, message.expected)
   setPromptText(editor, message.text)
-  if (observation) {
-    const ownedDraft = composerDraft(editor)
-    if (!ownedDraft.trim()) throw new Error('composer_changed')
-    preparedSend = { turnId: message.turnId, text: ownedDraft, stamp: observation.stamp,
-      expected: message.expected, expectedMode: message.expectedMode, authoritativeState }
-  }
+  const ownedDraft = composerDraft(editor)
+  if (observation && !ownedDraft.trim()) throw new Error('composer_changed')
+  preparedSend = { turnId: message.turnId, text: ownedDraft, promptText: message.text, stamp: observation?.stamp,
+    expected: message.expected, expectedMode: message.expectedMode, authoritativeState }
   return {
     prepared: true,
     url: location.href,
@@ -1445,7 +1443,9 @@ async function handleSubmit(message = {}) {
     assertWriterObservation(observation, prepared.expected)
     if (observation.stamp !== prepared.stamp) throw new Error('stale_intent')
   } : null
-  const submission = await waitAndSubmit(guard)
+  const preparedSameTurn = prepared && typeof message.turnId === 'string' && message.turnId.length > 0 &&
+    prepared.turnId === message.turnId
+  const submission = await waitAndSubmit(guard, preparedSameTurn ? prepared.promptText : null)
   preparedSend = null
   return {
     accepted: true,
