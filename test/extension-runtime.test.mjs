@@ -1,7 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, mkdtemp, rm } from 'node:fs/promises'
+import { EventEmitter } from 'node:events'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { ChatGptConversationHost } from '../src/chatgpt.mjs'
+import { ConversationStore } from '../src/store.mjs'
 import vm from 'node:vm'
+import { webcrypto } from 'node:crypto'
 import { nativeContentFixture, MODERN_USER_ID, MODERN_ASSISTANT_ID, MODERN_THREAD_URL } from './helpers/native-content-fixture.mjs'
 
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
@@ -140,7 +146,304 @@ test('startup durably settles only pre-submit turns whose tabs are gone', async 
 
 let harnessEffectToken = 0
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null, fastConversationUrlClock = false, onSubmittedTabGet = null, submitPendingUrl = null, submitUserMessageId = '00000000-0000-4000-8000-000000000001', contentMessageProvider = null, submitResponseUrl = null } = {}) {
+const retirementIdentity = { conversationId: 'retire-conv', turnId: 'retire-turn', requestId: 'retire-send',
+  registrationId: '81000000-0000-4000-8000-000000000001', target: 'https://chatgpt.com/c/82000000-0000-4000-8000-000000000001', writerEpoch: 3 }
+function retirementStorage() {
+  return { 'writer:authority': { version: 1, epoch: 3 },
+    ['writer:revoked-registration:' + retirementIdentity.registrationId]: { version: 1, registrationId: retirementIdentity.registrationId, writerEpoch: 3, target: retirementIdentity.target },
+    'conversation:retire-conv': { tabId: 88, windowId: 10, url: retirementIdentity.target },
+    'pending:retire-conv': { conversationId: 'retire-conv', turnId: 'retire-turn', requestId: 'retire-send', tabId: 88, phase: 'submitting', monitorVersion: 1, promptText: 'private original prompt' } }
+}
+async function retirementRequest(h, operationId = 'retirement-op') {
+  const inspected = await h.request('pending_retirement_inspect', retirementIdentity)
+  assert.equal(inspected.ok, true, inspected.error)
+  assert.equal(inspected.result.retirable, true, inspected.result.reason)
+  assert.equal(JSON.stringify(inspected.result).includes('private original prompt'), false)
+  return { ...retirementIdentity, operationId, expectedPendingDigest: inspected.result.pendingDigest,
+    expectedInstanceId: inspected.result.instanceId, expectedBuildId: inspected.result.buildId, reason: 'closed_target_after_quiesce' }
+}
+
+test('closed uncertain retirement retains exact pending, releases only its blocker, and fences late events across restart', async () => {
+  const storage = retirementStorage()
+  const original = JSON.stringify(storage['pending:retire-conv'])
+  const h = makeHarness({ storage })
+  const params = await retirementRequest(h)
+  assert.match(params.expectedPendingDigest, /^[a-f0-9]{64}$/)
+  const retired = await h.request('pending_retire', params)
+  assert.equal(retired.ok, true, retired.error)
+  assert.equal(retired.result.delivery, 'unknown')
+  assert.equal(JSON.stringify(h.storageState['pending:retire-conv']), original)
+  assert.equal(h.storageState['effect-receipt:retire-send'], undefined)
+  const status = (await h.request('extension_status', {})).result
+  assert.deepEqual([status.pendingCount, status.retiredPendingCount, status.recoverablePendingCount, status.blockingPendingCount], [1, 1, 0, 0])
+  h.storageState['pending:another-key'] = structuredClone(h.storageState['pending:retire-conv'])
+  assert.equal((await h.request('extension_status', {})).result.blockingPendingCount, 1)
+  delete h.storageState['pending:another-key']
+  assert.equal((await h.request('pending_retire', params)).result.receipt.operationId, params.operationId)
+  assert.equal((await h.request('pending_retire', { ...params, operationId: 'conflict' })).ok, false)
+  for (const type of ['response_completed', 'response_delta']) {
+    await h.emitRuntimeMessage({ kind: 'conversation_event', event: { type, conversationId: 'retire-conv', turnId: 'retire-turn', monitorVersion: 1, externalUrl: retirementIdentity.target } },
+      { tab: { id: 88, windowId: 10, url: retirementIdentity.target } })
+  }
+  assert.equal(JSON.stringify(h.storageState['pending:retire-conv']), original)
+  assert.equal(Object.keys(h.storageState).filter(key => key.startsWith('outbox:')).length, 0)
+  assert.equal(h.nativeMessages.filter(message => message.kind === 'event').length, 0)
+  const restarted = makeHarness({ storage: structuredClone(h.storageState) })
+  assert.equal((await restarted.request('extension_status', {})).result.retiredPendingCount, 1)
+  restarted.storageState['pending:retire-conv'] = { ...restarted.storageState['pending:retire-conv'], promptText: 'changed' }
+  assert.equal((await restarted.request('extension_status', {})).result.blockingPendingCount, 1)
+})
+
+test('an incomplete durable retirement candidate blocks fresh adoption and late events while preserving reload blocker', async () => {
+  const h = makeHarness({ storage: retirementStorage() })
+  const params = await retirementRequest(h)
+  const result = await h.request('pending_retire', params)
+  assert.equal(result.ok, true)
+  const storage = structuredClone(h.storageState)
+  delete storage['pending-retirement:retire-conv']
+  const reopened = makeHarness({ storage, tabs: [{ id: 99, windowId: 10, url: retirementIdentity.target }], windows: [{ id: 10 }] })
+  assert.equal((await reopened.request('extension_status', {})).result.blockingPendingCount, 1)
+  const adopted = await reopened.request('conversation_adopt', { conversationId: 'retire-conv', turnId: 'new-turn',
+    requestId: 'fresh-adopt', externalUrl: retirementIdentity.target, expectedUserMessageId: MODERN_USER_ID, writerEpoch: 3 })
+  assert.equal(adopted.ok, false)
+  const event = await reopened.emitRuntimeMessage({ kind: 'conversation_event', event: { type: 'response_completed',
+    conversationId: 'retire-conv', turnId: 'retire-turn', externalUrl: retirementIdentity.target } }, { tab: { id: 88, url: retirementIdentity.target } })
+  assert.equal(event?.durable, false)
+  assert.equal(JSON.stringify(reopened.storageState['pending:retire-conv']), JSON.stringify(storage['pending:retire-conv']))
+  assert.equal(reopened.storageState['effect-receipt:fresh-adopt'], undefined)
+  assert.equal(reopened.sentToTabs.filter(x => x.message.type !== 'sidecar_ping').length, 0)
+})
+
+test('retirement fails closed for missing authority, wrong binding, open target and stale CAS', async () => {
+  for (const change of ['revocation', 'binding', 'open', 'digest', 'instance', 'build', 'outbox', 'effect', 'generation', 'epoch', 'original-tab', 'pending-url']) {
+    const storage = retirementStorage()
+    const h = makeHarness({ storage })
+    const params = await retirementRequest(h)
+    if (change === 'revocation') delete h.storageState['writer:revoked-registration:' + retirementIdentity.registrationId]
+    if (change === 'binding') h.storageState['conversation:retire-conv'] = { ...storage['conversation:retire-conv'], url: 'https://chatgpt.com/c/83000000-0000-4000-8000-000000000001' }
+    if (change === 'digest') h.storageState['pending:retire-conv'] = { ...storage['pending:retire-conv'], monitorVersion: 2 }
+    if (change === 'instance') params.expectedInstanceId = 'old-instance'
+    if (change === 'build') params.expectedBuildId = 'b'.repeat(64)
+    if (change === 'outbox') h.storageState['outbox:blocked'] = { eventId: 'blocked' }
+    if (change === 'effect') h.storageState['content-effect:blocked'] = { token: 'blocked' }
+    if (change === 'generation') h.storageState['pending:retire-conv'] = { ...storage['pending:retire-conv'], registrationId: '83000000-0000-4000-8000-000000000001' }
+    if (change === 'epoch') params.writerEpoch = 2
+    const target = change === 'open' ? makeHarness({ storage, tabs: [{ id: 99, windowId: 1, url: retirementIdentity.target.replace('/c/', '/g/g-p-other/c/') }] }) :
+      change === 'original-tab' ? makeHarness({ storage, tabs: [{ id: 88, windowId: 1, url: 'https://example.com/' }] }) :
+      change === 'pending-url' ? makeHarness({ storage, tabs: [{ id: 99, windowId: 1, url: 'https://example.com/', pendingUrl: retirementIdentity.target }] }) : h
+    const result = await target.request('pending_retire', params)
+    assert.equal(result.ok, false, change)
+    assert.equal(Object.keys(target.storageState).some(key => key.startsWith('pending-retirement:')), false, change)
+  }
+})
+
+test('retirement keeps the blocker on tabs lookup, persistence and readback failure', async () => {
+  for (const fault of ['tabs', 'write', 'read']) {
+    let failTabs = false
+    const h = makeHarness({ storage: retirementStorage(), tabsQueryFailure: () => failTabs,
+      failRetirementWrite: fault === 'write', failRetirementRead: fault === 'read' })
+    const params = await retirementRequest(h)
+    failTabs = fault === 'tabs'
+    const result = await h.request('pending_retire', params)
+    assert.equal(result.ok, false, fault)
+    assert.equal(h.storageState['pending-retirement:retire-conv'], undefined)
+    const restarted = makeHarness({ storage: structuredClone(h.storageState) })
+    assert.equal((await restarted.request('extension_status', {})).result.blockingPendingCount, 1)
+    assert.equal(restarted.storageState['pending:retire-conv'].phase, 'submitting')
+  }
+})
+
+test('failed build restoration allows retirement control but blocks browser writers and replay until canonical reload', async () => {
+  const storage = retirementStorage()
+  storage['reload:receipt'] = { requestId: 'old-reload', previousInstanceId: 'old-instance', expectedBuildId: 'b'.repeat(64) }
+  const h = makeHarness({ storage, deferReloadTimer: true })
+  assert.equal((await h.request('extension_status', {})).result.restoration.state, 'failed')
+  assert.equal((await h.request('writer_epoch_claim', { writerEpoch: 3 })).ok, true)
+  assert.equal((await h.request('writer_quiesce', retirementIdentity)).result.target, retirementIdentity.target)
+  for (const method of ['conversation_create', 'conversation_send', 'conversation_stop', 'conversation_refresh', 'conversation_adopt', 'webgpt_shift_test', 'project_create']) {
+    assert.equal((await h.request(method, { conversationId: 'fresh', writerEpoch: 3 })).ok, false, method)
+  }
+  await h.emitRuntimeMessage({ kind: 'conversation_event', event: { type: 'response_delta', conversationId: 'retire-conv', turnId: 'retire-turn' } }, { tab: { id: 88, url: 'https://example.com/' } })
+  assert.equal(h.storageState['conversation:retire-conv'].url, retirementIdentity.target)
+  const params = await retirementRequest(h)
+  assert.equal((await h.request('pending_retire', params)).ok, true)
+  assert.equal((await h.request('extension_status', {})).result.restoration.state, 'failed')
+  assert.equal((await h.request('extension_reload', { requestId: 'fresh-reload', expectedInstanceId: 'test-instance', expectedBuildId: 'a'.repeat(64) })).ok, true)
+  const restarted = makeHarness({ storage: structuredClone(h.storageState), extensionInstance: 'fresh-instance' })
+  const ready = (await restarted.request('extension_status', {})).result
+  assert.equal(ready.restoration.state, 'ready')
+  assert.equal(ready.retiredPendingCount, 1)
+  assert.equal(restarted.storageState['pending:retire-conv'].phase, 'submitting')
+})
+
+test('retirement survives changed instance build and epoch, reconciles same operation and denies fresh target writers', async () => {
+  const h = makeHarness({ storage: retirementStorage() })
+  const params = await retirementRequest(h)
+  const result = await h.request('pending_retire', params)
+  const restarted = makeHarness({ storage: structuredClone(h.storageState), extensionInstance: 'replacement', extensionBuild: 'b'.repeat(64),
+    tabs: [{ id: 99, windowId: 10, url: retirementIdentity.target }], windows: [{ id: 10 }] })
+  assert.equal((await restarted.request('writer_epoch_claim', { writerEpoch: 4 })).ok, true)
+  assert.equal((await restarted.request('writer_quiesce', { ...retirementIdentity, writerEpoch: 4 })).ok, true)
+  const retry = await restarted.request('pending_retire', { ...params, writerEpoch: 4 })
+  assert.equal(retry.ok, true, retry.error)
+  assert.deepEqual(JSON.parse(JSON.stringify(retry.result.receipt)), JSON.parse(JSON.stringify(result.result.receipt)))
+  assert.equal((await restarted.request('extension_status', {})).result.retiredPendingCount, 1)
+  for (const [method, extra] of [
+    ['conversation_send', { externalUrl: retirementIdentity.target }], ['conversation_create', { url: retirementIdentity.target }],
+    ['conversation_adopt', { externalUrl: retirementIdentity.target }], ['webgpt_shift_test', { target: 'Medium', target_tab_id: 99 }]
+  ]) assert.equal((await restarted.request(method, { conversationId: 'new-logical-id', writerEpoch: 4, ...extra })).ok, false, method)
+  assert.equal(restarted.sentToTabs.filter(entry => entry.message.type !== 'sidecar_ping').length, 0)
+  assert.equal(restarted.createdTabs.length + restarted.createdWindows.length, 0)
+  assert.equal(await restarted.emitRuntimeMessage({ kind: 'pending_turn_lookup' }, { tab: { id: 99, url: retirementIdentity.target } }), null)
+})
+
+test('retirement exclusive barrier prevents events or reload interleaving with durable publication', async () => {
+  let releaseWrite, enteredWrite
+  const entered = new Promise(resolve => { enteredWrite = resolve })
+  const gate = new Promise(resolve => { releaseWrite = resolve })
+  const h = makeHarness({ storage: retirementStorage(), beforeRetirementWrite: async () => { enteredWrite(); await gate } })
+  const params = await retirementRequest(h)
+  const retiring = h.request('pending_retire', params)
+  await entered
+  assert.equal((await h.request('extension_reload', { requestId: 'blocked', expectedInstanceId: 'test-instance', expectedBuildId: 'a'.repeat(64) })).ok, false)
+  const event = { type: 'response_completed', conversationId: 'retire-conv', turnId: 'retire-turn', monitorVersion: 1, externalUrl: retirementIdentity.target }
+  assert.equal((await h.emitRuntimeMessage({ kind: 'conversation_event', event }, { tab: { id: 88, url: retirementIdentity.target } })).durable, false)
+  assert.equal(h.storageState['pending:retire-conv'].phase, 'submitting')
+  assert.equal(Object.keys(h.storageState).some(key => key.startsWith('outbox:')), false)
+  releaseWrite()
+  assert.equal((await retiring).ok, true)
+})
+
+test('retirement receipt corruption cannot downgrade an altered pending into recoverable work', async () => {
+  const h = makeHarness({ storage: retirementStorage() })
+  assert.equal((await h.request('pending_retire', await retirementRequest(h))).ok, true)
+  h.storageState['pending:retire-conv'] = { ...h.storageState['pending:retire-conv'], phase: 'submitted' }
+  h.storageState['effect-receipt:retire-send'] = { requestId: 'retire-send', conversationId: 'retire-conv', turnId: 'retire-turn', userMessageId: 'fake-user' }
+  const status = (await h.request('extension_status', {})).result
+  assert.deepEqual([status.retiredPendingCount, status.recoverablePendingCount, status.blockingPendingCount], [0, 0, 1])
+})
+
+test('retirement resumes a verified candidate after final commit failure and a changed runtime', async () => {
+  const h = makeHarness({ storage: retirementStorage(), beforeRetirementWrite: async values => {
+    if (Object.hasOwn(values, 'pending-retirement:retire-conv')) throw new Error('Final commit unavailable')
+  } })
+  const params = await retirementRequest(h)
+  assert.equal((await h.request('pending_retire', params)).ok, false)
+  assert.equal(h.storageState['pending-retirement:retire-conv'], undefined)
+  const candidate = structuredClone(h.storageState['pending-retirement-staged:retire-conv'])
+  assert.equal((await h.request('extension_status', {})).result.blockingPendingCount, 1)
+  const restarted = makeHarness({ storage: structuredClone(h.storageState), extensionInstance: 'new-instance', extensionBuild: 'b'.repeat(64) })
+  assert.equal((await restarted.request('writer_epoch_claim', { writerEpoch: 4 })).ok, true)
+  assert.equal((await restarted.request('writer_quiesce', { ...retirementIdentity, writerEpoch: 4 })).ok, true)
+  const result = await restarted.request('pending_retire', { ...params, writerEpoch: 4 })
+  assert.equal(result.ok, true, result.error)
+  assert.deepEqual(JSON.parse(JSON.stringify(result.result.receipt)), candidate)
+  assert.equal((await restarted.request('extension_status', {})).result.retiredPendingCount, 1)
+})
+
+test('actual uncertain native content submit can retire after exact close without changing its native generation or effect history', async t => {
+  const fixture = nativeContentFixture({ submitted: false, submissionId: 'local-user:temporary' })
+  t.after(() => fixture.dispose())
+  const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 },
+    'conversation:actual-retire': { tabId: 88, windowId: 10, url: MODERN_THREAD_URL } },
+    tabs: [{ id: 88, windowId: 10, url: MODERN_THREAD_URL }], windows: [{ id: 10 }],
+    contentMessageProvider(tab, message, runtime) { fixture.configureRuntimeTransport(runtime); return fixture.call(message) } })
+  const identity = { ...retirementIdentity, conversationId: 'actual-retire', turnId: 'actual-retire-turn', requestId: 'actual-retire-send', target: MODERN_THREAD_URL }
+  const send = await h.request('conversation_send', { ...identity, externalUrl: MODERN_THREAD_URL, existingOnly: true, text: 'uncertain fixture', authoritativeState: true })
+  assert.equal(send.errorCode, 'DELIVERY_UNCERTAIN')
+  const original = JSON.stringify(h.storageState['pending:actual-retire'])
+  assert.equal(h.storageState['pending:actual-retire'].registrationId, identity.registrationId)
+  h.closeTab(88)
+  assert.equal((await h.request('writer_quiesce', identity)).ok, true)
+  const inspected = (await h.request('pending_retirement_inspect', identity)).result
+  assert.equal(inspected.retirable, true, inspected.reason)
+  const retired = await h.request('pending_retire', { ...identity, operationId: 'actual-retirement', reason: 'closed_target_after_quiesce',
+    expectedPendingDigest: inspected.pendingDigest, expectedInstanceId: inspected.instanceId, expectedBuildId: inspected.buildId })
+  assert.equal(retired.ok, true, retired.error)
+  assert.equal(retired.result.receipt.proof.generationSource, 'native_pending')
+  assert.equal(JSON.stringify(h.storageState['pending:actual-retire']), original)
+  assert.equal(h.storageState['effect-receipt:actual-retire-send'], undefined)
+  assert.equal(fixture.clicks, 1)
+})
+
+test('retirement drain includes late prepare callback persistence after the original content promise resolves', async () => {
+  let releasePrepare, releaseOutbox, enteredOutbox
+  const prepare = new Promise(resolve => { releasePrepare = resolve })
+  const outbox = new Promise(resolve => { releaseOutbox = resolve })
+  const entered = new Promise(resolve => { enteredOutbox = resolve })
+  const otherUrl = 'https://chatgpt.com/c/84000000-0000-4000-8000-000000000001'
+  const storage = { ...retirementStorage(), 'conversation:late-prepare': { tabId: 20, windowId: 10, url: otherUrl } }
+  const h = makeHarness({ storage, tabs: [{ id: 20, windowId: 10, url: otherUrl }], windows: [{ id: 10 }],
+    prepareGate: prepare, expirePrepare: true, beforeOutboxWrite: async () => { enteredOutbox(); await outbox } })
+  const params = await retirementRequest(h)
+  const failed = await h.request('conversation_send', { conversationId: 'late-prepare', turnId: 'late-turn', requestId: 'late-request',
+    writerEpoch: 3, externalUrl: otherUrl, existingOnly: true, text: 'late prompt' })
+  assert.equal(failed.errorCode, 'DELIVERY_UNCERTAIN')
+  releasePrepare()
+  await entered
+  await h.sendNativeMessage({ kind: 'request', requestId: 'drain-held-retirement', method: 'pending_retire', params })
+  assert.equal(h.nativeMessages.some(message => message.requestId === 'drain-held-retirement'), false)
+  assert.equal(h.storageState['pending-retirement:retire-conv'], undefined)
+  releaseOutbox()
+  for (let attempt = 0; attempt < 20; attempt++) await new Promise(resolve => setTimeout(resolve, 1))
+  const result = h.nativeMessages.find(message => message.requestId === 'drain-held-retirement')
+  assert.equal(result?.ok, false)
+  assert.match(result.error, /outbox_not_empty/)
+  assert.equal(h.storageState['pending-retirement:retire-conv'], undefined)
+})
+
+test('real host ledger and native retirement compose for legacy pending without fabricating known delivery', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'native-retirement-composition-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new ConversationStore(root)
+  const record = await store.create({ backend: 'test', externalUrl: retirementIdentity.target })
+  await store.append(record.id, { type: 'send_intent', turnId: retirementIdentity.turnId, requestId: retirementIdentity.requestId,
+    source: 'watchdog', registrationId: retirementIdentity.registrationId, text: 'original private prompt' })
+  await store.append(record.id, { type: 'delivery_uncertain', turnId: retirementIdentity.turnId, message: 'unknown submit outcome' })
+  const storage = retirementStorage()
+  const pending = { ...storage['pending:retire-conv'], conversationId: record.id }
+  storage[`pending:${record.id}`] = pending
+  storage[`conversation:${record.id}`] = storage['conversation:retire-conv']
+  delete storage['pending:retire-conv']; delete storage['conversation:retire-conv']
+  delete storage['writer:revoked-registration:' + retirementIdentity.registrationId].target
+  const h = makeHarness({ storage, extensionInstance: '85000000-0000-4000-8000-000000000001' })
+  const bridge = new EventEmitter()
+  const methods = []
+  bridge.request = async (method, params) => {
+    methods.push(method)
+    const result = await h.request(method, params)
+    if (!result.ok) throw new Error(result.error)
+    // Native messaging crosses a JSON boundary; do not leak VM prototypes.
+    return JSON.parse(JSON.stringify(result.result))
+  }
+  const host = new ChatGptConversationHost({ bridge, store, writerEpoch: 3 })
+  await host.watchdogAuthority.bind({ registrationId: retirementIdentity.registrationId, target: retirementIdentity.target })
+  await host.watchdogAuthority.withdraw({ registrationId: retirementIdentity.registrationId, target: retirementIdentity.target }, async () => ({ quiescent: true }))
+  const request = { conversationId: record.id, requestId: retirementIdentity.requestId }
+  const inspected = await host.inspectPendingRetirement(request)
+  assert.equal(inspected.found, true)
+  assert.equal(inspected.retirable, false)
+  assert.equal(inspected.reason, 'registration_not_revoked_for_target')
+  const original = JSON.stringify(h.storageState[`pending:${record.id}`])
+  const params = { ...request, operationId: '86000000-0000-4000-8000-000000000001', reason: 'closed_target_after_quiesce',
+    expectedPendingDigest: inspected.pendingDigest, expectedInstanceId: inspected.instanceId, expectedBuildId: inspected.buildId }
+  const retired = await host.retirePendingAttempt(params)
+  assert.equal(retired.retired, true)
+  assert.equal(retired.delivery, 'unknown')
+  assert.equal(retired.receipt.proof.generationSource, 'host_ledger')
+  assert.equal((await host.retirePendingAttempt(params)).retired, true)
+  assert.equal(JSON.stringify(h.storageState[`pending:${record.id}`]), original)
+  assert.equal(h.storageState['effect-receipt:' + retirementIdentity.requestId], undefined)
+  const status = (await h.request('extension_status', {})).result
+  assert.deepEqual([status.pendingCount, status.retiredPendingCount, status.blockingPendingCount], [1, 1, 0])
+  const after = await store.read(record.id)
+  assert.equal(after.status, 'delivery_uncertain')
+  assert.equal(after.events.filter(event => event.type === 'pending_retired').length, 1)
+  assert.ok(methods.every(method => ['pending_retirement_inspect', 'writer_quiesce', 'pending_retire'].includes(method)))
+  assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length + h.sentToTabs.length, 0)
+})
+
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null, fastConversationUrlClock = false, onSubmittedTabGet = null, submitPendingUrl = null, submitUserMessageId = '00000000-0000-4000-8000-000000000001', contentMessageProvider = null, submitResponseUrl = null, ...retirementFaults } = {}) {
   const storageState = { ...storage }
   const staleContentScriptTabs = new Set(staleContentScriptTabIds)
   const windowMap = new Map(windows.map((window) => [window.id, { ...window }]))
@@ -226,6 +529,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     storage: {
       local: {
         async get(key) {
+          if (retirementFaults.failRetirementRead && Object.keys(storageState).some(key => key.startsWith('pending-retirement-staged:'))) throw new Error('Retirement readback failed')
           if (key === null) return { ...storageState }
           if (typeof key === 'string') {
             return Object.hasOwn(storageState, key) ? { [key]: storageState[key] } : {}
@@ -233,6 +537,11 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           throw new Error(`Unsupported storage.get key: ${String(key)}`)
         },
         async set(values) {
+          if (Object.keys(values).some(key => key.startsWith('outbox:'))) await retirementFaults.beforeOutboxWrite?.(values)
+          if (Object.keys(values).some(key => key.startsWith('pending-retirement'))) {
+            if (retirementFaults.failRetirementWrite) throw new Error('Retirement storage unavailable')
+            await retirementFaults.beforeRetirementWrite?.(values)
+          }
           if (failRevocationStorage && Object.keys(values).some(key => key.startsWith('writer:revoked-registration:'))) throw new Error('Revocation storage unavailable')
           if (failContentEffectStorage && Object.keys(values).some(key => key.startsWith('content-effect:'))) throw new Error('Content effect storage unavailable')
           Object.assign(storageState, values)
@@ -277,6 +586,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
         return { ...tab }
       },
       async query({ windowId } = {}) {
+        if (retirementFaults.tabsQueryFailure?.()) throw new Error('Tabs lookup failed')
         return [...tabMap.values()]
           .filter((tab) => windowId === undefined || tab.windowId === windowId)
           .map((tab) => ({ ...tab }))
@@ -446,10 +756,11 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
   let uuidCalls = 0
   const context = vm.createContext({
     chrome,
-    crypto: { randomUUID: () => ++uuidCalls === 1 ? 'test-instance' : `test-effect-${++harnessEffectToken}` },
+    crypto: { subtle: webcrypto.subtle, randomUUID: () => ++uuidCalls === 1 ? (retirementFaults.extensionInstance || 'test-instance') : `test-effect-${++harnessEffectToken}` },
+    TextEncoder,
     importScripts(...files) {
       for (const file of files) {
-        if (file === 'build-info.js') vm.runInContext(`globalThis.__sidecarBuildId = ${JSON.stringify('a'.repeat(64))}`, context)
+        if (file === 'build-info.js') vm.runInContext(`globalThis.__sidecarBuildId = ${JSON.stringify(retirementFaults.extensionBuild || 'a'.repeat(64))}`, context)
         else if (file === 'lifecycle.js') vm.runInContext(lifecycleSource, context)
         else throw new Error(`Unexpected import: ${file}`)
       }
@@ -478,10 +789,10 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     if (!nativeRequestListener) throw new Error('Native request listener was not registered')
     const requestId = `req-${++requestSequence}`
     nativeRequestListener({ kind: 'request', requestId, method, params })
-    for (let attempt = 0; attempt < 40; attempt += 1) {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
       const response = nativeMessages.find((message) => message.kind === 'response' && message.requestId === requestId)
       if (response) return response
-      await new Promise((resolve) => setImmediate(resolve))
+      await new Promise((resolve) => attempt % 10 === 9 ? setTimeout(resolve, 1) : setImmediate(resolve))
     }
     throw new Error(`Timed out waiting for ${requestId}`)
   }
@@ -527,6 +838,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
   }
 
   return {
+    closeTab(tabId) { tabMap.delete(tabId) },
     storageState,
     sentToTabs,
     createdTabs,

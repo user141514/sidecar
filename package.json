@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "bin": { "chatgpt-conversation": "src/cli.mjs" },
-  "files": ["src/", "extension/", "install/", "scripts/", "skills/", "test/", "standalone/", "docs/extension-update.md", ".github/workflows/", "README.md", "PROVENANCE.json"],
+  "files": ["src/", "extension/", "install/", "scripts/", "skills/", "test/", "standalone/", "docs/extension-update.md", "docs/closed-pending-retirement.md", ".github/workflows/", "README.md", "PROVENANCE.json"],
   "scripts": {
     "test": "node scripts/test.mjs",
     "extension:build": "node scripts/extension-build.mjs --write",

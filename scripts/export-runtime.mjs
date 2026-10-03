@@ -36,7 +36,8 @@ export const runtimeFiles = [...new Set([
   'test/memory-pool.test.mjs',
   'test/memory-sync-bridge.test.mjs',
   'test/writer-authority.test.mjs',
-  'test/server.test.mjs'
+  'test/server.test.mjs',
+  'test/pending-retirement.test.mjs'
 ])]
 
 async function sourceProvenance() {

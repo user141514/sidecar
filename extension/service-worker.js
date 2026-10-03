@@ -170,7 +170,10 @@ async function runWriterMutation(params, action) {
   try {
     await assertWriterEpoch(params)
     await assertRegistrationActive(params)
-    return await extensionLifecycle.runMutation(action)
+    return await extensionLifecycle.runMutation(async () => {
+      await assertNoRetiredConversationWrite(params)
+      return action()
+    })
   } finally {
     finishWriterCommand()
   }
@@ -185,7 +188,7 @@ function runWriterClaim(params) {
     await recoverSettledContentEffects()
     await assertNoPendingContentEffects()
     return claimWriterEpoch(params)
-  }))
+  }, { control: true }))
   writerClaimTail = run
   return run.finally(() => { pendingWriterClaims -= 1 })
 }
@@ -201,8 +204,15 @@ function runWriterQuiesce(params) {
       // Reject late native arrivals even when the durable write fails. A failed
       // journal write cannot produce a quiescent acknowledgement.
       revokedRegistrations.add(registrationId)
+      const key = REVOKED_REGISTRATION_PREFIX + registrationId
+      const existing = (await chrome.storage.local.get(key))[key]
+      const target = params.target === undefined ? existing?.target : retirementTarget(params.target)
+      if (params.target !== undefined && !target) throw new Error('Exact revoked registration target required')
+      if (existing && (existing.version !== 1 || existing.registrationId !== registrationId ||
+          !Number.isInteger(existing.writerEpoch) || existing.writerEpoch > params.writerEpoch ||
+          (existing.target !== undefined && existing.target !== target))) throw new Error('Revoked registration target conflict')
       await chrome.storage.local.set({
-        [REVOKED_REGISTRATION_PREFIX + registrationId]: { version: 1, registrationId, writerEpoch: params.writerEpoch }
+        [key]: { version: 1, registrationId, writerEpoch: params.writerEpoch, ...(target ? { target } : {}) }
       })
     }
     await waitForWriterDrain()
@@ -210,10 +220,129 @@ function runWriterQuiesce(params) {
     await recoverSettledContentEffects()
     await assertNoPendingContentEffects()
     await assertWriterEpoch(params)
-    return { quiescent: true, currentWriterEpoch: params.writerEpoch, ...(registrationId === null ? {} : { registrationId }) }
+    return { quiescent: true, currentWriterEpoch: params.writerEpoch, ...(registrationId === null ? {} : { registrationId }),
+      ...(params.target === undefined ? {} : { target: retirementTarget(params.target) }) }
+  }, { control: true }))
+  writerClaimTail = run
+  return run.finally(() => { pendingWriterClaims -= 1 })
+}
+
+async function assertNoRetiredConversationWrite(params) {
+  const state = await chrome.storage.local.get(null)
+  const target = retirementTarget(params.externalUrl || params.url || params.target_url || params.target)
+  for (const [key, receipt] of Object.entries(state)) {
+    if (!key.startsWith('pending-retirement:') && !key.startsWith('pending-retirement-staged:')) continue
+    if (key === `pending-retirement:${params.conversationId}` || key === `pending-retirement-staged:${params.conversationId}` ||
+        (params.requestId && receipt?.requestId === params.requestId) ||
+        (target && receipt?.target === target)) throw deliveryUncertain('Conversation attempt is permanently retired with unknown delivery')
+  }
+}
+
+function runPendingMaintenance(action) {
+  pendingWriterClaims += 1
+  const previous = writerClaimTail
+  const run = previous.catch(() => {}).then(() => extensionLifecycle.runMaintenance(async () => {
+    await waitForWriterDrain()
+    await waitForContentScriptDrain()
+    return action()
   }))
   writerClaimTail = run
   return run.finally(() => { pendingWriterClaims -= 1 })
+}
+
+async function inspectPendingRetirement(params) {
+  for (const key of ['conversationId', 'turnId', 'requestId']) {
+    if (typeof params[key] !== 'string' || !params[key] || params[key].length > 256) throw new Error(`Retirement requires ${key}`)
+  }
+  const registrationId = writerRegistrationId(params)
+  if (!registrationId) throw new Error('Retirement requires revoked registration')
+  const target = retirementTarget(params.target)
+  if (!target) throw new Error('Retirement requires exact canonical target')
+  await assertWriterEpoch(params)
+  const state = await chrome.storage.local.get(null)
+  const pending = state[pendingKey(params.conversationId)]
+  const identity = { conversationId: params.conversationId, turnId: params.turnId, requestId: params.requestId,
+    registrationId, target, writerEpoch: params.writerEpoch, instanceId: extensionInstanceId, buildId: globalThis.__sidecarBuildId }
+  if (!pending) return { ...identity, found: false, retirable: false, reason: 'pending_missing' }
+  const result = { ...identity, found: true, retirable: false, tabId: pending.tabId, pendingDigest: await pendingDigest(pending) }
+  const deny = reason => ({ ...result, reason })
+  if (pending.conversationId !== params.conversationId || pending.turnId !== params.turnId || pending.requestId !== params.requestId ||
+      !Number.isInteger(pending.tabId) || (pending.registrationId !== undefined &&
+        (typeof pending.registrationId !== 'string' || pending.registrationId.toLowerCase() !== registrationId))) return deny('pending_identity_mismatch')
+  const binding = state[storageKey(params.conversationId)]
+  if (binding?.tabId !== pending.tabId || retirementTarget(binding?.url) !== target ||
+      ['url', 'externalUrl', 'target'].some(key => pending[key] !== undefined && retirementTarget(pending[key]) !== target)) return deny('pending_target_mismatch')
+  const revoked = state[REVOKED_REGISTRATION_PREFIX + registrationId]
+  if (revoked?.version !== 1 || revoked.registrationId !== registrationId || revoked.target !== target ||
+      !Number.isInteger(revoked.writerEpoch) || revoked.writerEpoch !== params.writerEpoch) return deny('registration_not_revoked_for_target')
+  const receipt = state[`pending-retirement:${params.conversationId}`]
+  if (receipt) {
+    if (!await validPendingRetirement(state, pending) || receipt.registrationId !== registrationId || receipt.target !== target) return deny('retirement_receipt_mismatch')
+    return { ...result, retirable: true, retirement: receipt }
+  }
+  if (pending.phase !== 'submitting' || state[effectReceiptKey(params.requestId)]) return deny('pending_not_unknown_submit')
+  if (activeWriterCommands || contentScriptPromises.size || contentEffectReservations.size || activeSends.size || tabOwners.size) return deny('writer_not_drained')
+  if (Object.entries(state).some(([key, value]) => key.startsWith(CONTENT_EFFECT_PREFIX) ||
+      (key.startsWith(EFFECT_RECEIPT_PREFIX) && value?.action === 'refresh' && !['applied', 'denied'].includes(value.phase)))) return deny('content_effect_unresolved')
+  if (Object.keys(state).some(key => key.startsWith(OUTBOX_PREFIX))) return deny('outbox_not_empty')
+  let tabs
+  try { tabs = await chrome.tabs.query({}) } catch { return deny('tabs_lookup_failed') }
+  if (!Array.isArray(tabs)) return deny('tabs_lookup_failed')
+  if (tabs.some(tab => tab.id === pending.tabId)) return deny('original_tab_open')
+  if (tabs.some(tab => retirementTarget(tab.url) === target || retirementTarget(tab.pendingUrl) === target)) return deny('target_open')
+  return { ...result, retirable: true }
+}
+
+async function retirePending(params) {
+  if (typeof params.operationId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(params.operationId) ||
+      params.reason !== 'closed_target_after_quiesce') throw new Error('Invalid retirement operation or reason')
+  const inspected = await inspectPendingRetirement(params)
+  if (!inspected.retirable) throw new Error(`Pending retirement rejected: ${inspected.reason}`)
+  if (params.expectedPendingDigest !== inspected.pendingDigest) throw new Error('Pending retirement digest changed')
+  if (inspected.retirement) {
+    const receipt = inspected.retirement
+    if (receipt.operationId !== params.operationId || receipt.reason !== params.reason ||
+        receipt.instanceId !== params.expectedInstanceId || receipt.buildId !== params.expectedBuildId) throw new Error('Pending retirement operation conflict')
+    return { accepted: true, retired: true, delivery: 'unknown', receipt }
+  }
+  const state = await chrome.storage.local.get(null)
+  const pending = state[pendingKey(params.conversationId)]
+  if (await pendingDigest(pending) !== inspected.pendingDigest) throw new Error('Pending retirement digest changed')
+  const stagedKey = `pending-retirement-staged:${params.conversationId}`
+  const priorCandidate = state[stagedKey]
+  if (priorCandidate) {
+    if (priorCandidate.operationId !== params.operationId || priorCandidate.reason !== params.reason ||
+        priorCandidate.instanceId !== params.expectedInstanceId || priorCandidate.buildId !== params.expectedBuildId ||
+        priorCandidate.pendingDigest !== params.expectedPendingDigest || priorCandidate.registrationId !== inspected.registrationId ||
+        priorCandidate.target !== inspected.target || priorCandidate.writerEpoch > params.writerEpoch ||
+        !await validPendingRetirement({ ...state, [`pending-retirement:${params.conversationId}`]: priorCandidate }, pending)) {
+      throw new Error('Pending retirement candidate conflict')
+    }
+  } else if (params.expectedInstanceId !== extensionInstanceId || params.expectedBuildId !== globalThis.__sidecarBuildId) {
+    throw new Error('Retirement instance or build changed')
+  }
+  const receipt = { version: 1, state: 'retired', delivery: 'unknown', operationId: params.operationId, reason: params.reason,
+    conversationId: inspected.conversationId, turnId: inspected.turnId, requestId: inspected.requestId,
+    registrationId: inspected.registrationId, target: inspected.target, tabId: inspected.tabId,
+    pendingDigest: inspected.pendingDigest, writerEpoch: inspected.writerEpoch, instanceId: inspected.instanceId,
+    buildId: inspected.buildId, retiredAt: Date.now(), proof: { originalTabAbsent: true, targetAbsent: true,
+      writerDrained: true, contentDrained: true, contentEffectCount: 0, outboxCount: 0, revokedRegistration: true,
+      generationSource: pending.registrationId ? 'native_pending' : 'host_ledger' } }
+  // Read back an inert candidate before publishing the lifecycle-unblocking
+  // receipt. A failed readback must leave the original pending blocking.
+  const candidate = priorCandidate ?? receipt
+  await chrome.storage.local.set({ [stagedKey]: candidate })
+  const persisted = await chrome.storage.local.get(null)
+  if (JSON.stringify(persisted[stagedKey]) !== JSON.stringify(candidate) ||
+      !await validPendingRetirement({ ...persisted, [`pending-retirement:${params.conversationId}`]: candidate }, persisted[pendingKey(params.conversationId)])) {
+    throw new Error('Retirement persistence verification failed')
+  }
+  const finalInspection = await inspectPendingRetirement(params)
+  if (!finalInspection.retirable || finalInspection.pendingDigest !== candidate.pendingDigest) {
+    throw new Error(`Pending retirement changed before publication: ${finalInspection.reason || 'digest_changed'}`)
+  }
+  await chrome.storage.local.set({ [`pending-retirement:${params.conversationId}`]: candidate })
+  return { accepted: true, retired: true, delivery: 'unknown', receipt: candidate }
 }
 
 function deliveryUncertain(error) {
@@ -251,17 +380,20 @@ async function boundedMessage(tabId, message, timeoutMs, onLateResponse, writerP
     }
     return result
   }) : dispatched
-  contentScriptPromises.add(original)
-  void original.then(
-    () => contentScriptPromises.delete(original),
-    () => contentScriptPromises.delete(original)
+  const settled = original.then(async result => {
+    // The late receipt callback is still writer work: drain its durable state
+    // changes before any maintenance snapshot can certify quiescence.
+    if (expired && onLateResponse) await onLateResponse(result).catch(() => {})
+    return result
+  })
+  contentScriptPromises.add(settled)
+  void settled.then(
+    () => contentScriptPromises.delete(settled),
+    () => contentScriptPromises.delete(settled)
   )
   try {
     return await Promise.race([
-      original.then(result => {
-        if (expired && onLateResponse) void onLateResponse(result).catch(() => {})
-        return result
-      }),
+      settled,
       new Promise((_, reject) => { timer = setTimeout(() => { expired = true; reject(new Error(`Content script response timeout: ${message.type}`)) }, timeoutMs) })
     ])
   } finally { clearTimeout(timer) }
@@ -417,6 +549,7 @@ function connectNative() {
 }
 
 async function saveConversation(conversationId, value) {
+  await assertNoRetiredConversationWrite({ conversationId, externalUrl: value?.url })
   await chrome.storage.local.set({ [storageKey(conversationId)]: value })
 }
 
@@ -427,6 +560,7 @@ async function loadConversation(conversationId) {
 }
 
 async function savePendingTurn(pending) {
+  await assertNoRetiredConversationWrite(pending)
   await chrome.storage.local.set({ [pendingKey(pending.conversationId)]: pending })
 }
 
@@ -437,6 +571,7 @@ async function loadPendingTurn(conversationId) {
 }
 
 async function clearPendingTurn(conversationId) {
+  await assertNoRetiredConversationWrite({ conversationId })
   await chrome.storage.local.remove(pendingKey(conversationId))
 }
 
@@ -620,6 +755,8 @@ async function claimPendingTurnForTab(tab) {
   const stored = await chrome.storage.local.get(null)
   for (const [key, value] of Object.entries(stored)) {
     if (!key.startsWith(PENDING_PREFIX)) continue
+    if (Object.hasOwn(stored, `pending-retirement:${value.conversationId}`) ||
+        Object.hasOwn(stored, `pending-retirement-staged:${value.conversationId}`)) continue
     if (value.phase === 'preparing' || value.phase === 'prepared' || value.phase === 'submitting') continue
 
     const binding = stored[`${STORAGE_PREFIX}${value.conversationId}`]
@@ -1312,6 +1449,7 @@ async function performSend(params, operation) {
     conversationId: params.conversationId,
     turnId: params.turnId,
     ...(params.requestId ? { requestId: params.requestId } : {}),
+    ...(writerRegistrationId(params) ? { registrationId: writerRegistrationId(params), writerEpoch: params.writerEpoch } : {}),
     tabId: state.tabId,
     promptText: params.text,
     startedAt: Date.now(),
@@ -1587,6 +1725,7 @@ async function webGptShiftTest(params) {
       throw new Error(targetUrl ? 'No matching ChatGPT conversation tab was found' : 'No existing ChatGPT tab was found')
     }
   }
+  await assertNoRetiredConversationWrite({ externalUrl: tabPageUrl(tab) })
   let result
   try {
     result = await boundedMessage(tab.id, { type: 'webgpt_shift_test', target: params.target }, 10_000, undefined, params)
@@ -1703,6 +1842,8 @@ async function reconcileClosedPreSubmitTurns() {
   const liveTabIds = new Set(tabs.map(tab => tab.id))
   for (const [key, pending] of Object.entries(stored)) {
     if (!key.startsWith(PENDING_PREFIX) || !pending?.conversationId || !pending.turnId) continue
+    if (Object.hasOwn(stored, `pending-retirement:${pending.conversationId}`) ||
+        Object.hasOwn(stored, `pending-retirement-staged:${pending.conversationId}`)) continue
     if (pending.phase !== 'preparing' && pending.phase !== 'prepared') continue
     if (typeof pending.tabId !== 'number' || liveTabIds.has(pending.tabId)) continue
     const event = {
@@ -1738,6 +1879,8 @@ async function executeRequest(message) {
     return runWriterClaim(message.params ?? {})
   }
   if (message.method === 'writer_quiesce') return runWriterQuiesce(message.params ?? {})
+  if (message.method === 'pending_retirement_inspect') return runPendingMaintenance(() => inspectPendingRetirement(message.params ?? {}))
+  if (message.method === 'pending_retire') return runPendingMaintenance(() => retirePending(message.params ?? {}))
   if (message.method === 'webgpt_shift_test') return runWriterMutation(message.params ?? {}, () => webGptShiftTest(message.params ?? {}))
   if (message.method === 'project_find') return findProject(message.params ?? {})
   if (message.method === 'project_create') return runWriterMutation(message.params ?? {}, () => createProject(message.params ?? {}))
@@ -1815,6 +1958,10 @@ async function handleNativeRequest(message) {
   }
 }
 
+function runContentMutation(action) {
+  return recoveryReady.then(() => extensionLifecycle.runMutation(action))
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.kind === 'content_effect_document') {
     sendResponse(trustedContentSender(sender) && typeof message.token === 'string'
@@ -1828,7 +1975,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true
   }
   if (message?.kind === 'pending_turn_lookup') {
-    void extensionLifecycle.runMutation(() => claimPendingTurnForTab(sender.tab))
+    void runContentMutation(() => claimPendingTurnForTab(sender.tab))
       .then((pending) => sendResponse(pending))
       .catch(() => sendResponse(null))
     return true
@@ -1839,7 +1986,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const event = message.event
   const isTerminal = event.type === 'response_completed' || event.type === 'need_continue' || event.type === 'error'
   if (isTerminal) {
-    void extensionLifecycle.runMutation(async () => {
+    void runContentMutation(async () => {
+      try { await assertNoRetiredConversationWrite(event) } catch {
+        sendResponse({ durable: false, reason: 'retired_unknown' })
+        return
+      }
       const eventId = terminalEventId(event)
       const existing = await loadOutboxEvent(eventId)
       if (existing) {
@@ -1900,7 +2051,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true
   }
 
-  void extensionLifecycle.runMutation(async () => {
+  void runContentMutation(async () => {
+    await assertNoRetiredConversationWrite(event)
     const conversationId = event.conversationId
     if (typeof conversationId === 'string') {
       const current = await loadConversation(conversationId)
@@ -1928,10 +2080,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!stableConversationUrl(changeInfo?.url)) return
-  void extensionLifecycle.runMutation(() => claimAndKickRecoveryMonitor(tabId, changeInfo, tab)).catch(() => {})
+  void runContentMutation(() => claimAndKickRecoveryMonitor(tabId, changeInfo, tab)).catch(() => {})
 })
 
-const recoveryReady = lifecycleReady.then(reconcileClosedPreSubmitTurns)
+const recoveryReady = lifecycleReady.then(async () => {
+  if ((await extensionLifecycle.status()).restoration.state === 'ready') {
+    await extensionLifecycle.runMutation(reconcileClosedPreSubmitTurns)
+  }
+})
 chrome.runtime.onInstalled.addListener(connectNative)
 chrome.runtime.onStartup.addListener(connectNative)
 connectNative()

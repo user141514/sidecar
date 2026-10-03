@@ -6,6 +6,7 @@ import { parseIntentEnvelope, parseObservation } from './conversation-contract.m
 import { reduceConversationProjection } from './conversation-state.mjs'
 import { adoptExistingConversation, exactConversationUuid } from './conversation-adoption.mjs'
 import { WatchdogAuthority } from './watchdog-authority.mjs'
+import { inspectPendingRetirement, retirePendingAttempt } from './pending-retirement.mjs'
 
 const DEFAULT_CHATGPT_URL = 'https://chatgpt.com/'
 const PERSISTENT_UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
@@ -354,6 +355,10 @@ export class ChatGptConversationHost {
       return { accepted: true, conversationId: record.id }
     }, record.id)
   }
+
+  inspectPendingRetirement(payload) { return inspectPendingRetirement(this, payload) }
+
+  retirePendingAttempt(payload) { return retirePendingAttempt(this, payload) }
 
   withdrawWatchdog(payload) {
     if (!payload || Object.keys(payload).length !== 2 || !Object.hasOwn(payload, 'registrationId') || !Object.hasOwn(payload, 'target')) {

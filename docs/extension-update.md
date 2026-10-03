@@ -29,7 +29,29 @@ chatgpt-conversation extension-update
 
 `extension-reload` is an alias for `extension-update`. Optional `--timeout-ms N` accepts 100–300000; default 60000. This timeout bounds the updater's reconnect verification; it is NOT a worker generation deadline. `npm run extension:check` detects stale generated build metadata without changing files.
 
-The CLI refuses reload when the extension has pending turns, unacknowledged terminal outbox records or in-flight browser operations. There is no `--force`. Do not delete pending records merely to permit an update. A failed update prints a nonzero exit status and must not be reported as success.
+The CLI refuses reload when the extension has unsafe pending turns, unacknowledged terminal outbox records or in-flight browser operations. `pendingCount` includes preserved retired attempts; `blockingPendingCount` excludes only attempts with a matching durable retirement receipt. There is no `--force`. Do not delete pending records merely to permit an update. A failed update prints a nonzero exit status and must not be reported as success.
+
+## Retaining an unknown result while retiring a closed attempt
+
+The integrated Runtime Home host supports explicit local maintenance for a Watchdog send whose result is still `delivery_uncertain`. The operator must already have withdrawn that exact registration generation, drained its actual browser/content effects, and closed the original conversation tab. An open replacement tab for the same conversation also blocks retirement. This operation neither proves delivery nor proves non-delivery.
+
+Inspect the exact internal conversation and request IDs first:
+
+```text
+chatgpt-conversation extension-pending-inspect <conversation_id> <request_id>
+```
+
+Use the returned immutable pending digest, running instance and build for the explicit operation:
+
+```text
+chatgpt-conversation extension-pending-retire <conversation_id> <request_id> --operation-id <uuid> --expected-instance-id <uuid> --expected-build-id <sha256> --pending-digest <sha256>
+```
+
+Retirement preserves the original pending record, mailbox and conversation outcome. A separate durable receipt records `delivery: unknown` and permanently prevents that old attempt from sending, recovering, monitoring or accepting late turn events. The host appends a `pending_retired` audit event only after verifying the native receipt. If audit persistence fails, retry the same operation ID to reconcile the existing receipt; do not invent a new attempt or clear storage.
+
+These commands use integrated-host loopback JSON routes. They are unavailable to browser origins, conversation MCP tools and the standalone provider. Missing or active registration authority, changed identity/digest, an open target, incomplete effect drain, or failed persistence rejects the operation.
+
+An older running extension cannot perform this maintenance. Stage the tested release through canonical Runtime Home first. After checking the old writer drain and closed target, the user may perform one manual Reload of the same trusted extension identity. A historical reload receipt with a different expected build remains a failed restoration; normal browser writes are blocked. Local inspection and retirement remain available. After the verified retirement, run ordinary `extension-update` to obtain a new correlated receipt and ready restoration. Manual Reload alone is not a verified upgrade.
 
 ## What success proves
 

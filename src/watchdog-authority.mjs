@@ -89,6 +89,19 @@ export class WatchdogAuthority {
     return this.#serial(identity.registrationId, () => this.#permission(identity))
   }
 
+  async assertRevoked(payload) {
+    const identity = this.#identity(payload)
+    // Admission requires an existing durable fact, never a memory-only fence.
+    if (!this.rootDir) return denied('durable_revocation_required')
+    let record
+    try { record = JSON.parse(await readFile(join(this.rootDir, identity.registrationId + '.json'), 'utf8')) }
+    catch { return denied('durable_revocation_required') }
+    if (record?.version !== 1 || record.registrationId !== identity.registrationId || record.status !== 'revoked' ||
+        !Number.isSafeInteger(record.writerEpoch) || record.writerEpoch < 0) return denied('durable_revocation_required')
+    if (record.target !== identity.target) return denied('registration_target_mismatch')
+    return { accepted: true, ...identity }
+  }
+
   bind(payload) {
     const identity = this.#identity(payload)
     return this.#serial(identity.registrationId, async () => {

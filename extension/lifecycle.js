@@ -15,24 +15,72 @@ function isRecoverableSubmittedPending(state, pending) {
   return Boolean(binding && Number.isInteger(binding.tabId) && typeof binding.url === 'string' && binding.url)
 }
 
-function pendingSummary(state) {
+function retirementTarget(url) {
+  try {
+    const parsed = new URL(url)
+    if (parsed.origin !== 'https://chatgpt.com' || parsed.username || parsed.password) return null
+    const match = parsed.pathname.match(/^\/(?:g\/g-p-[^/]+\/)?c\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/?$/i)
+    return match ? `https://chatgpt.com/c/${match[1].toLowerCase()}` : null
+  } catch { return null }
+}
+
+async function pendingDigest(pending) {
+  function canonical(value) {
+    if (Array.isArray(value)) return value.map(canonical)
+    if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]))
+    return value
+  }
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(canonical(pending))))
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function validPendingRetirement(state, pending) {
+  const receipt = state[`pending-retirement:${pending?.conversationId}`]
+  if (!receipt || receipt.version !== 1 || receipt.state !== 'retired' || receipt.delivery !== 'unknown' ||
+      receipt.reason !== 'closed_target_after_quiesce' || typeof receipt.operationId !== 'string' || !receipt.operationId ||
+      !Number.isInteger(receipt.writerEpoch) || receipt.writerEpoch <= 0 ||
+      typeof receipt.registrationId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(receipt.registrationId) ||
+      typeof receipt.instanceId !== 'string' || !receipt.instanceId || !/^[a-f0-9]{64}$/.test(receipt.buildId) ||
+      !Number.isFinite(receipt.retiredAt) || receipt.retiredAt <= 0 ||
+      !['conversationId', 'turnId', 'requestId', 'tabId'].every(key => receipt[key] === pending[key]) ||
+      (pending.registrationId !== undefined && (typeof pending.registrationId !== 'string' || pending.registrationId.toLowerCase() !== receipt.registrationId)) ||
+      receipt.target !== retirementTarget(receipt.target) || !receipt.target ||
+      retirementTarget(state[`conversation:${pending.conversationId}`]?.url) !== receipt.target ||
+      receipt.proof?.originalTabAbsent !== true || receipt.proof?.targetAbsent !== true ||
+      receipt.proof?.writerDrained !== true || receipt.proof?.contentDrained !== true ||
+      receipt.proof?.contentEffectCount !== 0 || receipt.proof?.outboxCount !== 0 ||
+      receipt.proof?.revokedRegistration !== true ||
+      receipt.proof?.generationSource !== (pending.registrationId ? 'native_pending' : 'host_ledger')) return false
+  const revoked = state[`writer:revoked-registration:${receipt.registrationId}`]
+  if (revoked?.version !== 1 || revoked.registrationId !== receipt.registrationId ||
+      !Number.isInteger(revoked.writerEpoch) || revoked.writerEpoch < receipt.writerEpoch || revoked.target !== receipt.target) return false
+  return receipt.pendingDigest === await pendingDigest(pending)
+}
+
+async function pendingSummary(state) {
   let pendingCount = 0
   let recoverablePendingCount = 0
+  let retiredPendingCount = 0
   for (const [key, pending] of Object.entries(state)) {
     if (!key.startsWith('pending:')) continue
     pendingCount += 1
-    if (isRecoverableSubmittedPending(state, pending)) recoverablePendingCount += 1
+    if (key !== `pending:${pending?.conversationId}`) continue
+    if (await validPendingRetirement(state, pending)) retiredPendingCount += 1
+    else if (!Object.hasOwn(state, `pending-retirement:${pending?.conversationId}`) && isRecoverableSubmittedPending(state, pending)) recoverablePendingCount += 1
   }
   return {
     pendingCount,
     recoverablePendingCount,
-    blockingPendingCount: pendingCount - recoverablePendingCount
+    retiredPendingCount,
+    blockingPendingCount: pendingCount - recoverablePendingCount - retiredPendingCount
   }
 }
 
 function createSidecarLifecycle({ chrome, buildId, instanceId, matchesTab, schedule = setTimeout }) {
   const receiptKey = 'reload:receipt'
   let activeOperations = 0
+  let maintenance = false
+  const drainWaiters = []
   let admitted = null
   let admissionPromise = null
   let scheduled = false
@@ -40,7 +88,7 @@ function createSidecarLifecycle({ chrome, buildId, instanceId, matchesTab, sched
 
   async function status() {
     const state = await chrome.storage.local.get(null)
-    const pending = pendingSummary(state)
+    const pending = await pendingSummary(state)
     return {
       extensionId: chrome.runtime.id,
       version: chrome.runtime.getManifest().version,
@@ -49,16 +97,31 @@ function createSidecarLifecycle({ chrome, buildId, instanceId, matchesTab, sched
       ...pending,
       outboxCount: Object.keys(state).filter((key) => key.startsWith('outbox:')).length,
       activeOperations,
+      maintenance,
       reloading: admitted !== null,
       lastReload: state[receiptKey] ?? null,
       restoration
     }
   }
 
-  async function runMutation(action) {
+  async function runMutation(action, { control = false } = {}) {
     if (admitted || restoration.state === 'restoring') throw new Error('Extension reload in progress')
+    if (maintenance) throw new Error('Extension maintenance in progress')
+    if (!control && restoration.state !== 'ready') throw new Error('Extension restoration is not ready')
     activeOperations += 1
-    try { return await action() } finally { activeOperations -= 1 }
+    try { return await action() } finally {
+      activeOperations -= 1
+      if (activeOperations === 0) for (const resolve of drainWaiters.splice(0)) resolve()
+    }
+  }
+
+  async function runMaintenance(action) {
+    if (maintenance || admitted || restoration.state === 'restoring') throw new Error('Extension maintenance or reload in progress')
+    maintenance = true
+    try {
+      if (activeOperations) await new Promise(resolve => drainWaiters.push(resolve))
+      return await action()
+    } finally { maintenance = false }
   }
 
   async function requestReload({ requestId, expectedInstanceId, expectedBuildId } = {}) {
@@ -70,7 +133,7 @@ function createSidecarLifecycle({ chrome, buildId, instanceId, matchesTab, sched
       await admissionPromise
       return { accepted: true, requestId, previousInstanceId: instanceId }
     }
-    if (activeOperations || restoration.state === 'restoring') throw new Error('Extension busy: browser mutation or restore in flight')
+    if (activeOperations || maintenance || restoration.state === 'restoring') throw new Error('Extension busy: browser mutation or restore in flight')
     admitted = { requestId, previousInstanceId: instanceId, expectedBuildId }
     admissionPromise = (async () => {
       const before = await status()
@@ -113,7 +176,7 @@ function createSidecarLifecycle({ chrome, buildId, instanceId, matchesTab, sched
       restoration = { ...restoration, state: 'failed', error: 'Target build mismatch' }
       return
     }
-    const pending = pendingSummary(state)
+    const pending = await pendingSummary(state)
     if (pending.blockingPendingCount) {
       restoration = { ...restoration, state: 'failed', error: 'Unsafe pending turns appeared during reload' }
       return
@@ -123,6 +186,10 @@ function createSidecarLifecycle({ chrome, buildId, instanceId, matchesTab, sched
     try {
       for (const [key, binding] of Object.entries(state)) {
         if (!key.startsWith('conversation:') || !Number.isInteger(binding?.tabId) || seen.has(binding.tabId)) continue
+        if (Object.hasOwn(state, `pending-retirement:${key.slice('conversation:'.length)}`)) {
+          restoration.skippedTabs.push({ tabId: binding.tabId, reason: 'retired_unknown' })
+          continue
+        }
         seen.add(binding.tabId)
         let tab
         try { tab = await chrome.tabs.get(binding.tabId) } catch {
@@ -147,5 +214,5 @@ function createSidecarLifecycle({ chrome, buildId, instanceId, matchesTab, sched
     }
   }
 
-  return { status, runMutation, requestReload, afterResponse, restoreAfterReload }
+  return { status, runMutation, runMaintenance, requestReload, afterResponse, restoreAfterReload }
 }

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { DEFAULT_EXTENSION_REQUEST_TIMEOUT_MS } from './native-messaging.mjs'
 import { DEFAULT_EXTENSION_UPDATE_TIMEOUT_MS, updateExtension } from './extension-control.mjs'
 import { checkedExtensionBuild } from '../scripts/extension-build.mjs'
+import { validateRetirementRequest } from './pending-retirement.mjs'
 
 const DEFAULT_MCP_URL = 'http://127.0.0.1:7337/mcp'
 function usage() {
@@ -15,6 +16,8 @@ function usage() {
     'chatgpt-conversation send <conversation_id> [--app <app_name>] [--request-id <id>] <prompt...>',
     'chatgpt-conversation read <conversation_id>',
     'chatgpt-conversation extension-status',
+    'chatgpt-conversation extension-pending-inspect <conversation_id> <request_id>',
+    'chatgpt-conversation extension-pending-retire <conversation_id> <request_id> --operation-id <uuid> --expected-instance-id <uuid> --expected-build-id <sha256> --pending-digest <sha256>',
     'chatgpt-conversation extension-update [--timeout-ms <100..300000>]',
     'chatgpt-conversation extension-reload [--timeout-ms <100..300000>]'
   ].join('\n')
@@ -108,7 +111,33 @@ export async function runCli(argv, {
   updateExtensionImpl = updateExtension
 } = {}) {
   let result
-  if (['extension-update', 'extension-reload'].includes(argv[0])) {
+  if (['extension-pending-inspect', 'extension-pending-retire'].includes(argv[0])) {
+    const retire = argv[0] === 'extension-pending-retire'
+    const [conversationId, requestId, ...args] = argv.slice(1)
+    const payload = { conversationId, requestId }
+    const flags = { '--operation-id': 'operationId', '--expected-instance-id': 'expectedInstanceId',
+      '--expected-build-id': 'expectedBuildId', '--pending-digest': 'expectedPendingDigest' }
+    if (!retire && args.length) throw new TypeError('inspection accepts only conversation_id and request_id')
+    if (retire) {
+      if (args.length !== 8) throw new TypeError('retirement requires all four snapshot flags')
+      for (let index = 0; index < args.length; index += 2) {
+        const key = flags[args[index]]
+        if (!key || Object.hasOwn(payload, key) || !args[index + 1]) throw new TypeError('unknown or duplicate retirement flag')
+        payload[key] = args[index + 1]
+      }
+      payload.reason = 'closed_target_after_quiesce'
+    }
+    validateRetirementRequest(payload, retire)
+    const endpoint = new URL(url)
+    if (endpoint.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(endpoint.hostname) ||
+        endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error('Pending retirement requires the local HTTP MCP endpoint')
+    endpoint.pathname = retire ? '/internal/pending-retire' : '/internal/pending-retirement-inspect'
+    const response = await fetchImpl(endpoint.href, { method: 'POST', redirect: 'error',
+      headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(DEFAULT_EXTENSION_REQUEST_TIMEOUT_MS + 10_000),
+      body: JSON.stringify(payload) })
+    result = await response.json()
+    if (response.ok === false || result?.accepted === false) throw new Error(result?.reason ?? `Retirement HTTP ${response.status}`)
+  } else if (['extension-update', 'extension-reload'].includes(argv[0])) {
     const args = argv.slice(1)
     if (args.length && (args.length !== 2 || args[0] !== '--timeout-ms' || !/^\d+$/.test(args[1]))) throw new TypeError('extension-update accepts only --timeout-ms <100..300000>')
     const timeoutMs = args.length ? Number(args[1]) : DEFAULT_EXTENSION_UPDATE_TIMEOUT_MS

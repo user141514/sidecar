@@ -2,6 +2,7 @@ import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promise
 import { canonicalTarget } from './send-mailbox.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 function now() {
   return new Date().toISOString()
@@ -231,6 +232,22 @@ export class ConversationStore {
   async append(id, event) {
     const record = { at: now(), ...event }
     return this.enqueueWrite(id, async () => {
+      await appendFile(join(this.conversationDir(id), 'events.jsonl'), `${JSON.stringify(record)}\n`, 'utf8')
+      return record
+    })
+  }
+
+  recordPendingRetirement(id, event, validate) {
+    return this.enqueueWrite(id, async () => {
+      const current = await this.read(id)
+      await validate(current)
+      const existing = current.events.filter(item => item.type === 'pending_retired' &&
+        (item.requestId === event.requestId || item.operationId === event.operationId))
+      if (existing.length) {
+        if (existing.length !== 1 || !isDeepStrictEqual(existing[0].receipt, event.receipt)) throw new Error('retirement_audit_conflict')
+        return existing[0]
+      }
+      const record = { at: now(), ...event }
       await appendFile(join(this.conversationDir(id), 'events.jsonl'), `${JSON.stringify(record)}\n`, 'utf8')
       return record
     })

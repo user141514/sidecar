@@ -13,6 +13,7 @@ import { MemoryPool } from './memory-pool.mjs'
 import { MemorySyncBridge } from './memory-sync-bridge.mjs'
 import { SendAdmission } from './send-admission.mjs'
 import { claimWriterLease } from './writer-authority.mjs'
+import { validateRetirementRequest } from './pending-retirement.mjs'
 
 const TOOLS = [
   ...EXTENSION_TOOLS,
@@ -520,6 +521,34 @@ export function createSidecarServer({ conversationHost, workLedger = null, workC
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (req.method === 'GET' && url.pathname === '/healthz') {
         writeJson(res, 200, { ok: true, ...(runtimeRelease ? { runtimeRelease } : {}) })
+        return
+      }
+      const retirementRoutes = {
+        '/internal/pending-retirement-inspect': 'inspectPendingRetirement',
+        '/internal/pending-retire': 'retirePendingAttempt'
+      }
+      if (req.method === 'POST' && Object.hasOwn(retirementRoutes, url.pathname)) {
+        if (!isLoopback(req.socket.remoteAddress) || Object.hasOwn(req.headers, 'origin') ||
+            // Node fetch sets sec-fetch-mode itself. Browser fetch also sends
+            // site/dest metadata, which the browser caller cannot suppress.
+            Object.keys(req.headers).some(key => key.startsWith('sec-fetch-') && key !== 'sec-fetch-mode')) {
+          writeJson(res, 403, { accepted: false, reason: 'localhost_non_browser_only' })
+          return
+        }
+        if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers['content-type'] || ''))) {
+          writeJson(res, 415, { accepted: false, reason: 'json_required' })
+          return
+        }
+        const method = retirementRoutes[url.pathname]
+        try {
+          const payload = await readJson(req)
+          validateRetirementRequest(payload, method === 'retirePendingAttempt')
+          if (typeof conversationHost?.[method] !== 'function') throw new Error('retirement_owner_unavailable')
+          writeJson(res, 200, await conversationHost[method](payload))
+        } catch (error) {
+          writeJson(res, error instanceof TypeError ? 400 : 503, { accepted: false,
+            reason: error.code ?? (error instanceof TypeError ? 'invalid_retirement_request' : 'retirement_unavailable') })
+        }
         return
       }
       if (req.method === 'POST' && url.pathname === '/internal/conversation-adoption') {
