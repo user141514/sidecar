@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const extensionFiles = ['manifest.json', 'service-worker.js', 'content-script.js', 'lifecycle.js']
+export const extensionFiles = ['manifest.json', 'service-worker.js', 'content-script.js', 'lifecycle.js', 'pending-retirement-target.js', 'package.json']
 export const defaultExtensionDir = fileURLToPath(new URL('../extension/', import.meta.url))
 
 export async function extensionBuild(extensionDir = defaultExtensionDir) {

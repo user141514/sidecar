@@ -15,15 +15,6 @@ function isRecoverableSubmittedPending(state, pending) {
   return Boolean(binding && Number.isInteger(binding.tabId) && typeof binding.url === 'string' && binding.url)
 }
 
-function retirementTarget(url) {
-  try {
-    const parsed = new URL(url)
-    if (parsed.origin !== 'https://chatgpt.com' || parsed.username || parsed.password) return null
-    const match = parsed.pathname.match(/^\/(?:g\/g-p-[^/]+\/)?c\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/?$/i)
-    return match ? `https://chatgpt.com/c/${match[1].toLowerCase()}` : null
-  } catch { return null }
-}
-
 async function pendingDigest(pending) {
   function canonical(value) {
     if (Array.isArray(value)) return value.map(canonical)
@@ -37,23 +28,37 @@ async function pendingDigest(pending) {
 async function validPendingRetirement(state, pending) {
   const receipt = state[`pending-retirement:${pending?.conversationId}`]
   if (!receipt || receipt.version !== 1 || receipt.state !== 'retired' || receipt.delivery !== 'unknown' ||
-      receipt.reason !== 'closed_target_after_quiesce' || typeof receipt.operationId !== 'string' || !receipt.operationId ||
+      typeof receipt.operationId !== 'string' || !receipt.operationId ||
       !Number.isInteger(receipt.writerEpoch) || receipt.writerEpoch <= 0 ||
-      typeof receipt.registrationId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(receipt.registrationId) ||
       typeof receipt.instanceId !== 'string' || !receipt.instanceId || !/^[a-f0-9]{64}$/.test(receipt.buildId) ||
       !Number.isFinite(receipt.retiredAt) || receipt.retiredAt <= 0 ||
       !['conversationId', 'turnId', 'requestId', 'tabId'].every(key => receipt[key] === pending[key]) ||
-      (pending.registrationId !== undefined && (typeof pending.registrationId !== 'string' || pending.registrationId.toLowerCase() !== receipt.registrationId)) ||
-      receipt.target !== retirementTarget(receipt.target) || !receipt.target ||
-      retirementTarget(state[`conversation:${pending.conversationId}`]?.url) !== receipt.target ||
-      receipt.proof?.originalTabAbsent !== true || receipt.proof?.targetAbsent !== true ||
+      receipt.proof?.originalTabAbsent !== true ||
       receipt.proof?.writerDrained !== true || receipt.proof?.contentDrained !== true ||
-      receipt.proof?.contentEffectCount !== 0 || receipt.proof?.outboxCount !== 0 ||
-      receipt.proof?.revokedRegistration !== true ||
-      receipt.proof?.generationSource !== (pending.registrationId ? 'native_pending' : 'host_ledger')) return false
-  const revoked = state[`writer:revoked-registration:${receipt.registrationId}`]
-  if (revoked?.version !== 1 || revoked.registrationId !== receipt.registrationId ||
-      !Number.isInteger(revoked.writerEpoch) || revoked.writerEpoch < receipt.writerEpoch || revoked.target !== receipt.target) return false
+      receipt.proof?.contentEffectCount !== 0 || receipt.proof?.outboxCount !== 0) return false
+  if (receipt.owner === 'manual') {
+    const authority = state['writer:authority']
+    const canonicalTarget = retirementTarget(receipt.target)
+    if (receipt.reason !== 'closed_manual_owner_after_quiesce' || pending.phase !== 'submitting' ||
+        pending.registrationId !== undefined || (pending.source != null && pending.source !== 'manual') ||
+        Object.hasOwn(receipt, 'registrationId') ||
+        receipt.target !== manualRetirementTarget(receipt.target) || !receipt.target ||
+        manualRetirementTarget(state[`conversation:${pending.conversationId}`]?.url) !== receipt.target ||
+        receipt.proof.generationSource !== 'manual_owner' || Object.hasOwn(receipt.proof, 'revokedRegistration') ||
+        (canonicalTarget ? receipt.proof.targetAbsent !== true : Object.hasOwn(receipt.proof, 'targetAbsent')) ||
+        authority?.version !== 1 || !Number.isInteger(authority.epoch) || authority.epoch < receipt.writerEpoch) return false
+  } else {
+    if (receipt.owner !== undefined || receipt.reason !== 'closed_target_after_quiesce' ||
+        typeof receipt.registrationId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(receipt.registrationId) ||
+        (pending.registrationId !== undefined && (typeof pending.registrationId !== 'string' || pending.registrationId.toLowerCase() !== receipt.registrationId)) ||
+        receipt.target !== retirementTarget(receipt.target) || !receipt.target ||
+        retirementTarget(state[`conversation:${pending.conversationId}`]?.url) !== receipt.target ||
+        receipt.proof.targetAbsent !== true || receipt.proof.revokedRegistration !== true ||
+        receipt.proof.generationSource !== (pending.registrationId ? 'native_pending' : 'host_ledger')) return false
+    const revoked = state[`writer:revoked-registration:${receipt.registrationId}`]
+    if (revoked?.version !== 1 || revoked.registrationId !== receipt.registrationId ||
+        !Number.isInteger(revoked.writerEpoch) || revoked.writerEpoch < receipt.writerEpoch || revoked.target !== receipt.target) return false
+  }
   return receipt.pendingDigest === await pendingDigest(pending)
 }
 

@@ -1,4 +1,4 @@
-importScripts('build-info.js', 'lifecycle.js')
+importScripts('build-info.js', 'pending-retirement-target.js', 'lifecycle.js')
 const extensionInstanceId = crypto.randomUUID()
 const extensionLifecycle = createSidecarLifecycle({
   chrome,
@@ -254,30 +254,38 @@ async function inspectPendingRetirement(params) {
   for (const key of ['conversationId', 'turnId', 'requestId']) {
     if (typeof params[key] !== 'string' || !params[key] || params[key].length > 256) throw new Error(`Retirement requires ${key}`)
   }
+  if (params.owner !== undefined && params.owner !== 'manual') throw new Error('Invalid retirement owner')
+  const manual = params.owner === 'manual'
   const registrationId = writerRegistrationId(params)
-  if (!registrationId) throw new Error('Retirement requires revoked registration')
-  const target = retirementTarget(params.target)
-  if (!target) throw new Error('Retirement requires exact canonical target')
+  if (manual ? params.registrationId !== undefined : !registrationId) throw new Error('Retirement owner registration mismatch')
+  const targetOf = manual ? manualRetirementTarget : retirementTarget
+  const target = targetOf(params.target)
+  if (!target) throw new Error('Retirement requires exact target')
   await assertWriterEpoch(params)
   const state = await chrome.storage.local.get(null)
   const pending = state[pendingKey(params.conversationId)]
   const identity = { conversationId: params.conversationId, turnId: params.turnId, requestId: params.requestId,
-    registrationId, target, writerEpoch: params.writerEpoch, instanceId: extensionInstanceId, buildId: globalThis.__sidecarBuildId }
+    ...(manual ? { owner: 'manual' } : { registrationId }), target, writerEpoch: params.writerEpoch,
+    instanceId: extensionInstanceId, buildId: globalThis.__sidecarBuildId }
   if (!pending) return { ...identity, found: false, retirable: false, reason: 'pending_missing' }
   const result = { ...identity, found: true, retirable: false, tabId: pending.tabId, pendingDigest: await pendingDigest(pending) }
   const deny = reason => ({ ...result, reason })
   if (pending.conversationId !== params.conversationId || pending.turnId !== params.turnId || pending.requestId !== params.requestId ||
-      !Number.isInteger(pending.tabId) || (pending.registrationId !== undefined &&
-        (typeof pending.registrationId !== 'string' || pending.registrationId.toLowerCase() !== registrationId))) return deny('pending_identity_mismatch')
+      !Number.isInteger(pending.tabId) || (manual ? (pending.registrationId !== undefined ||
+        (pending.source != null && pending.source !== 'manual')) : (pending.registrationId !== undefined &&
+        (typeof pending.registrationId !== 'string' || pending.registrationId.toLowerCase() !== registrationId)))) return deny('pending_identity_mismatch')
   const binding = state[storageKey(params.conversationId)]
-  if (binding?.tabId !== pending.tabId || retirementTarget(binding?.url) !== target ||
-      ['url', 'externalUrl', 'target'].some(key => pending[key] !== undefined && retirementTarget(pending[key]) !== target)) return deny('pending_target_mismatch')
-  const revoked = state[REVOKED_REGISTRATION_PREFIX + registrationId]
-  if (revoked?.version !== 1 || revoked.registrationId !== registrationId || revoked.target !== target ||
-      !Number.isInteger(revoked.writerEpoch) || revoked.writerEpoch !== params.writerEpoch) return deny('registration_not_revoked_for_target')
+  if (binding?.tabId !== pending.tabId || targetOf(binding?.url) !== target ||
+      ['url', 'externalUrl', 'target'].some(key => pending[key] !== undefined && targetOf(pending[key]) !== target)) return deny('pending_target_mismatch')
+  if (!manual) {
+    const revoked = state[REVOKED_REGISTRATION_PREFIX + registrationId]
+    if (revoked?.version !== 1 || revoked.registrationId !== registrationId || revoked.target !== target ||
+        !Number.isInteger(revoked.writerEpoch) || revoked.writerEpoch !== params.writerEpoch) return deny('registration_not_revoked_for_target')
+  }
   const receipt = state[`pending-retirement:${params.conversationId}`]
   if (receipt) {
-    if (!await validPendingRetirement(state, pending) || receipt.registrationId !== registrationId || receipt.target !== target) return deny('retirement_receipt_mismatch')
+    if (!await validPendingRetirement(state, pending) || receipt.owner !== params.owner ||
+        (!manual && receipt.registrationId !== registrationId) || receipt.target !== target) return deny('retirement_receipt_mismatch')
     return { ...result, retirable: true, retirement: receipt }
   }
   if (pending.phase !== 'submitting' || state[effectReceiptKey(params.requestId)]) return deny('pending_not_unknown_submit')
@@ -289,13 +297,16 @@ async function inspectPendingRetirement(params) {
   try { tabs = await chrome.tabs.query({}) } catch { return deny('tabs_lookup_failed') }
   if (!Array.isArray(tabs)) return deny('tabs_lookup_failed')
   if (tabs.some(tab => tab.id === pending.tabId)) return deny('original_tab_open')
-  if (tabs.some(tab => retirementTarget(tab.url) === target || retirementTarget(tab.pendingUrl) === target)) return deny('target_open')
+  const canonicalTarget = retirementTarget(target)
+  if (canonicalTarget && tabs.some(tab => retirementTarget(tab.url) === canonicalTarget || retirementTarget(tab.pendingUrl) === canonicalTarget)) return deny('target_open')
   return { ...result, retirable: true }
 }
 
 async function retirePending(params) {
   if (typeof params.operationId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(params.operationId) ||
-      params.reason !== 'closed_target_after_quiesce') throw new Error('Invalid retirement operation or reason')
+      params.reason !== (params.owner === 'manual' ? 'closed_manual_owner_after_quiesce' : 'closed_target_after_quiesce')) {
+    throw new Error('Invalid retirement operation or reason')
+  }
   const inspected = await inspectPendingRetirement(params)
   if (!inspected.retirable) throw new Error(`Pending retirement rejected: ${inspected.reason}`)
   if (params.expectedPendingDigest !== inspected.pendingDigest) throw new Error('Pending retirement digest changed')
@@ -313,7 +324,8 @@ async function retirePending(params) {
   if (priorCandidate) {
     if (priorCandidate.operationId !== params.operationId || priorCandidate.reason !== params.reason ||
         priorCandidate.instanceId !== params.expectedInstanceId || priorCandidate.buildId !== params.expectedBuildId ||
-        priorCandidate.pendingDigest !== params.expectedPendingDigest || priorCandidate.registrationId !== inspected.registrationId ||
+        priorCandidate.pendingDigest !== params.expectedPendingDigest || priorCandidate.owner !== inspected.owner ||
+        priorCandidate.registrationId !== inspected.registrationId ||
         priorCandidate.target !== inspected.target || priorCandidate.writerEpoch > params.writerEpoch ||
         !await validPendingRetirement({ ...state, [`pending-retirement:${params.conversationId}`]: priorCandidate }, pending)) {
       throw new Error('Pending retirement candidate conflict')
@@ -323,11 +335,14 @@ async function retirePending(params) {
   }
   const receipt = { version: 1, state: 'retired', delivery: 'unknown', operationId: params.operationId, reason: params.reason,
     conversationId: inspected.conversationId, turnId: inspected.turnId, requestId: inspected.requestId,
-    registrationId: inspected.registrationId, target: inspected.target, tabId: inspected.tabId,
+    ...(inspected.owner === 'manual' ? { owner: 'manual' } : { registrationId: inspected.registrationId }),
+    target: inspected.target, tabId: inspected.tabId,
     pendingDigest: inspected.pendingDigest, writerEpoch: inspected.writerEpoch, instanceId: inspected.instanceId,
-    buildId: inspected.buildId, retiredAt: Date.now(), proof: { originalTabAbsent: true, targetAbsent: true,
-      writerDrained: true, contentDrained: true, contentEffectCount: 0, outboxCount: 0, revokedRegistration: true,
-      generationSource: pending.registrationId ? 'native_pending' : 'host_ledger' } }
+    buildId: inspected.buildId, retiredAt: Date.now(), proof: { originalTabAbsent: true,
+      ...(retirementTarget(inspected.target) ? { targetAbsent: true } : {}),
+      writerDrained: true, contentDrained: true, contentEffectCount: 0, outboxCount: 0,
+      ...(inspected.owner === 'manual' ? { generationSource: 'manual_owner' } :
+        { revokedRegistration: true, generationSource: pending.registrationId ? 'native_pending' : 'host_ledger' }) } }
   // Read back an inert candidate before publishing the lifecycle-unblocking
   // receipt. A failed readback must leave the original pending blocking.
   const candidate = priorCandidate ?? receipt
@@ -398,10 +413,6 @@ async function boundedMessage(tabId, message, timeoutMs, onLateResponse, writerP
       new Promise((_, reject) => { timer = setTimeout(() => { expired = true; reject(new Error(`Content script response timeout: ${message.type}`)) }, timeoutMs) })
     ])
   } finally { clearTimeout(timer) }
-}
-
-function canonicalProjectPath(path) {
-  return path.replace(/^(\/g\/g-p-[a-f0-9]{32})(?:-[^/]+)?(?=\/)/i, '$1')
 }
 
 function storageKey(conversationId) {

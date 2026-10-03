@@ -5,8 +5,9 @@ import vm from 'node:vm'
 
 async function harness(storage = {}) {
   const source = await readFile(new URL('../extension/lifecycle.js', import.meta.url), 'utf8').catch(() => '')
-  const context = { console, setTimeout, clearTimeout }
-  vm.runInNewContext(source, context)
+  const targetSource = await readFile(new URL('../extension/pending-retirement-target.js', import.meta.url), 'utf8')
+  const context = { console, setTimeout, clearTimeout, URL }
+  vm.runInNewContext(targetSource + '\n' + source, context)
   assert.equal(typeof context.createSidecarLifecycle, 'function', 'extension lifecycle control must exist')
   const trace = []
   const timers = []

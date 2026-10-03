@@ -17,7 +17,7 @@ test('standalone artifact contains the identical extension, CLI, MCP schemas, Sk
   assert.equal(typeof packagedHost.ChatGptConversationHost, 'function')
   await access(join(output, 'src/conversation-adoption.mjs'))
   await assert.rejects(access(join(output, 'test/existing-conversation-adoption.test.mjs')))
-  for (const path of ['extension/manifest.json', 'extension/build-info.js', 'extension/service-worker.js', 'extension/content-script.js', 'extension/lifecycle.js', 'src/cli.mjs', 'src/extension-control.mjs', 'src/conversation-tools.mjs', 'src/conversation-contract.mjs', 'src/conversation-state.mjs', 'test/conversation-contract.test.mjs', 'test/send-mailbox-crash-child.mjs', 'test/fixtures/conversation-runtime-v1.json', 'skills/chatgpt-subagents/SKILL.md', 'install/platform-link.mjs']) {
+  for (const path of ['extension/manifest.json', 'extension/build-info.js', 'extension/service-worker.js', 'extension/content-script.js', 'extension/lifecycle.js', 'extension/pending-retirement-target.js', 'extension/package.json', 'src/cli.mjs', 'src/extension-control.mjs', 'src/conversation-tools.mjs', 'src/conversation-contract.mjs', 'src/conversation-state.mjs', 'test/conversation-contract.test.mjs', 'test/send-mailbox-crash-child.mjs', 'test/fixtures/conversation-runtime-v1.json', 'skills/chatgpt-subagents/SKILL.md', 'install/platform-link.mjs']) {
     assert.equal(await readFile(join(output, path), 'utf8'), await readFile(new URL(`../${path}`, import.meta.url), 'utf8'), path)
   }
   for (const path of ['src/work-controller.mjs', 'src/memory-pool.mjs', 'data', '.git']) await assert.rejects(access(join(output, path)))

@@ -36,7 +36,11 @@ After updating local source through the approved Git workflow, build/test the so
 - `chatgpt-conversation extension-status` reports the running extension ID, version, build ID, instance ID, pending/outbox counts and last reload receipt.
 - `chatgpt-conversation extension-update` (alias `extension-reload`) applies the staged unpacked extension and independently verifies the reconnect. Optional `--timeout-ms N`, 100–300000, default 30000.
 
-The agent may invoke the verified CLI update when the user has authorized updating this installation. Do not click Chrome controls. If blocked by pending work or undelivered outbox entries, stop; there is no force option. Never clear those records merely to pass update admission.
+The agent may invoke the verified CLI update when the user has authorized updating this installation. Keep actual browser writers, unresolved content effects and undelivered outbox entries out of the update boundary. Preserve unknown sends as unknown; never replay them or fabricate submission receipts.
+
+When the user explicitly ends an owned manual test, use the existing pending-retirement maintenance API with `closed_manual_owner_after_quiesce`. It requires the exact current attempt and snapshot, the original owned tab closed, real writer/content drains, and empty effects/outbox. Keep the original pending, ledger and mailbox; the independent retirement receipt ends execution ownership without claiming delivery. Watchdog retirement keeps its separate durable registration revocation requirements.
+
+If an older extension lacks that maintenance branch, explicit user-authorized maintenance may stage the verified release and Reload that same extension identity once after those drain checks and a rollback snapshot. A maintenance Reload is not a verified update; a stale prior build receipt can leave ordinary writes disabled. Finish the owner retirement, then run the normal CLI update and verify its fresh correlated receipt and ready restoration. User authorization takes precedence over this guidance.
 
 Success requires a different extension instance, the exact reload request receipt, the expected local build, the same extension identity, and successful reattachment of eligible managed content scripts. Acceptance or an HTTP disconnect is not success. The CLI survives replacement of the native host. It never opens, activates, navigates or reloads browser tabs; only exact still-matching managed tabs may receive idempotent content-script reinjection.
 

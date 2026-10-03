@@ -11,6 +11,7 @@ import { ConversationStore } from '../src/store.mjs'
 
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
 const lifecycleSource = await readFile(new URL('../extension/lifecycle.js', import.meta.url), 'utf8')
+const retirementTargetSource = await readFile(new URL('../extension/pending-retirement-target.js', import.meta.url), 'utf8')
 const target = 'https://chatgpt.com/c/00000000-0000-4000-8000-000000000101'
 const userMessageId = '10000000-0000-4000-8000-000000000101'
 const assistantMessageId = '20000000-0000-4000-8000-000000000101'
@@ -51,6 +52,7 @@ async function fixture(t) {
   context.importScripts = (...paths) => {
     for (const path of paths) {
       if (path === 'build-info.js') context.__sidecarBuildId = 'a'.repeat(64)
+      else if (path === 'pending-retirement-target.js') vm.runInContext(retirementTargetSource, context)
       else if (path === 'lifecycle.js') vm.runInContext(lifecycleSource, context)
       else assert.fail('unexpected import: ' + path)
     }

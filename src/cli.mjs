@@ -17,7 +17,7 @@ function usage() {
     'chatgpt-conversation read <conversation_id>',
     'chatgpt-conversation extension-status',
     'chatgpt-conversation extension-pending-inspect <conversation_id> <request_id>',
-    'chatgpt-conversation extension-pending-retire <conversation_id> <request_id> --operation-id <uuid> --expected-instance-id <uuid> --expected-build-id <sha256> --pending-digest <sha256>',
+    'chatgpt-conversation extension-pending-retire <conversation_id> <request_id> --operation-id <uuid> --expected-instance-id <uuid> --expected-build-id <sha256> --pending-digest <sha256> [--reason <closed_target_after_quiesce|closed_manual_owner_after_quiesce>]',
     'chatgpt-conversation extension-update [--timeout-ms <100..300000>]',
     'chatgpt-conversation extension-reload [--timeout-ms <100..300000>]'
   ].join('\n')
@@ -126,16 +126,16 @@ export async function runCli(argv, {
     const [conversationId, requestId, ...args] = argv.slice(1)
     const payload = { conversationId, requestId }
     const flags = { '--operation-id': 'operationId', '--expected-instance-id': 'expectedInstanceId',
-      '--expected-build-id': 'expectedBuildId', '--pending-digest': 'expectedPendingDigest' }
+      '--expected-build-id': 'expectedBuildId', '--pending-digest': 'expectedPendingDigest', '--reason': 'reason' }
     if (!retire && args.length) throw new TypeError('inspection accepts only conversation_id and request_id')
     if (retire) {
-      if (args.length !== 8) throw new TypeError('retirement requires all four snapshot flags')
+      if (![8, 10].includes(args.length)) throw new TypeError('retirement requires all four snapshot flags and optional --reason')
       for (let index = 0; index < args.length; index += 2) {
         const key = flags[args[index]]
         if (!key || Object.hasOwn(payload, key) || !args[index + 1]) throw new TypeError('unknown or duplicate retirement flag')
         payload[key] = args[index + 1]
       }
-      payload.reason = 'closed_target_after_quiesce'
+      payload.reason ??= 'closed_target_after_quiesce'
     }
     validateRetirementRequest(payload, retire)
     const endpoint = new URL(url)

@@ -16,6 +16,17 @@ test('extension build identity is unchanged by Windows CRLF checkout conversion'
   assert.deepEqual(await extensionBuild(root), expected)
 })
 
+test('shared retirement target helper changes participate in extension build identity', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'extension-target-build-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  for (const file of extensionFiles) await writeFile(join(root, file), await readFile(new URL(`../extension/${file}`, import.meta.url)))
+  const before = await extensionBuild(root)
+  await writeFile(join(root, 'build-info.js'), buildInfoSource(before.buildId))
+  await writeFile(join(root, 'pending-retirement-target.js'), '// changed shared URL identity\n')
+  assert.notEqual((await extensionBuild(root)).buildId, before.buildId)
+  await assert.rejects(checkedExtensionBuild(root), /stale/)
+})
+
 test('disk source changes invalidate prepared metadata rather than silently claiming the new build is loaded', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'extension-stale-'))
   t.after(() => rm(root, { recursive: true, force: true }))

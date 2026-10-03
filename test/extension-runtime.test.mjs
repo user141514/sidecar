@@ -12,6 +12,7 @@ import { nativeContentFixture, MODERN_USER_ID, MODERN_ASSISTANT_ID, MODERN_THREA
 
 const workerSource = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8')
 const lifecycleSource = await readFile(new URL('../extension/lifecycle.js', import.meta.url), 'utf8')
+const retirementTargetSource = await readFile(new URL('../extension/pending-retirement-target.js', import.meta.url), 'utf8')
 const contentSource = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
 
 test('actual modern content ACK and snapshots pass native send inspect state and stop with canonical receipt', async t => {
@@ -250,6 +251,205 @@ async function retirementRequest(h, operationId = 'retirement-op') {
   return { ...retirementIdentity, operationId, expectedPendingDigest: inspected.result.pendingDigest,
     expectedInstanceId: inspected.result.instanceId, expectedBuildId: inspected.result.buildId, reason: 'closed_target_after_quiesce' }
 }
+
+const manualRetirementIdentity = { conversationId: 'manual-retire', turnId: 'manual-turn', requestId: 'manual-send',
+  owner: 'manual', target: 'https://chatgpt.com/g/g-p-test-subagents/project', writerEpoch: 3 }
+function manualRetirementStorage(target = manualRetirementIdentity.target) {
+  return { 'writer:authority': { version: 1, epoch: 3 },
+    'conversation:manual-retire': { tabId: 88, windowId: 10, url: target },
+    'pending:manual-retire': { conversationId: 'manual-retire', turnId: 'manual-turn', requestId: 'manual-send',
+      tabId: 88, phase: 'submitting', monitorVersion: 1, promptText: 'original manual private prompt' } }
+}
+async function manualRetirementRequest(h, identity = manualRetirementIdentity) {
+  const inspected = await h.request('pending_retirement_inspect', identity)
+  assert.equal(inspected.ok, true, inspected.error)
+  assert.equal(inspected.result.retirable, true, inspected.result.reason)
+  assert.equal(JSON.stringify(inspected.result).includes('original manual private prompt'), false)
+  return { ...identity, operationId: 'manual-retirement-op', reason: 'closed_manual_owner_after_quiesce',
+    expectedPendingDigest: inspected.result.pendingDigest, expectedInstanceId: inspected.result.instanceId,
+    expectedBuildId: inspected.result.buildId }
+}
+
+test('manual owner retirement preserves unknown project submit without claiming project closure or Watchdog revocation', async () => {
+  const storage = manualRetirementStorage()
+  const original = structuredClone(storage['pending:manual-retire'])
+  const h = makeHarness({ storage, tabs: [{ id: 99, windowId: 10, url: manualRetirementIdentity.target }], windows: [{ id: 10 }] })
+  const params = await manualRetirementRequest(h)
+  const retired = await h.request('pending_retire', params)
+  assert.equal(retired.ok, true, retired.error)
+  const receipt = retired.result.receipt
+  assert.equal(retired.result.delivery, 'unknown')
+  assert.equal(receipt.owner, 'manual')
+  assert.equal(receipt.reason, 'closed_manual_owner_after_quiesce')
+  assert.equal(receipt.proof.generationSource, 'manual_owner')
+  assert.equal(receipt.proof.originalTabAbsent, true)
+  assert.equal(receipt.proof.writerDrained, true)
+  assert.equal(receipt.proof.contentDrained, true)
+  assert.equal(Object.hasOwn(receipt.proof, 'targetAbsent'), false)
+  assert.equal(Object.hasOwn(receipt.proof, 'revokedRegistration'), false)
+  assert.equal(Object.hasOwn(receipt, 'registrationId'), false)
+  assert.deepEqual(h.storageState['pending:manual-retire'], original)
+  assert.equal(h.storageState['effect-receipt:manual-send'], undefined)
+  assert.equal(Object.keys(h.storageState).some(key => key.startsWith('writer:revoked-registration:')), false)
+  assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length + h.sentToTabs.length, 0)
+  const status = (await h.request('extension_status', {})).result
+  assert.deepEqual([status.pendingCount, status.retiredPendingCount, status.recoverablePendingCount, status.blockingPendingCount], [1, 1, 0, 0])
+  assert.equal((await h.request('pending_retire', params)).result.receipt.operationId, params.operationId)
+  assert.equal((await h.request('pending_retire', { ...params, operationId: 'different-operation' })).ok, false)
+  const restarted = makeHarness({ storage: structuredClone(h.storageState), extensionInstance: 'new-instance', extensionBuild: 'b'.repeat(64) })
+  assert.equal((await restarted.request('writer_epoch_claim', { writerEpoch: 4 })).ok, true)
+  assert.equal((await restarted.request('pending_retire', { ...params, writerEpoch: 4 })).ok, true)
+  assert.equal((await restarted.request('extension_status', {})).result.retiredPendingCount, 1)
+  for (const method of ['conversation_send', 'conversation_create', 'conversation_adopt']) {
+    assert.equal((await restarted.request(method, { conversationId: 'manual-retire', requestId: 'manual-send', writerEpoch: 4 })).ok, false, method)
+  }
+  for (const type of ['response_completed', 'response_delta']) {
+    const result = await restarted.emitRuntimeMessage({ kind: 'conversation_event', event: { type,
+      conversationId: 'manual-retire', turnId: 'manual-turn', monitorVersion: 1, externalUrl: manualRetirementIdentity.target } },
+      { tab: { id: 88, windowId: 10, url: manualRetirementIdentity.target } })
+    assert.notEqual(result?.durable, true, type)
+  }
+  assert.deepEqual(restarted.storageState['pending:manual-retire'], original)
+  assert.equal(Object.keys(restarted.storageState).some(key => key.startsWith('outbox:')), false)
+})
+
+test('manual owner retirement shares exact project identity normalization with the host without widening target matches', async () => {
+  const { manualRetirementTarget } = await import('../extension/pending-retirement-target.js')
+  const canonical = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
+  const slugged = canonical.replace('/project', '-subagents/project/?model=anything#composer')
+  assert.equal(manualRetirementTarget(slugged), canonical)
+  for (const invalid of ['https://user@chatgpt.com/', 'http://chatgpt.com/', 'https://chatgpt.com:444/',
+    canonical + '/extra', 'https://chatgpt.com/c/local-chatgpt%3Atemporary']) assert.equal(manualRetirementTarget(invalid), null)
+  assert.equal(manualRetirementTarget(MODERN_THREAD_URL), 'https://chatgpt.com/c/' + MODERN_THREAD_URL.split('/').at(-1))
+  const identity = { ...manualRetirementIdentity, target: slugged }
+  const h = makeHarness({ storage: manualRetirementStorage(canonical) })
+  const retired = await h.request('pending_retire', await manualRetirementRequest(h, identity))
+  assert.equal(retired.ok, true, retired.error)
+  assert.equal(retired.result.receipt.target, canonical)
+  assert.equal((await h.request('extension_status', {})).result.blockingPendingCount, 0)
+})
+
+test('manual owner retirement requires canonical target absence when the exact conversation is known', async () => {
+  const target = retirementIdentity.target
+  const identity = { ...manualRetirementIdentity, target }
+  const h = makeHarness({ storage: manualRetirementStorage(target), tabs: [{ id: 99, windowId: 10,
+    url: target.replace('/c/', '/g/g-p-other/c/') }], windows: [{ id: 10 }] })
+  const denied = await h.request('pending_retirement_inspect', identity)
+  assert.equal(denied.ok, true, denied.error)
+  assert.equal(denied.result.retirable, false)
+  assert.equal(denied.result.reason, 'target_open')
+  const closed = makeHarness({ storage: manualRetirementStorage(target) })
+  const result = await closed.request('pending_retire', await manualRetirementRequest(closed, identity))
+  assert.equal(result.ok, true, result.error)
+  assert.equal(result.result.receipt.proof.targetAbsent, true)
+})
+
+test('manual owner retirement fails closed for changed identity ownership drain closure and snapshot', async t => {
+  for (const change of ['binding', 'turn', 'registration', 'prepared', 'known', 'outbox', 'effect', 'digest', 'instance', 'build', 'epoch', 'original-tab', 'tabs-lookup']) {
+    await t.test(change, async () => {
+      const h = makeHarness({ storage: manualRetirementStorage() })
+      const params = await manualRetirementRequest(h)
+      if (change === 'binding') h.storageState['conversation:manual-retire'].url = 'https://chatgpt.com/g/g-p-other/project'
+      if (change === 'turn') h.storageState['pending:manual-retire'].turnId = 'changed-turn'
+      if (change === 'registration') h.storageState['pending:manual-retire'].registrationId = retirementIdentity.registrationId
+      if (change === 'prepared') h.storageState['pending:manual-retire'].phase = 'prepared'
+      if (change === 'known') h.storageState['effect-receipt:manual-send'] = { requestId: 'manual-send', userMessageId: MODERN_USER_ID }
+      if (change === 'outbox') h.storageState['outbox:blocked'] = { eventId: 'blocked' }
+      if (change === 'effect') h.storageState['content-effect:blocked'] = { token: 'blocked' }
+      if (change === 'digest') h.storageState['pending:manual-retire'].promptText = 'changed prompt'
+      if (change === 'instance') params.expectedInstanceId = 'changed-instance'
+      if (change === 'build') params.expectedBuildId = 'b'.repeat(64)
+      if (change === 'epoch') params.writerEpoch = 2
+      const target = change === 'original-tab'
+        ? makeHarness({ storage: structuredClone(h.storageState), tabs: [{ id: 88, windowId: 10, url: 'https://example.com/' }] })
+        : change === 'tabs-lookup' ? makeHarness({ storage: structuredClone(h.storageState), tabsQueryFailure: () => true }) : h
+      assert.equal((await target.request('pending_retire', params)).ok, false, change)
+      assert.equal(target.storageState['pending-retirement:manual-retire'], undefined)
+      if (change !== 'prepared') {
+        const restarted = makeHarness({ storage: structuredClone(target.storageState) })
+        assert.equal((await restarted.request('extension_status', {})).result.blockingPendingCount, 1)
+      } else assert.equal(target.storageState['pending:manual-retire'].phase, 'prepared')
+    })
+  }
+})
+
+test('manual owner retirement cannot manufacture Watchdog identity or accept an unrecognized owner', async () => {
+  for (const extra of [{ registrationId: retirementIdentity.registrationId }, { owner: 'operator' }, { owner: undefined }]) {
+    const h = makeHarness({ storage: manualRetirementStorage() })
+    assert.equal((await h.request('pending_retirement_inspect', { ...manualRetirementIdentity, ...extra })).ok, false)
+    assert.equal(h.storageState['pending-retirement:manual-retire'], undefined)
+  }
+})
+
+test('manual owner retirement rejects an explicit nonmanual pending source even without a registration', async () => {
+  for (const source of ['watchdog', 'human', 'managed-worker']) {
+    const storage = manualRetirementStorage()
+    storage['pending:manual-retire'].source = source
+    const h = makeHarness({ storage })
+    const inspected = await h.request('pending_retirement_inspect', manualRetirementIdentity)
+    assert.equal(inspected.ok, true, inspected.error)
+    assert.equal(inspected.result.retirable, false, source)
+    assert.equal(inspected.result.reason, 'pending_identity_mismatch')
+    assert.equal(h.storageState['pending-retirement:manual-retire'], undefined)
+  }
+})
+
+test('manual owner retirement verifies durable staged contents before releasing the reload blocker', async t => {
+  for (const fault of ['write', 'read', 'changed-proof']) await t.test(fault, async () => {
+    const h = makeHarness({ storage: manualRetirementStorage(), sortStorageKeys: true,
+      failRetirementWrite: fault === 'write', failRetirementRead: fault === 'read',
+      beforeRetirementWrite: values => {
+        const candidate = values['pending-retirement-staged:manual-retire']
+        if (fault === 'changed-proof' && candidate) candidate.proof.contentDrained = false
+      } })
+    const params = await manualRetirementRequest(h)
+    assert.equal((await h.request('pending_retire', params)).ok, false)
+    assert.equal(h.storageState['pending-retirement:manual-retire'], undefined)
+    const restarted = makeHarness({ storage: structuredClone(h.storageState) })
+    assert.equal((await restarted.request('extension_status', {})).result.blockingPendingCount, 1)
+    assert.equal(h.storageState['pending:manual-retire'].phase, 'submitting')
+  })
+})
+
+test('manual owner retirement is available after a maintenance reload but never reports the old failed receipt as upgraded', async () => {
+  const storage = manualRetirementStorage()
+  storage['reload:receipt'] = { requestId: 'uncorrelated-old-reload', previousInstanceId: 'old-instance', expectedBuildId: 'b'.repeat(64) }
+  const original = structuredClone(storage['pending:manual-retire'])
+  const h = makeHarness({ storage, deferReloadTimer: true })
+  assert.equal((await h.request('extension_status', {})).result.restoration.state, 'failed')
+  assert.equal((await h.request('conversation_send', { conversationId: 'manual-retire', writerEpoch: 3 })).ok, false)
+  assert.equal((await h.request('pending_retire', await manualRetirementRequest(h))).ok, true)
+  const retiredStatus = (await h.request('extension_status', {})).result
+  assert.equal(retiredStatus.restoration.state, 'failed')
+  assert.equal(retiredStatus.lastReload.requestId, 'uncorrelated-old-reload')
+  assert.equal(retiredStatus.blockingPendingCount, 0)
+  assert.equal((await h.request('extension_reload', { requestId: 'new-manual-standard-reload', expectedInstanceId: 'test-instance',
+    expectedBuildId: 'a'.repeat(64) })).ok, true)
+  const restarted = makeHarness({ storage: structuredClone(h.storageState), extensionInstance: 'fresh-standard-instance' })
+  const status = (await restarted.request('extension_status', {})).result
+  assert.equal(status.restoration.state, 'ready')
+  assert.equal(status.lastReload.requestId, 'new-manual-standard-reload')
+  assert.equal(status.retiredPendingCount, 1)
+  assert.deepEqual(restarted.storageState['pending:manual-retire'], original)
+  assert.equal(restarted.storageState['effect-receipt:manual-send'], undefined)
+})
+
+test('manual owner retirement ignores forged receipt and preserves its original blocker', async t => {
+  for (const change of ['owner', 'target', 'epoch', 'revocation', 'project-closure', 'generation', 'digest']) await t.test(change, async () => {
+    const h = makeHarness({ storage: manualRetirementStorage() })
+    assert.equal((await h.request('pending_retire', await manualRetirementRequest(h))).ok, true)
+    const receipt = h.storageState['pending-retirement:manual-retire']
+    if (change === 'owner') receipt.owner = 'watchdog'
+    if (change === 'target') receipt.target = 'https://chatgpt.com/g/g-p-other/project'
+    if (change === 'epoch') h.storageState['writer:authority'].epoch = receipt.writerEpoch - 1
+    if (change === 'revocation') receipt.proof.revokedRegistration = true
+    if (change === 'project-closure') receipt.proof.targetAbsent = true
+    if (change === 'generation') receipt.proof.generationSource = 'host_ledger'
+    if (change === 'digest') receipt.pendingDigest = 'b'.repeat(64)
+    const status = (await h.request('extension_status', {})).result
+    assert.deepEqual([status.retiredPendingCount, status.recoverablePendingCount, status.blockingPendingCount], [0, 0, 1])
+  })
+})
 
 test('closed uncertain retirement retains exact pending, releases only its blocker, and fences late events across restart', async () => {
   const storage = retirementStorage()
@@ -528,6 +728,65 @@ test('retirement drain includes late prepare callback persistence after the orig
   assert.equal(result?.ok, false)
   assert.match(result.error, /outbox_not_empty/)
   assert.equal(h.storageState['pending-retirement:retire-conv'], undefined)
+})
+
+test('real host ledger and native manual owner retirement compose without Watchdog quiesce or known delivery', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'native-manual-retirement-composition-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new ConversationStore(root)
+  const canonical = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project'
+  const externalUrl = canonical.replace('/project', '-subagents/project')
+  const record = await store.create({ backend: 'test', externalUrl })
+  await store.append(record.id, { type: 'send_intent', turnId: 'manual-turn', requestId: 'manual-send', text: 'original manual private prompt' })
+  await store.append(record.id, { type: 'delivery_uncertain', turnId: 'manual-turn', message: 'unknown manual submit outcome' })
+  const storage = manualRetirementStorage(canonical)
+  storage[`pending:${record.id}`] = { ...storage['pending:manual-retire'], conversationId: record.id }
+  storage[`conversation:${record.id}`] = storage['conversation:manual-retire']
+  delete storage['pending:manual-retire']; delete storage['conversation:manual-retire']
+  const original = structuredClone(storage[`pending:${record.id}`])
+  const h = makeHarness({ storage, extensionInstance: '87000000-0000-4000-8000-000000000001',
+    tabs: [{ id: 99, windowId: 10, url: canonical }], windows: [{ id: 10 }] })
+  const bridge = new EventEmitter()
+  const methods = []
+  bridge.request = async (method, params) => {
+    methods.push(method)
+    assert.notEqual(method, 'writer_quiesce')
+    const result = await h.request(method, params)
+    if (!result.ok) throw new Error(result.error)
+    return JSON.parse(JSON.stringify(result.result))
+  }
+  const host = new ChatGptConversationHost({ bridge, store, writerEpoch: 3 })
+  const request = { conversationId: record.id, requestId: 'manual-send' }
+  const inspected = await host.inspectPendingRetirement(request)
+  assert.equal(inspected.retirable, true, inspected.reason)
+  assert.equal(inspected.owner, 'manual')
+  assert.equal(inspected.target, canonical)
+  const params = { ...request, operationId: '88000000-0000-4000-8000-000000000001', reason: 'closed_manual_owner_after_quiesce',
+    expectedPendingDigest: inspected.pendingDigest, expectedInstanceId: inspected.instanceId, expectedBuildId: inspected.buildId }
+  const retired = await host.retirePendingAttempt(params)
+  assert.equal(retired.delivery, 'unknown')
+  assert.equal(retired.receipt.owner, 'manual')
+  assert.equal(retired.receipt.proof.writerDrained, true)
+  assert.equal(retired.receipt.proof.contentDrained, true)
+  assert.equal(retired.receipt.proof.generationSource, 'manual_owner')
+  assert.equal(Object.hasOwn(retired.receipt, 'registrationId'), false)
+  assert.equal(Object.hasOwn(retired.receipt.proof, 'revokedRegistration'), false)
+  assert.equal(Object.hasOwn(retired.receipt.proof, 'targetAbsent'), false)
+  assert.equal((await host.retirePendingAttempt(params)).retired, true)
+  assert.deepEqual(h.storageState[`pending:${record.id}`], original)
+  assert.equal(h.storageState['effect-receipt:manual-send'], undefined)
+  assert.ok(methods.every(method => ['pending_retirement_inspect', 'pending_retire'].includes(method)))
+  assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length + h.sentToTabs.length, 0)
+  assert.equal(Object.keys(h.storageState).some(key => key.startsWith('writer:revoked-registration:')), false)
+  const status = (await h.request('extension_status', {})).result
+  assert.deepEqual([status.pendingCount, status.retiredPendingCount, status.blockingPendingCount], [1, 1, 0])
+  const after = await store.read(record.id)
+  assert.equal(after.status, 'delivery_uncertain')
+  assert.equal(after.latestTurnId, 'manual-turn')
+  assert.equal(after.externalUrl, externalUrl)
+  assert.equal(after.events.filter(event => event.type === 'pending_retired').length, 1)
+  assert.equal(after.events.filter(event => event.type === 'send_intent').length, 1)
+  assert.equal(after.events.filter(event => event.type === 'delivery_uncertain').length, 1)
 })
 
 test('real host ledger and native retirement compose for legacy pending without fabricating known delivery', async t => {
@@ -909,6 +1168,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     importScripts(...files) {
       for (const file of files) {
         if (file === 'build-info.js') vm.runInContext(`globalThis.__sidecarBuildId = ${JSON.stringify(retirementFaults.extensionBuild || 'a'.repeat(64))}`, context)
+        else if (file === 'pending-retirement-target.js') vm.runInContext(retirementTargetSource, context)
         else if (file === 'lifecycle.js') vm.runInContext(lifecycleSource, context)
         else throw new Error(`Unexpected import: ${file}`)
       }

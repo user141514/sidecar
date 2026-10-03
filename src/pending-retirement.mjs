@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util'
 import { exactConversationUuid } from './conversation-adoption.mjs'
+import { manualRetirementTarget, retirementTarget } from '../extension/pending-retirement-target.js'
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
 const SHA = /^[a-f0-9]{64}$/
@@ -18,24 +19,29 @@ export function validateRetirementRequest(payload, retire = false) {
   }
   if (retire && (!UUID.test(payload.operationId ?? '') || !UUID.test(payload.expectedInstanceId ?? '') ||
       !SHA.test(payload.expectedPendingDigest ?? '') || !SHA.test(payload.expectedBuildId ?? '') ||
-      payload.reason !== 'closed_target_after_quiesce')) throw new TypeError('invalid pending retirement snapshot')
+      !['closed_target_after_quiesce', 'closed_manual_owner_after_quiesce'].includes(payload.reason))) throw new TypeError('invalid pending retirement snapshot')
 }
 
 async function identity(host, payload, record = null) {
   record ??= await host.store.read(payload.conversationId)
   const intents = record.events.filter(event => event.type === 'send_intent' && event.requestId === payload.requestId)
   if (record.id !== payload.conversationId || record.status !== 'delivery_uncertain' || intents.length !== 1 ||
-      intents[0].turnId !== record.latestTurnId || intents[0].source !== 'watchdog' ||
-      !UUID.test(intents[0].registrationId ?? '')) fail('unknown_watchdog_attempt_required')
+      intents[0].turnId !== record.latestTurnId) fail('unknown_current_attempt_required')
   const intent = intents[0]
+  if (!Number.isSafeInteger(host.writer.epoch) || host.writer.epoch <= 0) fail('writer_epoch_required')
+  const common = { conversationId: record.id, requestId: payload.requestId, turnId: intent.turnId, writerEpoch: host.writer.epoch }
+  if ((intent.source == null || intent.source === 'manual') && !Object.hasOwn(intent, 'registrationId')) {
+    const target = manualRetirementTarget(record.externalUrl)
+    if (!target || (intent.target !== undefined && manualRetirementTarget(intent.target) !== target)) fail('manual_owner_target_mismatch')
+    return { ...common, owner: 'manual', target }
+  }
+  if (intent.source !== 'watchdog' || !UUID.test(intent.registrationId ?? '')) fail('unknown_watchdog_attempt_required')
   const target = targetOf(record.externalUrl)
   if (intent.target !== undefined && targetOf(intent.target) !== target) fail('registration_target_mismatch')
   const registrationId = intent.registrationId.toLowerCase()
   const authority = await host.watchdogAuthority.assertRevoked({ registrationId, target })
   if (authority?.accepted !== true) fail(authority?.reason ?? 'durable_revocation_required')
-  if (!Number.isSafeInteger(host.writer.epoch) || host.writer.epoch <= 0) fail('writer_epoch_required')
-  return { conversationId: record.id, requestId: payload.requestId, turnId: intent.turnId,
-    registrationId, target, writerEpoch: host.writer.epoch }
+  return { ...common, registrationId, target }
 }
 
 function matches(result, expected) {
@@ -43,14 +49,20 @@ function matches(result, expected) {
 }
 
 export function verifiedRetirementReceipt(receipt, expected) {
-  return Boolean(matches(receipt, expected) && receipt.version === 1 && receipt.state === 'retired' &&
+  const common = matches(receipt, expected) && receipt.version === 1 && receipt.state === 'retired' &&
     receipt.delivery === 'unknown' && Number.isInteger(receipt.tabId) && receipt.tabId >= 0 &&
     Number.isFinite(receipt.retiredAt) && receipt.retiredAt > 0 &&
-    receipt.proof?.originalTabAbsent === true && receipt.proof?.targetAbsent === true &&
-    receipt.proof?.writerDrained === true && receipt.proof?.contentDrained === true &&
-    receipt.proof?.contentEffectCount === 0 && receipt.proof?.outboxCount === 0 &&
-    receipt.proof?.revokedRegistration === true &&
-    ['native_pending', 'host_ledger'].includes(receipt.proof?.generationSource))
+    receipt.proof?.originalTabAbsent === true && receipt.proof?.writerDrained === true && receipt.proof?.contentDrained === true &&
+    receipt.proof?.contentEffectCount === 0 && receipt.proof?.outboxCount === 0
+  if (!common) return false
+  if (expected.owner === 'manual') return receipt.owner === 'manual' &&
+    receipt.reason === 'closed_manual_owner_after_quiesce' && !Object.hasOwn(receipt, 'registrationId') &&
+    !Object.hasOwn(receipt.proof, 'revokedRegistration') && receipt.proof.generationSource === 'manual_owner' &&
+    receipt.target === manualRetirementTarget(receipt.target) &&
+    (retirementTarget(receipt.target) ? receipt.proof.targetAbsent === true : !Object.hasOwn(receipt.proof, 'targetAbsent'))
+  return !Object.hasOwn(receipt, 'owner') && receipt.reason === 'closed_target_after_quiesce' &&
+    receipt.proof.targetAbsent === true && receipt.proof.revokedRegistration === true &&
+    ['native_pending', 'host_ledger'].includes(receipt.proof.generationSource)
 }
 
 export async function inspectPendingRetirement(host, payload) {
@@ -71,11 +83,15 @@ export function retirePendingAttempt(host, payload) {
   const previous = byConversation.get(payload.conversationId) ?? Promise.resolve()
   const run = previous.catch(() => {}).then(async () => {
     const expected = await identity(host, payload)
-    const quiescence = await host.bridge.request('writer_quiesce', {
-      writerEpoch: expected.writerEpoch, registrationId: expected.registrationId, target: expected.target
-    })
-    if (quiescence?.quiescent !== true || quiescence.registrationId !== expected.registrationId ||
-        quiescence.currentWriterEpoch !== expected.writerEpoch || quiescence.target !== expected.target) fail('writer_not_quiescent')
+    const reason = expected.owner === 'manual' ? 'closed_manual_owner_after_quiesce' : 'closed_target_after_quiesce'
+    if (payload.reason !== reason) fail('retirement_owner_reason_mismatch')
+    if (expected.owner !== 'manual') {
+      const quiescence = await host.bridge.request('writer_quiesce', {
+        writerEpoch: expected.writerEpoch, registrationId: expected.registrationId, target: expected.target
+      })
+      if (quiescence?.quiescent !== true || quiescence.registrationId !== expected.registrationId ||
+          quiescence.currentWriterEpoch !== expected.writerEpoch || quiescence.target !== expected.target) fail('writer_not_quiescent')
+    }
     const result = await host.bridge.request('pending_retire', { ...expected, ...payload })
     const receiptExpected = { ...expected, writerEpoch: result?.receipt?.writerEpoch, operationId: payload.operationId, pendingDigest: payload.expectedPendingDigest,
       instanceId: payload.expectedInstanceId, buildId: payload.expectedBuildId, reason: payload.reason }
@@ -85,7 +101,8 @@ export function retirePendingAttempt(host, payload) {
     // Audit only; the reducer intentionally keeps the original unknown result.
     await host.store.recordPendingRetirement(payload.conversationId, { type: 'pending_retired', source: 'local-operator',
         turnId: expected.turnId, requestId: expected.requestId, operationId: payload.operationId,
-        registrationId: expected.registrationId, reason: payload.reason, delivery: 'unknown', receipt: result.receipt }, async current => {
+        ...(expected.owner === 'manual' ? { owner: 'manual' } : { registrationId: expected.registrationId }),
+        reason: payload.reason, delivery: 'unknown', receipt: result.receipt }, async current => {
       const finalIdentity = await identity(host, payload, current)
       if (!isDeepStrictEqual(finalIdentity, expected)) fail('retirement_identity_changed')
     })
