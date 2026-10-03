@@ -30,6 +30,66 @@ async function callComposerMode(fixture, message) {
   } finally { clearTimeout(timer) }
 }
 
+test('draft expected composer mode drift rejects prepare before changing the prompt or mode', async t => {
+  const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+  const controls = addComposerMode(fixture, { selected: 'work' })
+  const prepared = await fixture.call({ type: 'conversation_prepare', guarded: true, expectedMode: 'chat',
+    turnId: 'mode-prepare-drift', text: 'must remain unsent' })
+  assert.equal(prepared.prepared, false)
+  assert.match(prepared.error, /mode/i)
+  assert.equal(fixture.editor.textContent, '')
+  assert.equal(controls.clicks, 0)
+  assert.equal(controls.work.attrs['aria-pressed'], 'true')
+  assert.equal(fixture.clicks, 0)
+})
+
+test('draft expected composer mode is checked again immediately before submit without switching modes', async t => {
+  const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+  const controls = addComposerMode(fixture, { selected: 'chat' })
+  const prepared = await fixture.call({ type: 'conversation_prepare', guarded: true, expectedMode: 'chat',
+    turnId: 'mode-submit-drift', text: 'owned draft' })
+  assert.equal(prepared.prepared, true)
+  controls.chat.attrs['aria-pressed'] = 'false'; controls.work.attrs['aria-pressed'] = 'true'
+  const submitted = await fixture.call({ type: 'conversation_submit', guarded: true, expectedMode: 'chat', turnId: 'mode-submit-drift' })
+  assert.equal(submitted.accepted, false)
+  assert.equal(submitted.deliveryUncertain, false)
+  assert.match(submitted.error, /mode/i)
+  assert.equal(fixture.editor.textContent, 'owned draft')
+  assert.equal(controls.clicks, 0)
+  assert.equal(fixture.clicks, 0)
+})
+
+test('draft expected composer mode fails closed for unavailable ambiguous or invalid evidence before writing', async t => {
+  for (const fault of ['missing', 'duplicate', 'hidden', 'disabled', 'invalid-mode']) {
+    const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+    const controls = fault === 'missing' ? null : addComposerMode(fixture)
+    if (fault === 'duplicate') addComposerMode(fixture)
+    if (fault === 'hidden') controls.group.shown = false
+    if (fault === 'disabled') controls.work.disabled = true
+    const prepared = await fixture.call({ type: 'conversation_prepare', guarded: true,
+      expectedMode: fault === 'invalid-mode' ? 'Chat' : 'chat', turnId: 'invalid-mode-proof', text: 'untouched' })
+    assert.equal(prepared.prepared, false, fault)
+    assert.match(prepared.error, /mode/i)
+    assert.equal(fixture.editor.textContent, '', fault)
+    assert.equal(fixture.clicks, 0)
+    assert.equal(controls?.clicks ?? 0, 0)
+  }
+})
+
+test('draft expected composer mode permits matching Chat and Work without clicking their selectors', async t => {
+  for (const mode of ['chat', 'work']) {
+    const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+    const controls = addComposerMode(fixture, { selected: mode, english: mode === 'work' })
+    const prepared = await fixture.call({ type: 'conversation_prepare', guarded: true, expectedMode: mode,
+      turnId: 'matching-' + mode, text: 'one owned prompt' })
+    assert.equal(prepared.prepared, true)
+    const submitted = await fixture.call({ type: 'conversation_submit', guarded: true, expectedMode: mode, turnId: 'matching-' + mode })
+    assert.equal(submitted.accepted, true, submitted.error)
+    assert.equal(controls.clicks, 0)
+    assert.equal(fixture.clicks, 1)
+  }
+})
+
 test('composer mode selects the scoped Work button and reads its final mode and URL', async t => {
   const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
   const controls = addComposerMode(fixture)

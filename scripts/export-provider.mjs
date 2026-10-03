@@ -18,7 +18,7 @@ export const providerFiles = [
   'install/platform-link.mjs', 'install/install-host.mjs', 'install/conversation-sidecar-host', 'install/conversation-sidecar-host.bat', 'install/install-host-win.bat',
   'skills/chatgpt-subagents/SKILL.md', 'docs/closed-pending-retirement.md', '.github/workflows/test.yml',
   'test/cli.test.mjs', 'test/install.test.mjs', 'test/chatgpt.test.mjs', 'test/store.test.mjs', 'test/native-messaging.test.mjs', 'test/mcp-stdio.test.mjs',
-  'test/content-script-runtime.test.mjs', 'test/extension-runtime.test.mjs', 'test/extension.test.mjs', 'test/helpers/native-content-fixture.mjs',
+  'test/content-script-runtime.test.mjs', 'test/extension-runtime.test.mjs', 'test/extension-submit-wait.test.mjs', 'test/extension.test.mjs', 'test/helpers/native-content-fixture.mjs',
   'test/extension-update.test.mjs', 'test/extension-build.test.mjs', 'test/provider-server.test.mjs', 'test/native-host-installer.test.mjs', 'test/windows-runtime.test.mjs'
 ]
 

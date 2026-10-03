@@ -162,6 +162,69 @@ test('create selects the requested composer mode before publishing the draft bin
   assert.equal(h.storageState['conversation:mode-create'].mode, 'chat')
 })
 
+test('draft send retains its created mode and forwards exact expectedMode through prepare and submit', async () => {
+  const project = 'https://chatgpt.com/g/g-p-test-subagents/project'
+  for (const mode of ['chat', 'work']) {
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 },
+      'conversation:mode-send': { tabId: 20, windowId: 10, url: project, mode } },
+      tabs: [{ id: 20, windowId: 10, url: project }], windows: [{ id: 10 }], submitNavigatesTo: MODERN_THREAD_URL })
+    const sent = await h.request('conversation_send', { conversationId: 'mode-send', turnId: 'mode-turn', requestId: 'mode-request',
+      externalUrl: project, existingOnly: true, writerEpoch: 3, text: 'one seed' })
+    assert.equal(sent.ok, true, sent.error)
+    const prepare = h.sentToTabs.find(item => item.message.type === 'conversation_prepare')
+    const submit = h.sentToTabs.find(item => item.message.type === 'conversation_submit')
+    assert.equal(prepare.storageSnapshot['conversation:mode-send'].mode, mode)
+    assert.equal(prepare.message.expectedMode, mode)
+    assert.equal(submit.message.expectedMode, mode)
+    assert.equal(h.storageState['conversation:mode-send'].mode, mode)
+    assert.equal(h.sentToTabs.some(item => item.message.type === 'conversation_mode_select'), false)
+  }
+})
+
+test('draft send mode drift reaches actual content guard and cannot write or submit a prompt', async t => {
+  const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+  const project = 'https://chatgpt.com/g/g-p-test-subagents/project'
+  fixture.location.href = project
+  const group = fixture.addNode('div', { role: 'group', 'aria-label': '撰写器模式' }, fixture.main)
+  const chat = fixture.addNode('button', { type: 'button', 'aria-pressed': 'false' }, group, '聊天')
+  const work = fixture.addNode('button', { type: 'button', 'aria-pressed': 'true' }, group, '工作')
+  chat.click = work.click = () => assert.fail('send must not change the user-selected mode or strength')
+  fixture.configureOnSubmit(() => { fixture.location.href = MODERN_THREAD_URL })
+  const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 },
+    'conversation:actual-mode-drift': { tabId: 20, windowId: 10, url: project, mode: 'chat' } },
+    tabs: [{ id: 20, windowId: 10, url: project }], windows: [{ id: 10 }], fastConversationUrlClock: true,
+    async contentMessageProvider(tab, message, runtime) {
+      fixture.configureRuntimeTransport(runtime)
+      const response = await fixture.call(message)
+      if (message.type === 'conversation_submit' && response.accepted) tab.url = MODERN_THREAD_URL
+      return response
+    } })
+  const sent = await h.request('conversation_send', { conversationId: 'actual-mode-drift', turnId: 'mode-drift-turn',
+    requestId: 'mode-drift-request', externalUrl: project, existingOnly: true, writerEpoch: 3, text: 'never dispatch this prompt' })
+  assert.equal(sent.ok, false)
+  assert.match(sent.error, /mode/i)
+  assert.equal(fixture.editor.textContent, '')
+  assert.equal(fixture.clicks, 0)
+  assert.equal(h.sentToTabs.some(item => item.message.type === 'conversation_submit'), false)
+  assert.equal(h.storageState['pending:actual-mode-drift'], undefined)
+  assert.equal(h.storageState['effect-receipt:mode-drift-request'], undefined)
+  assert.equal(h.storageState['conversation:actual-mode-drift'].mode, 'chat')
+})
+
+test('canonical conversation send keeps declared mode without requiring a draft toggle', async () => {
+  const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 },
+    'conversation:canonical-mode': { tabId: 20, windowId: 10, url: MODERN_THREAD_URL, mode: 'chat' } },
+    tabs: [{ id: 20, windowId: 10, url: MODERN_THREAD_URL }], windows: [{ id: 10 }] })
+  const sent = await h.request('conversation_send', { conversationId: 'canonical-mode', turnId: 'canonical-turn', requestId: 'canonical-request',
+    externalUrl: MODERN_THREAD_URL, existingOnly: true, writerEpoch: 3, text: 'one canonical seed' })
+  assert.equal(sent.ok, true, sent.error)
+  const prepare = h.sentToTabs.find(item => item.message.type === 'conversation_prepare')
+  const submit = h.sentToTabs.find(item => item.message.type === 'conversation_submit')
+  assert.equal(Object.hasOwn(prepare.message, 'expectedMode'), false)
+  assert.equal(Object.hasOwn(submit.message, 'expectedMode'), false)
+  assert.equal(h.storageState['conversation:canonical-mode'].mode, 'chat')
+})
+
 test('invalid composer mode cannot allocate a browser tab', async () => {
   const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } } })
   const created = await h.request('conversation_create', { conversationId: 'invalid-mode', mode: 'worker', writerEpoch: 3 })

@@ -155,6 +155,16 @@ function findComposerModeControls() {
   return controls
 }
 
+function assertExpectedComposerMode(mode) {
+  if (mode === undefined) return
+  if (mode !== 'chat' && mode !== 'work') throw new Error('Composer mode must be chat or work')
+  const controls = findComposerModeControls()
+  if (!controls) throw new Error('Composer mode is unavailable')
+  if (controls[mode].getAttribute('aria-pressed') !== 'true') {
+    throw new Error('Composer mode changed; expected ' + mode)
+  }
+}
+
 async function selectComposerMode(mode) {
   if (mode !== 'chat' && mode !== 'work') throw new Error('Composer mode must be chat or work')
   const controls = findComposerModeControls()
@@ -1376,13 +1386,15 @@ async function handlePrepare(message) {
     editor = await waitForPromptEditor()
   }
   const authoritativeState = message.authoritativeState === true
+  assertExpectedComposerMode(message.expectedMode)
   const observation = message.guarded === true ? writerObservation(null, !authoritativeState, !authoritativeState) : null
   if (observation) assertWriterObservation(observation, message.expected)
   setPromptText(editor, message.text)
   if (observation) {
     const ownedDraft = composerDraft(editor)
     if (!ownedDraft.trim()) throw new Error('composer_changed')
-    preparedSend = { turnId: message.turnId, text: ownedDraft, stamp: observation.stamp, expected: message.expected, authoritativeState }
+    preparedSend = { turnId: message.turnId, text: ownedDraft, stamp: observation.stamp,
+      expected: message.expected, expectedMode: message.expectedMode, authoritativeState }
   }
   return {
     prepared: true,
@@ -1395,6 +1407,8 @@ async function handleSubmit(message = {}) {
   const prepared = preparedSend
   const guard = message.guarded === true ? () => {
     if (!prepared || prepared.turnId !== message.turnId) throw new Error('prepared_intent_missing')
+    if (message.expectedMode !== undefined && message.expectedMode !== prepared.expectedMode) throw new Error('prepared_mode_mismatch')
+    assertExpectedComposerMode(prepared.expectedMode)
     const observation = writerObservation(prepared.text, prepared.authoritativeState !== true, prepared.authoritativeState !== true)
     assertWriterObservation(observation, prepared.expected)
     if (observation.stamp !== prepared.stamp) throw new Error('stale_intent')

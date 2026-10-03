@@ -562,7 +562,9 @@ function connectNative() {
 
 async function saveConversation(conversationId, value) {
   await assertNoRetiredConversationWrite({ conversationId, externalUrl: value?.url })
-  await chrome.storage.local.set({ [storageKey(conversationId)]: value })
+  const prior = value?.mode === undefined ? await loadConversation(conversationId) : null
+  const binding = prior?.mode !== undefined ? { ...value, mode: prior.mode } : value
+  await chrome.storage.local.set({ [storageKey(conversationId)]: binding })
 }
 
 async function loadConversation(conversationId) {
@@ -704,21 +706,23 @@ async function findMatchingConversationTab(windowId, expectedUrl) {
 }
 
 async function resolveConversationAttachment(conversationId, requestedUrl, existingOnly = false) {
+  const stored = await loadConversation(conversationId)
+  const declaredMode = stored?.mode !== undefined ? { mode: stored.mode } : {}
   if (existingOnly) {
     const matches = (await chrome.tabs.query({})).filter(tab => tabMatchesExpectedUrl(tab, requestedUrl))
     if (matches.length !== 1) throw new Error('exact existing conversation tab required')
     const tab = matches[0]
-    const state = { windowId: tab.windowId, tabId: tab.id, url: tabPageUrl(tab) }
+    const state = { ...declaredMode, windowId: tab.windowId, tabId: tab.id, url: tabPageUrl(tab) }
     await saveConversation(conversationId, state)
     return { state, reattached: true, reloadOnReadinessFailure: false }
   }
-  const stored = await loadConversation(conversationId)
   const expectedUrl = chooseConversationUrl(requestedUrl, stored?.url)
   const window0 = await ensureWindow0()
   const liveTab = await findRegisteredLiveTab(stored, expectedUrl)
 
   if (liveTab && liveTab.windowId === window0.windowId) {
     const state = {
+      ...declaredMode,
       windowId: liveTab.windowId,
       tabId: liveTab.id,
       url: chooseConversationUrl(tabPageUrl(liveTab), expectedUrl)
@@ -747,6 +751,7 @@ async function resolveConversationAttachment(conversationId, requestedUrl, exist
   }
 
   const state = {
+    ...declaredMode,
     windowId: window0.windowId,
     tabId: tab.id,
     url: chooseConversationUrl(tabPageUrl(tab), expectedUrl)
@@ -928,7 +933,7 @@ function hasConversationBindingConflict(stored, conversationId, tabId, url) {
     (value?.tabId === tabId || (uuid && exactAdoptionUuid(value?.url) === uuid)))
 }
 
-async function waitForSubmittedConversationTab(source, fallbackUrl, priorTabIds, conversationId, timeoutMs = 5000) {
+async function waitForSubmittedConversationTab(source, fallbackUrl, priorTabIds, conversationId, timeoutMs = 30000) {
   const existing = stableConversationUrl(fallbackUrl)
   const expectedProject = projectHomeUrl(fallbackUrl)
   const deadline = Date.now() + timeoutMs
@@ -1501,6 +1506,7 @@ async function performSend(params, operation) {
   tabOwners.set(state.tabId, params.conversationId)
   operation.phase = 'readiness'
   await ensureContentScriptForAttachment(state, reloadOnReadinessFailure)
+  const expectedMode = stableConversationUrl(state.url) ? undefined : state.mode
   let pending = {
     conversationId: params.conversationId,
     turnId: params.turnId,
@@ -1520,6 +1526,7 @@ async function performSend(params, operation) {
     conversationId: params.conversationId,
     turnId: params.turnId,
     guarded: true,
+    ...(expectedMode !== undefined ? { expectedMode } : {}),
     ...(params.expected ? { expected: params.expected } : {}),
     ...(params.authoritativeState === true ? { authoritativeState: true } : {}),
     text: params.text,
@@ -1565,6 +1572,7 @@ async function performSend(params, operation) {
     conversationId: params.conversationId,
     turnId: params.turnId,
     guarded: true,
+    ...(expectedMode !== undefined ? { expectedMode } : {}),
     ...(params.authoritativeState === true ? { authoritativeState: true } : {})
   }, 15_000, undefined, params) } catch (error) { throw deliveryUncertain(error) }
   if (submitted?.deliveryUncertain === true) throw deliveryUncertain(submitted.error || 'Submit outcome unknown')
