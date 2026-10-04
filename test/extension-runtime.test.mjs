@@ -306,6 +306,43 @@ test('Chat create retries only an absent readonly receiver before one exact mode
   }
 })
 
+test('cold project Chat create waits beyond five seconds for one exact fenced new document mode effect', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  for (const readyAt of [6000, 14750]) {
+    let modeProbes = 0
+    const receiverElapsed = []
+    const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, fastModeDocumentClock: true,
+      contentDocumentProbeProvider(tab, metadata) {
+        if (tab.url !== projectUrl) return metadata
+        modeProbes += 1
+        assert.equal(Object.keys(h.storageState).some(key => key.startsWith('content-effect:')), false)
+        assert.equal(h.storageState['conversation:cold-project-chat'], undefined)
+        if (modeProbes === 1) return { ...metadata, url: 'https://chatgpt.com/' }
+        if (h.modeDocumentElapsed < readyAt) {
+          receiverElapsed.push(h.modeDocumentElapsed)
+          throw new Error('Could not establish connection. Receiving end does not exist.')
+        }
+        tab.documentId = 'b'.repeat(32)
+        return { ...metadata, documentId: tab.documentId }
+      } })
+    const created = await h.request('conversation_create', { conversationId: 'cold-project-chat', url: projectUrl, mode: 'chat', writerEpoch: 3 })
+    assert.equal(created.ok, true, created.error)
+    assert.equal(created.result.mode, 'chat')
+    assert.equal(h.modeDocumentElapsed, readyAt)
+    assert.ok(receiverElapsed.some(elapsed => elapsed >= 5000))
+    const selections = h.sentToTabs.filter(entry => entry.message.type === 'conversation_mode_select')
+    assert.equal(selections.length, 1)
+    assert.equal(selections[0].options.documentId, 'b'.repeat(32))
+    assert.equal(selections[0].message.contentEffect.modeIntent.mode, 'chat')
+    assert.equal(selections[0].message.contentEffect.modeIntent.target, 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946/project')
+    assert.equal(h.storageState['conversation:cold-project-chat'].mode, 'chat')
+    assert.equal(h.sentToTabs.filter(entry => entry.message.type === 'project_open').length, 1)
+    assert.equal(h.sentToTabs.some(entry => ['conversation_prepare', 'conversation_submit'].includes(entry.message.type)), false)
+    assert.equal(h.createdTabs.length, 1)
+    assert.equal(h.reloadedTabs.length, 0)
+  }
+})
+
 test('Chat create receiver readiness shares the metadata deadline and preserves the first failure diagnostic', async () => {
   for (const metadataNeverReady of [false, true]) {
     let probes = 0
@@ -320,7 +357,7 @@ test('Chat create receiver readiness shares the metadata deadline and preserves 
     assert.match(created.error, /first mismatch=receiver/)
     assert.match(created.error, new RegExp('current mismatch=' + (metadataNeverReady ? 'fence' : 'receiver')))
     assert.ok(probes > 1)
-    assert.equal(h.modeDocumentElapsed, 5000)
+    assert.equal(h.modeDocumentElapsed, 15000)
     assert.equal(h.storageState['conversation:chat-receiver-missing'], undefined)
     assert.equal(h.sentToTabs.some(entry => entry.message.type === 'conversation_mode_select'), false)
     assert.equal(Object.keys(h.storageState).some(key => key.startsWith('content-effect:')), false)
@@ -351,13 +388,13 @@ test('create mode does not issue another probe or effect when metadata becomes r
   let lateProbes = 0
   const h = makeHarness({ storage: { 'writer:authority': { version: 1, epoch: 3 } }, fastModeDocumentClock: true,
     contentDocumentProbeProvider(_tab, metadata) {
-      if (h.modeDocumentElapsed >= 5000) { lateProbes += 1; return metadata }
+      if (h.modeDocumentElapsed >= 15000) { lateProbes += 1; return metadata }
       return { ...metadata, modeDocumentFence: false }
     } })
   const created = await h.request('conversation_create', { conversationId: 'mode-at-deadline', mode: 'chat', writerEpoch: 3 })
   assert.equal(created.ok, false)
   assert.equal(lateProbes, 0)
-  assert.ok(h.modeDocumentElapsed <= 5000)
+  assert.equal(h.modeDocumentElapsed, 15000)
   assert.equal(h.sentToTabs.some(entry => entry.message.type === 'conversation_mode_select'), false)
   assert.equal(Object.keys(h.storageState).some(key => key.startsWith('content-effect:')), false)
 })
@@ -370,7 +407,7 @@ test('create mode requires exact target same-build document fence within its bou
     assert.equal(created.ok, false)
     assert.equal(h.storageState['conversation:mode-fence-denied'], undefined)
     assert.match(created.error, new RegExp('mismatch.*' + predicate))
-    assert.ok(h.modeDocumentElapsed > 0 && h.modeDocumentElapsed <= 5000)
+    assert.equal(h.modeDocumentElapsed, 15000)
     assert.equal(h.sentToTabs.some(entry => entry.message.type === 'conversation_mode_select'), false)
     assert.equal(Object.keys(h.storageState).some(key => key.startsWith('content-effect:')), false)
   }

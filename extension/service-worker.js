@@ -423,7 +423,7 @@ async function boundedMessage(tabId, message, timeoutMs, onLateResponse, writerP
     try {
       await assertNoUnsettledEffectsForTab(tabId)
       const token = crypto.randomUUID()
-      const modeDeadline = message.type === 'conversation_mode_select' ? Date.now() + 5000 : null
+      const modeDeadline = message.type === 'conversation_mode_select' ? Date.now() + 15000 : null
       let document, firstMismatch = null, mismatches = []
       const unavailableModeDocument = () => new Error(`Exact composer mode document unavailable; first mismatch=${firstMismatch ?? 'deadline'}; current mismatch=${mismatches.join(',') || 'deadline'}; build=${document?.buildId ?? 'missing'}; fence=${document?.modeDocumentFence === true}; URL=${pageIdentity(document?.url)}; expected=${pageIdentity(message.expectedUrl)}`)
       while (true) {
