@@ -78,6 +78,57 @@ test('pendingEffect exposes one unresolved effect without mutating the journal',
   assert.deepEqual(afterRestart, before)
 })
 
+test('explicit supersession preserves unknown delivery, releases the slot, and never replays the old request', async t => {
+  const { box, rootDir } = await fixture(t)
+  let oldEffects = 0
+  const first = await box.run(url, 'lost', { text: 'once' }, async dispatch => {
+    await dispatch({ conversationId: 'conv-1', turnId: 'turn-1' })
+    oldEffects++
+    throw new Error('response lost after browser effect')
+  })
+  assert.equal(first.reason, 'delivery_uncertain')
+
+  const restarted = new mod.SendMailbox({ rootDir })
+  const superseded = await restarted.supersedePending(url, 'lost', {
+    conversationId: 'conv-1',
+    priorTurnId: 'turn-1',
+    userMessageId: '10000000-0000-4000-8000-000000000001'
+  })
+  assert.equal(superseded.accepted, false)
+  assert.equal(superseded.reason, 'superseded_by_human_turn')
+  assert.equal(superseded.deliveryUncertain, true)
+  assert.equal(superseded.superseded, true)
+  assert.equal(await restarted.pendingEffect(url), null)
+
+  let freshEffects = 0
+  const fresh = await restarted.run(url, 'fresh', { text: 'new work' }, async dispatch => {
+    await dispatch({ conversationId: 'conv-1', turnId: 'turn-2' })
+    freshEffects++
+    return { accepted: true, turnId: 'turn-2' }
+  })
+  assert.equal(fresh.accepted, true)
+  assert.equal(freshEffects, 1)
+
+  const replay = await restarted.run(url, 'lost', { text: 'once' }, async () => assert.fail('superseded request must never replay'))
+  assert.deepEqual(replay, superseded)
+  assert.equal(oldEffects, 1)
+})
+
+test('supersession refuses a mismatched pending effect and keeps the slot blocked', async t => {
+  const { box } = await fixture(t)
+  await box.run(url, 'lost', { text: 'once' }, async dispatch => {
+    await dispatch({ conversationId: 'conv-1', turnId: 'turn-1' })
+    throw new Error('uncertain')
+  })
+  const result = await box.supersedePending(url, 'lost', {
+    conversationId: 'conv-1',
+    priorTurnId: 'wrong-turn',
+    userMessageId: '10000000-0000-4000-8000-000000000001'
+  })
+  assert.equal(result.reason, 'delivery_uncertain')
+  assert.equal((await box.pendingEffect(url)).requestId, 'lost')
+})
+
 test('authoritative effect receipt settles an uncertain pending request without replay', async t => {
   const { box, rootDir } = await fixture(t)
   let sends = 0

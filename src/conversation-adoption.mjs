@@ -44,6 +44,43 @@ export async function adoptExistingConversation(host, payload) {
     return { accepted: false, reason: 'adoption_identity_mismatch' }
   }
 
+  const supersedeStaleMailbox = async (current, priorTurnId) => {
+    const pending = await host.mailbox.pendingEffect(target, current.id)
+    if (!pending) return { accepted: true, cleared: false }
+    if (pending.effect?.conversationId !== current.id || pending.effect?.turnId !== priorTurnId) {
+      return pending.outcome ?? { accepted: false, reason: 'delivery_uncertain', deliveryUncertain: true }
+    }
+    const intent = [...current.events].reverse().find(event =>
+      event.type === 'send_intent' &&
+      event.turnId === priorTurnId &&
+      event.requestId === pending.requestId
+    )
+    if (!intent || intent.source !== 'watchdog' || !UUID.test(intent.registrationId ?? '')) {
+      return pending.outcome ?? { accepted: false, reason: 'delivery_uncertain', deliveryUncertain: true }
+    }
+    let nativePending
+    try {
+      nativePending = await host.bridge.request('pending_retirement_inspect', {
+        conversationId: current.id,
+        turnId: priorTurnId,
+        requestId: pending.requestId,
+        registrationId: intent.registrationId.toLowerCase(),
+        target,
+        writerEpoch: host.writer.epoch
+      })
+    } catch {
+      return pending.outcome ?? { accepted: false, reason: 'delivery_uncertain', deliveryUncertain: true }
+    }
+    if (nativePending?.found !== false || nativePending.reason !== 'pending_missing') {
+      return { accepted: false, reason: nativePending?.reason ?? 'delivery_uncertain', deliveryUncertain: true }
+    }
+    return host.mailbox.supersedePending(target, pending.requestId, {
+      conversationId: current.id,
+      priorTurnId,
+      userMessageId: expectedUserMessageId
+    }, current.id)
+  }
+
   const known = await host.store.findByExternalUrl(target)
   if (known.length > 1) return { accepted: false, reason: 'ambiguous_local_binding' }
   if (known.length === 1 && known[0].latestTurnId) {
@@ -52,6 +89,11 @@ export async function adoptExistingConversation(host, payload) {
     const currentState = await host.state(known[0].id)
     let current = await host.store.read(known[0].id)
     if (currentState.turn.userMessageId !== expectedUserMessageId) {
+      if (current.status === 'delivery_uncertain') {
+        const superseded = await supersedeStaleMailbox(current, current.latestTurnId)
+        if (superseded?.superseded !== true && superseded?.cleared !== false) return superseded
+        if (superseded?.accepted === false && superseded?.superseded !== true) return superseded
+      }
       const observed = await host.store.recordHumanObservation(current.id, current.latestTurnId, {
         target: inspect.url, userMessageId: expectedUserMessageId,
         assistantMessageId: inspect.assistantMessageId ?? null,
@@ -59,6 +101,19 @@ export async function adoptExistingConversation(host, payload) {
       }, { allowDeliveryUncertain: true })
       if (observed.accepted !== true) return { accepted: false, reason: observed.reason }
       current = await host.store.read(current.id)
+    }
+    const currentHuman = [...current.events].reverse().find(event =>
+      event.type === 'human_turn_observed' &&
+      event.turnId === current.latestTurnId &&
+      event.userMessageId === expectedUserMessageId
+    )
+    if (currentHuman?.previousTurnId) {
+      const pending = await host.mailbox.pendingEffect(target, current.id)
+      if (pending) {
+        const superseded = await supersedeStaleMailbox(current, currentHuman.previousTurnId)
+        if (superseded?.superseded !== true && superseded?.cleared !== false) return superseded
+        if (superseded?.accepted === false && superseded?.superseded !== true) return superseded
+      }
     }
     known[0] = current
     turnId = current.latestTurnId

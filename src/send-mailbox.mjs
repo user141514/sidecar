@@ -144,6 +144,23 @@ export class SendMailbox {
     return run
   }
 
+  supersedePending(target, requestId, evidence, fallbackId = '') {
+    if (typeof requestId !== 'string' || !requestId || requestId.length > 256) throw new TypeError('invalid request id')
+    if (!evidence || typeof evidence !== 'object' ||
+        typeof evidence.conversationId !== 'string' || !evidence.conversationId ||
+        typeof evidence.priorTurnId !== 'string' || !evidence.priorTurnId ||
+        typeof evidence.userMessageId !== 'string' || !evidence.userMessageId) {
+      throw new TypeError('supersession requires exact conversation, prior turn and user identity')
+    }
+    const key = canonicalTarget(target, fallbackId)
+    const previous = this.queues.get(key) ?? Promise.resolve()
+    const run = previous.then(() => this.supersedePendingEffect(key, requestId, evidence))
+    const tail = run.catch(() => {})
+    this.queues.set(key, tail)
+    void tail.then(() => { if (this.queues.get(key) === tail) this.queues.delete(key) })
+    return run
+  }
+
   async settlePending(key, requestId, result) {
     const file = this.rootDir ? join(this.rootDir, `${hash(key)}.json`) : null
     const lock = file ? `${file}.lock` : null
@@ -159,6 +176,48 @@ export class SendMailbox {
       if (state.receipts[requestId]?.result) return state.receipts[requestId].result
       if (!state.pending || state.pending.requestId !== requestId) return state.pending ? uncertain(state.pending) : uncertain()
 
+      const persist = async () => {
+        if (!file) { this.memory.set(key, structuredClone(state)); return }
+        const temporary = `${file}.${randomUUID()}.tmp`
+        const handle = await open(temporary, 'wx')
+        try { await handle.writeFile(`${JSON.stringify(state)}\n`); await handle.sync() } finally { await handle.close() }
+        await rename(temporary, file)
+      }
+      state.receipts[requestId] = { digest: state.pending.digest, result }
+      state.pending = null
+      await persist()
+      return result
+    } finally {
+      await this.releaseLock(lock)
+    }
+  }
+
+  async supersedePendingEffect(key, requestId, evidence) {
+    const file = this.rootDir ? join(this.rootDir, `${hash(key)}.json`) : null
+    const lock = file ? `${file}.lock` : null
+    if (!await this.acquireLock(lock, { allowDeadOwner: true })) return uncertain()
+    try {
+      let state
+      if (file) {
+        try { state = JSON.parse(await readFile(file, 'utf8')) } catch (error) {
+          if (error.code !== 'ENOENT') throw error
+        }
+      } else state = this.memory.get(key)
+      if (!state || state.version !== 1 || state.key !== key || !state.receipts) throw new Error('mailbox request is not pending')
+      if (state.receipts[requestId]?.result) return state.receipts[requestId].result
+      if (!state.pending || state.pending.requestId !== requestId) return state.pending ? uncertain(state.pending) : uncertain()
+      if (state.pending.effect?.conversationId !== evidence.conversationId ||
+          state.pending.effect?.turnId !== evidence.priorTurnId) return uncertain(state.pending)
+
+      const result = {
+        accepted: false,
+        reason: 'superseded_by_human_turn',
+        deliveryUncertain: true,
+        superseded: true,
+        conversationId: evidence.conversationId,
+        priorTurnId: evidence.priorTurnId,
+        userMessageId: evidence.userMessageId
+      }
       const persist = async () => {
         if (!file) { this.memory.set(key, structuredClone(state)); return }
         const temporary = `${file}.${randomUUID()}.tmp`

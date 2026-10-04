@@ -220,6 +220,24 @@ test('explicit current-user adoption advances past a stale delivery-uncertain tu
     turnId: oldTurn,
     requestId: oldRequest
   })
+  await host.mailbox.run(target, oldRequest, { text: 'old watchdog review' }, async dispatch => {
+    await dispatch({ conversationId: record.id, turnId: oldTurn })
+    throw new Error('old Watchdog delivery acknowledgement lost')
+  })
+  const originalBridgeRequest = bridge.request
+  let pendingInspectCalls = 0
+  bridge.request = async (method, params) => {
+    if (method === 'pending_retirement_inspect') {
+      pendingInspectCalls++
+      assert.equal(params.conversationId, record.id)
+      assert.equal(params.turnId, oldTurn)
+      assert.equal(params.requestId, oldRequest)
+      assert.equal(params.registrationId, '30000000-0000-4000-8000-000000000051')
+      assert.equal(params.writerEpoch, 3)
+      return { ...params, found: false, retirable: false, reason: 'pending_missing' }
+    }
+    return originalBridgeRequest(method, params)
+  }
 
   const before = await store.read(record.id)
   assert.equal(before.status, 'delivery_uncertain')
@@ -236,6 +254,10 @@ test('explicit current-user adoption advances past a stale delivery-uncertain tu
   assert.equal(after.events.filter(event => event.type === 'human_turn_observed').length, 1)
   assert.match(after.latestTurnId, /^human_/)
   assert.notEqual(after.latestTurnId, oldTurn)
+  assert.equal(await host.mailbox.pendingEffect(target, record.id), null)
+  const sealedOld = await host.mailbox.run(target, oldRequest, { text: 'old watchdog review' }, async () => assert.fail('old Watchdog effect must stay sealed'))
+  assert.equal(sealedOld.reason, 'superseded_by_human_turn')
+  assert.equal(sealedOld.deliveryUncertain, true)
 
   const current = await host.stateByTarget(target)
   assert.equal(current.found, true)
