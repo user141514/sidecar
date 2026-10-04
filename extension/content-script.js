@@ -1106,6 +1106,7 @@ function readConversationStateObservation(expectedUserMessageId, allowLatestUser
   const finalActionAvailable = terminalActionAvailable(assistant)
   const mode = getComposerMode()
   const generating = mode === 'GENERATING'
+  const interrupted = ['ERROR', 'INTERRUPTED', 'RESUME_UNAVAILABLE'].includes(mode)
   const assistantText = assistant ? (body.bodyText || '') : ''
   const approvalScope = allowLatestUser ? turn : document
   const liveApproval = messageCollection().root ? currentThreadNodes('[data-testid="tool-approval-card"]', true).length > 0 :
@@ -1114,7 +1115,7 @@ function readConversationStateObservation(expectedUserMessageId, allowLatestUser
     /(?:^|\n)\[SUPERVISOR_STATE\s*:\s*NEED_INPUT\]\s*$/.test(assistantText))
   const bodyState = !assistant
     ? 'empty'
-    : mode === 'INTERRUPTED'
+    : interrupted
       ? 'incomplete'
       : body.bodyComplete
         ? 'substantive'
@@ -1128,7 +1129,7 @@ function readConversationStateObservation(expectedUserMessageId, allowLatestUser
     assistantMessageId: persistentMessageId(assistant),
     assistantText,
     generating,
-    terminal: generating || ['INTERRUPTED', 'RESUME_UNAVAILABLE'].includes(mode) ? false : finalActionAvailable,
+    terminal: generating || interrupted ? false : finalActionAvailable,
     body: bodyState,
     humanGate
   }
@@ -1199,13 +1200,27 @@ async function handleStop(message) {
   throw error
 }
 
+function currentFrontendNodes(selector) {
+  const currentTurn = messageTurn(userMessages().at(-1))
+  const composerForm = findPromptEditor()?.closest?.('form')
+  return currentThreadNodes(selector, true).filter(node => {
+    const turn = node.closest?.('[data-turn-key], [data-testid^="conversation-turn-"]')
+    const form = node.closest?.('form')
+    // UI notices may be siblings of the assistant prose inside its message unit.
+    // Quoted body text, another turn, and foreign controls are not frontend faults.
+    return (!currentTurn || !turn || turn === currentTurn) && (!form || form === composerForm) &&
+      !node.closest?.('[role="dialog"], [data-testid="tool-approval-card"], [data-user-message-bubble="true"], [data-message-author-role="user"], [data-markdown-text-style="assistant-message"], [data-message-content], [data-testid="assistant-message-content"], .markdown, [class*="markdown"], [class*="prose"]')
+  })
+}
+
 function getComposerMode() {
-  const buttons = currentThreadNodes('button')
+  if (isGenerating()) return 'GENERATING'
+  const buttons = currentFrontendNodes('button')
   const labels = buttons.map((button) => (
     button.getAttribute('aria-label') || button.textContent || ''
   ).trim().toLowerCase())
-  const alerts = currentThreadNodes('[role="alert"]').map(nodeText)
-  const statuses = currentThreadNodes('[role="status"]').map(nodeText)
+  const alerts = currentFrontendNodes('[role="alert"]').map(nodeText)
+  const statuses = currentFrontendNodes('[role="status"]').map(nodeText)
   const frontendNotices = [...alerts, ...statuses]
   const resumeUnavailable = labels.some((label) =>
     label.includes('resume stream unavailable') || label.includes('unable to resume stream')
@@ -1215,9 +1230,9 @@ function getComposerMode() {
   if (resumeUnavailable) return 'RESUME_UNAVAILABLE'
   const hasError = labels.some((label) =>
     ['try again', 'retry', '重试'].includes(label)
-  ) || alerts.some((text) => /something went wrong|network error|出了点问题|网络错误/i.test(text))
+  ) || alerts.some((text) => /something went wrong|network error|出了点问题|网络错误/i.test(text)) ||
+    frontendNotices.some((text) => /error in (?:the )?message stream|消息流(?:中)?(?:出现|发生)?(?:错误|异常)/i.test(text))
   if (hasError) return 'ERROR'
-  if (isGenerating()) return 'GENERATING'
   if (labels.some((label) =>
     label.includes('continue generating') ||
     label.includes('continue response') ||

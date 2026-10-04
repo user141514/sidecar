@@ -562,6 +562,85 @@ test('modern visible thread Retry remains error while hidden sidebar Retry is ig
   assert.equal(fixture.runtime.getComposerMode(), 'ERROR')
 })
 
+test('current visible message stream faults are identified from frontend notices', t => {
+  for (const text of ['消息流异常', '消息流错误', 'Error in message stream']) {
+    for (const placement of ['main', 'assistant']) {
+      const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+      fixture.addNode('div', { role: 'alert' }, fixture[placement], text)
+      assert.equal(fixture.runtime.getComposerMode(), 'ERROR', text + ' in ' + placement)
+      assert.equal(fixture.clicks, 0)
+    }
+  }
+})
+
+test('inactive frontend response faults project incomplete despite existing prose and final buttons', async t => {
+  for (const text of ['Something went wrong', 'Resume stream unavailable', 'Error in message stream']) {
+    const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+    fixture.addNode('div', { role: 'alert' }, fixture.main, text)
+    const observed = await fixture.call({ type: 'conversation_state_observe', expectedUserMessageId: MODERN_USER_ID })
+    assert.equal(observed.readable, true, text)
+    assert.equal(observed.body, 'incomplete', text)
+    assert.equal(observed.terminal, false, text)
+    assert.equal(observed.generating, false, text)
+    assert.equal(observed.humanGate, false, text)
+    assert.equal(observed.assistantText, 'ACTION_OK', text)
+    assert.equal(fixture.clicks, 0)
+  }
+})
+
+test('frontend response faults ignore quoted body text, earlier turns, sidebar and foreign dialogs', async t => {
+  for (const text of ['Error in message stream', 'Something went wrong', 'Resume stream unavailable']) {
+    for (const placement of ['body', 'old-turn', 'sidebar', 'dialog', 'foreign-form']) {
+      const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+      const parent = placement === 'body'
+        ? fixture.assistant.querySelector('[data-markdown-text-style="assistant-message"]')
+        : placement === 'old-turn'
+          ? fixture.addNode('section', { 'data-turn-key': '11111111-1111-4111-8111-111111111111' }, fixture.main)
+          : placement === 'sidebar'
+            ? fixture.document.querySelector('aside')
+            : fixture.addNode(placement === 'dialog' ? 'div' : 'form', placement === 'dialog' ? { role: 'dialog' } : {}, fixture.main)
+      fixture.addNode('div', { role: 'alert' }, parent, text)
+      assert.equal(fixture.runtime.getComposerMode(), 'IDLE_EMPTY', text + ' in ' + placement)
+      const observed = await fixture.call({ type: 'conversation_state_observe', expectedUserMessageId: MODERN_USER_ID })
+      assert.equal(observed.body, 'substantive', placement)
+      assert.equal(observed.terminal, true, placement)
+      assert.equal(observed.humanGate, false, placement)
+      assert.equal(fixture.clicks, 0)
+    }
+  }
+})
+
+test('frontend response faults preserve active generation while an exact visible Stop remains', async t => {
+  for (const text of ['Error in message stream', 'Something went wrong', 'Resume stream unavailable']) {
+    const fixture = nativeContentFixture({ generating: true }); t.after(() => fixture.dispose())
+    fixture.addNode('div', { role: 'alert' }, fixture.main, text)
+    assert.equal(fixture.runtime.getComposerMode(), 'GENERATING', text)
+    const observed = await fixture.call({ type: 'conversation_state_observe', expectedUserMessageId: MODERN_USER_ID })
+    assert.equal(observed.generating, true, text)
+    assert.equal(observed.terminal, false, text)
+    assert.equal(fixture.clicks, 0)
+  }
+})
+
+test('frontend response faults preserve textual NEED_INPUT and live approval gates', async t => {
+  for (const gate of ['text', 'approval']) {
+    const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+    if (gate === 'text') {
+      fixture.assistant.querySelector('span').textContent = 'Need approval\n[SUPERVISOR_STATE: NEED_INPUT]'
+    } else {
+      fixture.addNode('div', { 'data-testid': 'tool-approval-card' }, fixture.turn)
+    }
+    fixture.addNode('div', { role: 'alert' }, fixture.main, 'Error in message stream')
+    const observed = await fixture.call({ type: 'conversation_state_observe', expectedUserMessageId: MODERN_USER_ID })
+    assert.equal(observed.humanGate, true, gate)
+    const stopped = await fixture.call({ type: 'conversation_stop',
+      expected: { userMessageId: MODERN_USER_ID, assistantMessageId: MODERN_ASSISTANT_ID } })
+    assert.equal(stopped.accepted, false, gate)
+    assert.match(stopped.error, /need_input/, gate)
+    assert.equal(fixture.clicks, 0)
+  }
+})
+
 function structuralComposerFixture(specs) {
   let listener, focused = null
   const nodes = []
