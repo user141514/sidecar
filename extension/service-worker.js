@@ -1581,6 +1581,63 @@ async function performRefresh(params) {
   }
 }
 
+async function settleTerminalPendingBeforeSend(params, pending) {
+  const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
+  const expected = params.expected
+  if (typeof params.requestId !== 'string' || !params.requestId || params.requestId === pending.requestId ||
+      typeof params.turnId !== 'string' || !params.turnId || params.turnId === pending.turnId ||
+      pending.phase !== 'submitted' || pending.conversationId !== params.conversationId ||
+      !pending.requestId || !Number.isInteger(pending.tabId) || !Number.isInteger(pending.monitorVersion) ||
+      pending.monitorVersion <= 0 || !uuid.test(expected?.userMessageId ?? '') || !uuid.test(expected?.assistantMessageId ?? '')) return
+  const binding = await loadConversation(params.conversationId)
+  const receipt = await loadEffectReceipt(pending.requestId)
+  const target = stableConversationUrl(binding?.url)
+  if (!target || binding.tabId !== pending.tabId || !tabMatchesExpectedUrl({ url: params.externalUrl }, target) ||
+      receipt?.requestId !== pending.requestId || receipt.conversationId !== pending.conversationId ||
+      receipt.turnId !== pending.turnId || receipt.userMessageId !== expected.userMessageId ||
+      !tabMatchesExpectedUrl({ url: receipt.externalUrl }, target)) return
+  await assertNoUnsettledEffectsForTab(pending.tabId)
+  const pendingHash = await pendingDigest(pending)
+  const receiptHash = await pendingDigest(receipt)
+  const bindingHash = await pendingDigest(binding)
+  const snapshot = await boundedMessage(pending.tabId, {
+    type: 'conversation_state_observe', expectedUserMessageId: receipt.userMessageId
+  }, 2000)
+  if (snapshot?.ready !== true || snapshot.readable !== true ||
+      snapshot.userMessageId !== expected.userMessageId || snapshot.assistantMessageId !== expected.assistantMessageId ||
+      snapshot.generating !== false || snapshot.terminal !== true || snapshot.body !== 'substantive' ||
+      snapshot.humanGate !== false || typeof snapshot.assistantText !== 'string' || !snapshot.assistantText.trim() ||
+      !tabMatchesExpectedUrl({ url: snapshot.url }, target)) return
+  const revalidate = async () => {
+    const tab = await chrome.tabs.get(pending.tabId)
+    if (tab.windowId !== binding.windowId || !tabMatchesExpectedUrl(tab, target) ||
+        await pendingDigest(await loadPendingTurn(params.conversationId)) !== pendingHash ||
+        await pendingDigest(await loadEffectReceipt(pending.requestId)) !== receiptHash ||
+        await pendingDigest(await loadConversation(params.conversationId)) !== bindingHash) {
+      throw deliveryUncertain('Terminal pending identity changed before settlement')
+    }
+    await assertNoUnsettledEffectsForTab(pending.tabId)
+  }
+  await revalidate()
+  const event = { type: 'response_completed', conversationId: pending.conversationId, turnId: pending.turnId,
+    monitorVersion: pending.monitorVersion, text: snapshot.assistantText, externalUrl: stableConversationUrl(snapshot.url),
+    tabId: pending.tabId, windowId: binding.windowId }
+  const eventId = terminalEventId(event)
+  const record = { eventId, event }
+  const previous = await loadOutboxEvent(eventId)
+  if (previous && await pendingDigest(previous) !== await pendingDigest(record)) {
+    throw deliveryUncertain('Terminal pending outbox identity conflict')
+  }
+  if (!previous) await saveOutboxEvent(record)
+  if (await pendingDigest(await loadOutboxEvent(eventId)) !== await pendingDigest(record)) {
+    throw deliveryUncertain('Terminal pending completion persistence failed')
+  }
+  await revalidate()
+  await clearPendingTurn(params.conversationId)
+  if (await loadPendingTurn(params.conversationId)) throw deliveryUncertain('Terminal pending settlement failed')
+  void flushOutbox()
+}
+
 async function sendConversation(params) {
   const id = params.conversationId
   if (typeof params.requestId === 'string' && params.requestId) {
@@ -1602,7 +1659,11 @@ async function sendConversation(params) {
   const operation = { conversationId: id, turnId: params.turnId, phase: 'attaching', startedAt: Date.now() }
   activeSends.set(id, operation)
   try {
-    if (await loadPendingTurn(id)) throw deliveryUncertain('Conversation has an unresolved pending turn; read its result before sending again')
+    const pending = await loadPendingTurn(id)
+    if (pending) {
+      try { await settleTerminalPendingBeforeSend(params, pending) } catch (error) { throw deliveryUncertain(error) }
+      if (await loadPendingTurn(id)) throw deliveryUncertain('Conversation has an unresolved pending turn; read its result before sending again')
+    }
     return await performSend(params, operation)
   } catch (error) {
     if (error?.code !== 'DELIVERY_UNCERTAIN') {

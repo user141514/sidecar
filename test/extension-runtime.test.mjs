@@ -1261,6 +1261,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
     storage: {
       local: {
         async get(key) {
+          await retirementFaults.beforeStorageGet?.(key, storageState)
           if (retirementFaults.failRetirementRead && Object.keys(storageState).some(key => key.startsWith('pending-retirement-staged:'))) throw new Error('Retirement readback failed')
           if (key === null) return storageRoundTrip({ ...storageState })
           if (typeof key === 'string') {
@@ -1285,6 +1286,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           }
         },
         async remove(key) {
+          await retirementFaults.beforePendingRemove?.(key)
           if (failContentEffectClear && (Array.isArray(key) ? key : [key]).some(item => item.startsWith('content-effect:'))) throw new Error('Content effect clear unavailable')
           for (const item of Array.isArray(key) ? key : [key]) delete storageState[item]
         }
@@ -3925,6 +3927,113 @@ test('replayed durable terminal event clears the matching ghost pending turn', a
   assert.equal(response?.eventId, eventId)
   assert.equal(harness.storageState['pending:conv_existing'], undefined)
   assert.notEqual(harness.storageState[`outbox:${eventId}`], undefined)
+})
+
+function terminalPendingRaceHarness(fault = {}) {
+  const target = 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000101'
+  const user = '40000000-0000-4000-8000-000000000101'
+  const assistant = '50000000-0000-4000-8000-000000000101'
+  const pending = { conversationId: 'terminal-race', turnId: 'old-submitted-turn', requestId: 'old-submitted-request',
+    tabId: 30, phase: 'submitted', monitorVersion: 4, promptText: 'old prompt', startedAt: 1, ...fault.pending }
+  const receipt = { requestId: 'old-submitted-request', conversationId: 'terminal-race', turnId: 'old-submitted-turn',
+    userMessageId: user, externalUrl: target, ...fault.receipt }
+  const storage = { 'writer:authority': { version: 1, epoch: 3 },
+    'conversation:terminal-race': { windowId: 10, tabId: 30, url: target },
+    'pending:terminal-race': pending, 'effect-receipt:old-submitted-request': receipt, ...fault.storage }
+  if (fault.noReceipt) delete storage['effect-receipt:old-submitted-request']
+  const h = makeHarness({ storage, windows: [{ id: 10 }],
+    tabs: [{ id: 30, windowId: 10, url: target, userMessageId: user, assistantMessageId: assistant,
+      assistantText: 'OLD_ACTION_OK', generating: false, terminal: true, body: 'substantive', humanGate: false, ...fault.tab }],
+    ...fault.harness })
+  const params = { conversationId: 'terminal-race', turnId: 'next-turn', requestId: 'next-request', text: 'next prompt',
+    writerEpoch: 3, existingOnly: true, externalUrl: target, expected: { userMessageId: user, assistantMessageId: assistant }, ...fault.params }
+  return { h, params, pending, receipt, target, user, assistant,
+    eventId: 'terminal:terminal-race:old-submitted-turn:response_completed' }
+}
+
+test('terminal pending race settles the exact old submitted turn durably before one next submit', async () => {
+  const { h, params, pending, receipt, target, user, eventId } = terminalPendingRaceHarness()
+  const observed = await h.request('conversation_state_observe', { conversationId: 'terminal-race', turnId: pending.turnId,
+    externalUrl: target, expectedUserMessageId: user })
+  assert.equal(observed.result.terminal, true)
+  assert.deepEqual(h.storageState['pending:terminal-race'], pending, 'state observation stays read-only')
+  const next = await h.request('conversation_send', params)
+  assert.equal(next.ok, true, next.error)
+  assert.equal(h.storageState['pending:terminal-race'].turnId, 'next-turn')
+  assert.equal(h.storageState['pending:terminal-race'].requestId, 'next-request')
+  assert.deepEqual(h.storageState['effect-receipt:old-submitted-request'], receipt)
+  const completion = h.storageState['outbox:' + eventId]
+  assert.equal(completion.event.type, 'response_completed')
+  assert.equal(completion.event.turnId, 'old-submitted-turn')
+  assert.equal(completion.event.monitorVersion, 4)
+  assert.equal(completion.event.text, 'OLD_ACTION_OK')
+  assert.equal(completion.event.externalUrl, target)
+  const prepare = h.sentToTabs.find(entry => entry.message.type === 'conversation_prepare')
+  assert.equal(prepare.storageSnapshot['pending:terminal-race'].turnId, 'next-turn')
+  assert.equal(prepare.storageSnapshot['outbox:' + eventId].event.turnId, 'old-submitted-turn')
+  assert.equal(h.sentToTabs.filter(entry => entry.message.type === 'conversation_submit').length, 1)
+  assert.ok(h.nativeMessages.some(message => message.eventId === eventId))
+})
+
+test('terminal pending race preserves unknown and nonterminal or mismatched old turns without a next effect', async () => {
+  const faults = [
+    { pending: { phase: 'submitting' } }, { pending: { phase: 'prepared' } }, { noReceipt: true },
+    { receipt: { turnId: 'another-turn' } }, { receipt: { userMessageId: 'another-user' } },
+    { receipt: { externalUrl: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000102' } },
+    { tab: { generating: true } }, { tab: { humanGate: true } }, { tab: { terminal: false } },
+    { tab: { body: 'incomplete' } }, { tab: { body: 'unknown' } }, { tab: { assistantText: '' } },
+    { tab: { userMessageId: '40000000-0000-4000-8000-000000000102' } },
+    { tab: { assistantMessageId: '50000000-0000-4000-8000-000000000102' } },
+    { tab: { stateObservedUrl: 'https://chatgpt.com/c/10000000-0000-4000-8000-000000000102' } },
+    { params: { turnId: 'old-submitted-turn' } }, { params: { expected: undefined } },
+    { params: { requestId: undefined } }, { params: { requestId: '' } }, { params: { requestId: 1 } },
+    { params: { turnId: undefined } }, { params: { turnId: '' } }, { params: { turnId: 1 } },
+    { pending: { monitorVersion: undefined } },
+    { storage: { 'content-effect:other-submit': { tabId: 30, method: 'conversation_submit' } } }
+  ]
+  for (const fault of faults) {
+    const { h, params, pending, eventId } = terminalPendingRaceHarness(fault)
+    const response = await h.request('conversation_send', params)
+    assert.equal(response.ok, false, JSON.stringify(fault))
+    assert.deepEqual(h.storageState['pending:terminal-race'], pending)
+    assert.equal(h.storageState['outbox:' + eventId], undefined)
+    assert.equal(h.sentToTabs.some(entry => ['conversation_prepare', 'conversation_submit'].includes(entry.message.type)), false)
+  }
+})
+
+test('terminal pending race revalidates pending monitor receipt and binding after its fresh snapshot', async () => {
+  for (const changed of ['monitor', 'turn', 'receipt', 'binding']) {
+    const { h, params, eventId } = terminalPendingRaceHarness({ harness: { onStateObservation(state) {
+      if (changed === 'monitor') state['pending:terminal-race'] = { ...state['pending:terminal-race'], monitorVersion: 5 }
+      if (changed === 'turn') state['pending:terminal-race'] = { ...state['pending:terminal-race'], turnId: 'changed-old-turn' }
+      if (changed === 'receipt') state['effect-receipt:old-submitted-request'] = { ...state['effect-receipt:old-submitted-request'], userMessageId: 'changed-user' }
+      if (changed === 'binding') state['conversation:terminal-race'] = { ...state['conversation:terminal-race'], tabId: 31 }
+    } } })
+    const response = await h.request('conversation_send', params)
+    assert.equal(response.ok, false, changed)
+    assert.ok(h.storageState['pending:terminal-race'])
+    assert.equal(h.storageState['outbox:' + eventId], undefined, changed)
+    assert.equal(h.sentToTabs.some(entry => ['conversation_prepare', 'conversation_submit'].includes(entry.message.type)), false)
+  }
+})
+
+test('terminal pending race cannot start a next effect when completion persistence or pending removal fails', async () => {
+  for (const failure of ['outbox-write', 'outbox-readback', 'pending-clear', 'receipt-read']) {
+    const { h, params, pending } = terminalPendingRaceHarness({ harness: {
+      beforeOutboxWrite(values) {
+        if (failure === 'outbox-write') throw new Error('Outbox unavailable')
+        if (failure === 'outbox-readback') for (const [key, value] of Object.entries(values)) {
+          values[key] = { ...value, event: { ...value.event, turnId: 'corrupt-turn' } }
+        }
+      },
+      beforeStorageGet(key) { if (failure === 'receipt-read' && key === 'effect-receipt:old-submitted-request') throw new Error('Receipt unavailable') },
+      beforePendingRemove(key) { if (failure === 'pending-clear' && key === 'pending:terminal-race') throw new Error('Pending clear unavailable') }
+    } })
+    const response = await h.request('conversation_send', params)
+    assert.equal(response.ok, false, failure)
+    assert.deepEqual(h.storageState['pending:terminal-race'], pending)
+    assert.equal(h.sentToTabs.some(entry => ['conversation_prepare', 'conversation_submit'].includes(entry.message.type)), false)
+  }
 })
 
 test('conversation state observation wraps exact bound-tab facts in v1 envelope', async () => {
