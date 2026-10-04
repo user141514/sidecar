@@ -122,6 +122,37 @@ test('stale, unreadable, wrong-target or unpersisted identity cannot create a ne
   }
 })
 
+test('automatic observation stays fail-closed across delivery-uncertain state', async t => {
+  const { host, bridge, store, record } = await fixture(t)
+  await store.append(record.id, {
+    type: 'delivery_uncertain',
+    turnId: 'old-review-turn',
+    requestId: 'old-review-intent'
+  })
+  const original = bridge.request
+  bridge.request = async (method, params) => {
+    if (method === 'conversation_effect_receipt') return { found: false }
+    return original(method, params)
+  }
+  bridge.current = {
+    userMessageId: newUser,
+    assistantMessageId: null,
+    assistantText: '',
+    readable: true,
+    generating: false,
+    terminal: false,
+    body: 'empty',
+    humanGate: false
+  }
+
+  const observed = await host.observationByTarget(target)
+  assert.equal(observed.found, false)
+  const ledger = await store.read(record.id)
+  assert.equal(ledger.status, 'delivery_uncertain')
+  assert.equal(ledger.latestTurnId, 'old-review-turn')
+  assert.equal(ledger.events.some(event => event.type === 'human_turn_observed'), false)
+})
+
 test('a late known old user cannot rewind the new external human turn', async t => {
   const { host, bridge, store, record } = await fixture(t)
   const old = { ...bridge.current }

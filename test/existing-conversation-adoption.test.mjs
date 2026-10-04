@@ -201,6 +201,49 @@ test('explicit current-user adoption recovers a known owned record when the old 
   assert.equal(bridge.effects, 1)
 })
 
+test('explicit current-user adoption advances past a stale delivery-uncertain turn without replaying it', async t => {
+  const { host, store, bridge } = await fixture(t)
+  const record = await store.create({ backend: 'chatgpt-web-extension', externalUrl: target })
+  const oldUser = '10000000-0000-4000-8000-000000000050'
+  const oldTurn = 'old-uncertain-turn'
+  const oldRequest = 'old-uncertain-request'
+  await store.append(record.id, {
+    type: 'send_intent',
+    turnId: oldTurn,
+    requestId: oldRequest,
+    text: 'old watchdog review',
+    source: 'watchdog',
+    registrationId: '30000000-0000-4000-8000-000000000051'
+  })
+  await store.append(record.id, {
+    type: 'delivery_uncertain',
+    turnId: oldTurn,
+    requestId: oldRequest
+  })
+
+  const before = await store.read(record.id)
+  assert.equal(before.status, 'delivery_uncertain')
+  assert.equal(before.latestTurnId, oldTurn)
+  bridge.receipts.clear()
+
+  const adopted = await host.adoptExistingConversation(request())
+  assert.equal(adopted.accepted, true)
+  assert.equal(adopted.conversationId, record.id)
+
+  const after = await store.read(record.id)
+  assert.equal(after.events.filter(event => event.type === 'delivery_uncertain').length, 1)
+  assert.equal(after.events.filter(event => event.type === 'send_intent').length, 1)
+  assert.equal(after.events.filter(event => event.type === 'human_turn_observed').length, 1)
+  assert.match(after.latestTurnId, /^human_/)
+  assert.notEqual(after.latestTurnId, oldTurn)
+
+  const current = await host.stateByTarget(target)
+  assert.equal(current.found, true)
+  assert.equal(current.state.turn.userMessageId, userId)
+  assert.equal(current.state.delivery, 'delivered')
+  assert.equal(bridge.effects, 1)
+})
+
 test('HTTP adoption immediately makes the exact target authoritative through the state API', async t => {
   const { host } = await fixture(t)
   const app = createSidecarServer({ conversationHost: host })

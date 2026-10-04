@@ -253,10 +253,12 @@ export class ConversationStore {
     })
   }
 
-  recordHumanObservation(id, expectedTurnId, observation) {
+  recordHumanObservation(id, expectedTurnId, observation, { allowDeliveryUncertain = false } = {}) {
     return this.enqueueWrite(id, async () => {
       const current = await this.read(id)
-      if (current.latestTurnId !== expectedTurnId || ['sending', 'submitted', 'delivery_uncertain'].includes(current.status)) {
+      if (current.latestTurnId !== expectedTurnId ||
+          ['sending', 'submitted'].includes(current.status) ||
+          (current.status === 'delivery_uncertain' && allowDeliveryUncertain !== true)) {
         return { accepted: false, reason: 'turn_changed' }
       }
       const seen = current.events.some(event => event.userMessageId === observation.userMessageId ||

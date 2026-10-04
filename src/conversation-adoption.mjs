@@ -56,7 +56,7 @@ export async function adoptExistingConversation(host, payload) {
         target: inspect.url, userMessageId: expectedUserMessageId,
         assistantMessageId: inspect.assistantMessageId ?? null,
         observedAt: new Date().toISOString(), generating: inspect.generating
-      })
+      }, { allowDeliveryUncertain: true })
       if (observed.accepted !== true) return { accepted: false, reason: observed.reason }
       current = await host.store.read(current.id)
     }
