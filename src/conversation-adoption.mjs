@@ -46,7 +46,10 @@ export async function adoptExistingConversation(host, payload) {
 
   const supersedeStaleMailbox = async (current, priorTurnId) => {
     const pending = await host.mailbox.pendingEffect(target, current.id)
-    if (!pending) return { accepted: true, cleared: false }
+    // Absence of a local mailbox record is not evidence that an uncertain
+    // browser effect never happened. Only a matching pending effect plus the
+    // native pending_missing proof below may authorize supersession.
+    if (!pending) return { accepted: false, reason: 'delivery_uncertain', deliveryUncertain: true }
     if (pending.effect?.conversationId !== current.id || pending.effect?.turnId !== priorTurnId) {
       return pending.outcome ?? { accepted: false, reason: 'delivery_uncertain', deliveryUncertain: true }
     }

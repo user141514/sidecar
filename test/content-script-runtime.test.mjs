@@ -465,6 +465,29 @@ test('modern DOM transition emits a durable proof only while both persistent use
   assert.equal(events.length, 1)
 })
 
+test('reinjection over a static ordered DOM cannot synthesize a human turn transition proof', async t => {
+  const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+  const events = []
+  fixture.configureRuntimeTransport(async message => {
+    if (message?.kind === 'conversation_event') events.push(message.event)
+    return { durable: true }
+  })
+  const latestId = '11111111-1111-4111-8111-111111111111'
+  const latestTurn = fixture.addNode('section', { 'data-turn-key': latestId }, fixture.main)
+  const searchTurn = fixture.addNode('div', { 'data-content-search-turn-key': 'fallback-turn-static' }, latestTurn)
+  const user = fixture.addNode('div', { 'data-chatgpt-search-unit-key': 'fallback-turn-static:0:user',
+    'data-chatgpt-search-message-ids': latestId }, searchTurn)
+  fixture.addNode('div', { 'data-user-message-bubble': 'true' }, user, 'already mounted later human prompt')
+
+  const observed = await fixture.call({ type: 'conversation_state_observe', conversationId: 'conv-static-history',
+    expectedUserMessageId: MODERN_USER_ID, allowLatestUser: true })
+  assert.equal(observed.readable, true)
+  assert.equal(observed.userMessageId, latestId)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(await fixture.runtime.scanHumanTurnTransition(), false)
+  assert.deepEqual(events, [])
+})
+
 test('modern latest human observation retains the expected anchor and excludes older assistant and controls', async t => {
   const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
   const latestId = '11111111-1111-4111-8111-111111111111'

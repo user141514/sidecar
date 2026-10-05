@@ -201,6 +201,33 @@ test('explicit current-user adoption recovers a known owned record when the old 
   assert.equal(bridge.effects, 1)
 })
 
+test('delivery-uncertain ledger without a matching pending effect cannot be re-anchored by adoption', async t => {
+  const { host, store, bridge } = await fixture(t)
+  const record = await store.create({ backend: 'chatgpt-web-extension', externalUrl: target })
+  const oldTurn = 'old-uncertain-without-mailbox'
+  const oldRequest = 'old-uncertain-without-mailbox-request'
+  await store.append(record.id, {
+    type: 'send_intent', turnId: oldTurn, requestId: oldRequest,
+    text: 'old watchdog review', source: 'watchdog',
+    registrationId: '30000000-0000-4000-8000-000000000052'
+  })
+  await store.append(record.id, { type: 'delivery_uncertain', turnId: oldTurn, requestId: oldRequest })
+  bridge.receipts.clear()
+
+  const before = await store.read(record.id)
+  assert.equal(before.status, 'delivery_uncertain')
+  assert.equal(await host.mailbox.pendingEffect(target, record.id), null)
+
+  const adopted = await host.adoptExistingConversation(request())
+  assert.equal(adopted.accepted, false)
+  assert.equal(adopted.reason, 'delivery_uncertain')
+  const after = await store.read(record.id)
+  assert.equal(after.latestTurnId, oldTurn)
+  assert.equal(after.status, 'delivery_uncertain')
+  assert.equal(after.events.some(event => event.type === 'human_turn_observed'), false)
+  assert.equal(bridge.effects, 0)
+})
+
 test('explicit current-user adoption advances past a stale delivery-uncertain turn without replaying it', async t => {
   const { host, store, bridge } = await fixture(t)
   const record = await store.create({ backend: 'chatgpt-web-extension', externalUrl: target })

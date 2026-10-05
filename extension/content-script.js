@@ -949,12 +949,24 @@ function scheduleHumanTurnTransitionScan() {
 
 function armHumanTurnTransition(conversationId, expectedUserMessageId) {
   if (typeof conversationId !== 'string' || !conversationId || !persistentUserMessageId(expectedUserMessageId)) return
+  if (humanTransitionContext?.conversationId === conversationId &&
+      humanTransitionContext.expectedUserMessageId === expectedUserMessageId) return
+  const collection = messageCollection()
+  if (collection.unreadable) return
+  const users = collection.messages.filter(message => message.role === 'user')
+  const tail = users.at(-1) ?? null
+  // Arming is a temporal fence: the known ledger user must still be the live
+  // DOM tail now. A reinjected content script may see ordered historical A→B,
+  // but that static snapshot is not proof that this runtime observed A become B.
+  if (!tail || tail.id !== expectedUserMessageId) {
+    humanTransitionContext = null
+    return
+  }
   humanTransitionContext = { conversationId, expectedUserMessageId, externalUrl: location.href }
   if (!humanTransitionObserver && typeof MutationObserver === 'function' && document.documentElement) {
     humanTransitionObserver = new MutationObserver(scheduleHumanTurnTransitionScan)
     humanTransitionObserver.observe(document.documentElement, { childList: true, subtree: true })
   }
-  scheduleHumanTurnTransitionScan()
 }
 
 async function scanHumanTurnTransition() {
