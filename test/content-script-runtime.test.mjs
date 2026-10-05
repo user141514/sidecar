@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
-import { nativeContentFixture, MODERN_USER_ID, MODERN_ASSISTANT_ID } from './helpers/native-content-fixture.mjs'
+import { nativeContentFixture, MODERN_USER_ID, MODERN_ASSISTANT_ID, MODERN_THREAD_URL } from './helpers/native-content-fixture.mjs'
 
 const source = await readFile(new URL('../extension/content-script.js', import.meta.url), 'utf8')
 
@@ -421,6 +421,48 @@ test('collapsed modern user content ambiguity and foreign preview cannot prove a
     assert.equal(fixture.clicks, 1)
     assert.equal(fixture.runtime.readTurnObservation({ promptText: prompt }).present, false)
   }
+})
+
+test('modern DOM transition emits a durable proof only while both persistent user anchors are ordered in the current thread', async t => {
+  const fixture = nativeContentFixture(); t.after(() => fixture.dispose())
+  const events = []
+  fixture.configureRuntimeTransport(async message => {
+    if (message?.kind === 'conversation_event') events.push(message.event)
+    return { durable: true }
+  })
+  const conversationId = 'conv-human-transition'
+  await fixture.call({ type: 'conversation_state_observe', conversationId,
+    expectedUserMessageId: MODERN_USER_ID, allowLatestUser: true })
+
+  const latestId = '11111111-1111-4111-8111-111111111111'
+  const latestTurn = fixture.addNode('section', { 'data-turn-key': latestId }, fixture.main)
+  const searchTurn = fixture.addNode('div', { 'data-content-search-turn-key': 'fallback-turn-transition' }, latestTurn)
+  const user = fixture.addNode('div', { 'data-chatgpt-search-unit-key': 'fallback-turn-transition:0:user',
+    'data-chatgpt-search-message-ids': latestId }, searchTurn)
+  fixture.addNode('div', { 'data-user-message-bubble': 'true' }, user, 'new human prompt')
+
+  assert.equal(await fixture.runtime.scanHumanTurnTransition(), true)
+  assert.equal(events.length, 1)
+  assert.deepEqual({ ...events[0], observedAt: undefined }, {
+    type: 'human_turn_transition',
+    conversationId,
+    previousUserMessageId: MODERN_USER_ID,
+    userMessageId: latestId,
+    externalUrl: MODERN_THREAD_URL,
+    observedAt: undefined
+  })
+  assert.ok(Number.isFinite(Date.parse(events[0].observedAt)))
+  assert.equal(await fixture.runtime.scanHumanTurnTransition(), false)
+
+  fixture.user.connected = false
+  const laterId = '22222222-2222-4222-8222-222222222222'
+  const laterTurn = fixture.addNode('section', { 'data-turn-key': laterId }, fixture.main)
+  const laterSearch = fixture.addNode('div', { 'data-content-search-turn-key': 'fallback-turn-transition-2' }, laterTurn)
+  const laterUser = fixture.addNode('div', { 'data-chatgpt-search-unit-key': 'fallback-turn-transition-2:0:user',
+    'data-chatgpt-search-message-ids': laterId }, laterSearch)
+  fixture.addNode('div', { 'data-user-message-bubble': 'true' }, laterUser, 'later human prompt')
+  assert.equal(await fixture.runtime.scanHumanTurnTransition(), false)
+  assert.equal(events.length, 1)
 })
 
 test('modern latest human observation retains the expected anchor and excludes older assistant and controls', async t => {

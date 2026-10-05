@@ -42,6 +42,8 @@ async function fixture(t, { existing = true, active = false, url = target } = {}
   bridge.nextUser = false
   bridge.currentUser = userId
   bridge.currentAssistant = assistantId
+  bridge.supervisionUser = userId
+  bridge.supervisionAssistant = assistantId
   bridge.receipts = new Map()
   bridge.quiesce = null
   bridge.hold = null
@@ -96,12 +98,12 @@ async function fixture(t, { existing = true, active = false, url = target } = {}
       return { quiescent: true, registrationId: params.registrationId, currentWriterEpoch: params.writerEpoch }
     }
     if (method === 'conversation_supervision_inspect' || method === 'conversation_adoption_inspect') {
-      return { found: true, url, userMessageId: userId, assistantMessageId: assistantId, readable: true,
+      return { found: true, url, userMessageId: bridge.supervisionUser, assistantMessageId: bridge.supervisionAssistant, readable: true,
         generating: false, terminal: false, body: 'incomplete', humanGate: false, tabId: 81, windowId: 8 }
     }
     if (method === 'conversation_adopt') {
       const receipt = { action: 'adopt', requestId: params.requestId, conversationId: params.conversationId,
-        turnId: params.turnId, externalUrl: url, userMessageId: userId, assistantMessageId: assistantId,
+        turnId: params.turnId, externalUrl: url, userMessageId: bridge.supervisionUser, assistantMessageId: bridge.supervisionAssistant,
         expectedWriterEpoch: params.writerEpoch, generating: false, tabId: 81, windowId: 8 }
       bridge.receipts.set(params.requestId, receipt)
       bridge.attached = true
@@ -196,6 +198,27 @@ test('restored membership repairs a missing extension attachment without changin
   assert.equal(ledger.events.some(event => event.type === 'conversation_adopted'), false)
   assert.equal(bridge.calls.filter(call => call.method === 'conversation_adopt').length, 1)
   assert.equal(bridge.calls.some(call => ['conversation_send', 'conversation_create', 'conversation_stop', 'conversation_refresh'].includes(call.method)), false)
+})
+
+test('explicit Registry rebind re-anchors a known ledger to the current persistent human turn', async t => {
+  const { host, bridge, store, conversation } = await fixture(t)
+  const newUser = '10000000-0000-4000-8000-000000000084'
+  const newAssistant = '20000000-0000-4000-8000-000000000084'
+  bridge.supervisionUser = newUser
+  bridge.supervisionAssistant = newAssistant
+
+  const rebound = await host.bindWatchdog(identity)
+  assert.equal(rebound.accepted, true)
+
+  const ledger = await store.read(conversation.id)
+  const humanTurn = ledger.events.filter(event => event.type === 'human_turn_observed').at(-1)
+  assert.ok(humanTurn)
+  assert.equal(humanTurn.previousTurnId, 'turn-1')
+  assert.equal(humanTurn.userMessageId, newUser)
+  assert.equal(humanTurn.assistantMessageId, newAssistant)
+  assert.equal(ledger.latestTurnId, humanTurn.turnId)
+  assert.equal(bridge.calls.filter(call => call.method === 'conversation_adoption_inspect').length, 1)
+  assert.equal(bridge.calls.filter(call => call.method === 'conversation_adopt').length, 1)
 })
 
 test('restored attachment lost ACK reconciles its exact durable receipt without another binding effect', async t => {

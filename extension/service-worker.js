@@ -509,6 +509,10 @@ function terminalEventId(event) {
   return `terminal:${event.conversationId}:${event.turnId}:${event.type}`
 }
 
+function humanTransitionEventId(event) {
+  return `human-transition:${event.conversationId}:${event.previousUserMessageId}:${event.userMessageId}`
+}
+
 function effectReceiptKey(requestId) {
   return `${EFFECT_RECEIPT_PREFIX}${requestId}`
 }
@@ -2072,7 +2076,7 @@ async function readConversationStateObservation(params) {
   if (!tab || !Number.isInteger(tab.id)) return unreadableStateObservation(conversationId, expectedUrl, turnId)
   const allowLatestUser = params.allowLatestUser === true
   const snapshot = await boundedMessage(tab.id, {
-    type: 'conversation_state_observe', expectedUserMessageId,
+    type: 'conversation_state_observe', conversationId, expectedUserMessageId,
     ...(allowLatestUser ? { allowLatestUser: true } : {})
   }, 2000)
   const actualUrl = stableConversationUrl(snapshot?.url)
@@ -2256,6 +2260,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.kind !== 'conversation_event' || !message.event) return
 
   const event = message.event
+  const isHumanTransition = event.type === 'human_turn_transition'
+  if (isHumanTransition) {
+    void runContentMutation(async () => {
+      try { await assertNoRetiredConversationWrite(event) } catch {
+        sendResponse({ durable: false, reason: 'retired_unknown' })
+        return
+      }
+      const persistentId = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)
+      const current = await loadConversation(event.conversationId)
+      const senderTabId = sender.tab?.id
+      const eventUrl = stableConversationUrl(event.externalUrl)
+      const senderUrl = stableConversationUrl(sender.tab?.url)
+      const currentUrl = stableConversationUrl(current?.url)
+      if (!trustedContentSender(sender) || !current || !Number.isInteger(senderTabId) ||
+          current.tabId !== senderTabId || !persistentId(event.previousUserMessageId) ||
+          !persistentId(event.userMessageId) || event.previousUserMessageId === event.userMessageId ||
+          !Number.isFinite(Date.parse(event.observedAt ?? '')) || !eventUrl || !senderUrl || !currentUrl ||
+          pageIdentity(eventUrl) !== pageIdentity(senderUrl) || pageIdentity(currentUrl) !== pageIdentity(eventUrl)) {
+        sendResponse({ durable: false, reason: 'stale_source' })
+        return
+      }
+      const eventId = humanTransitionEventId(event)
+      const existing = await loadOutboxEvent(eventId)
+      if (existing) {
+        sendResponse({ durable: true, eventId })
+        void flushOutbox()
+        return
+      }
+      const forwardedEvent = { ...event, tabId: senderTabId, windowId: sender.tab?.windowId }
+      await saveOutboxEvent({ eventId, event: forwardedEvent })
+      sendResponse({ durable: true, eventId })
+      void flushOutbox()
+    }).catch((error) => sendResponse({
+      durable: false,
+      reason: /reload in progress/i.test(error instanceof Error ? error.message : String(error))
+        ? 'reload_in_progress'
+        : 'storage_error'
+    }))
+    return true
+  }
   const isTerminal = event.type === 'response_completed' || event.type === 'need_continue' || event.type === 'error'
   if (isTerminal) {
     void runContentMutation(async () => {

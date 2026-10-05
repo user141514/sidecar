@@ -25,6 +25,8 @@ async function fixture(t) {
   await store.append(record.id, { type: 'generation_started', turnId: 'old-review-turn', externalUrl: target })
   const bridge = new EventEmitter()
   bridge.calls = []
+  bridge.ackedEvents = []
+  bridge.ackEvent = eventId => bridge.ackedEvents.push(eventId)
   bridge.current = { userMessageId: oldUser, assistantMessageId: assistant,
     assistantText: '[SUPERVISOR_STATE: NEED_INPUT] old REVIEW {"status":"DONE"}',
     readable: true, generating: false, terminal: true, body: 'substantive', humanGate: true }
@@ -90,6 +92,45 @@ test('fresh external human pending, active and terminal advance owner state with
   assert.equal(ledger.latestResponse, 'new human result {"status":"DONE"}')
 })
 
+test('durable human transition proof advances the ledger without re-reading the vanished old DOM anchor', async t => {
+  const { host, bridge, store, record } = await fixture(t)
+  const before = await host.observationByTarget(target)
+  assert.equal(before.state.turn.userMessageId, oldUser)
+
+  const eventId = `human-transition:${record.id}:${oldUser}:${newUser}`
+  bridge.current = { userMessageId: null, assistantMessageId: null, assistantText: null,
+    readable: false, generating: null, terminal: null, body: 'unknown', humanGate: null }
+  bridge.emit('event', {
+    eventId,
+    type: 'human_turn_transition',
+    conversationId: record.id,
+    previousUserMessageId: oldUser,
+    userMessageId: newUser,
+    externalUrl: target,
+    observedAt: new Date().toISOString()
+  })
+  await delay(5)
+
+  const ledger = await store.read(record.id)
+  const human = ledger.events.filter(event => event.type === 'human_turn_observed').at(-1)
+  assert.ok(human)
+  assert.equal(human.previousTurnId, 'old-review-turn')
+  assert.equal(human.userMessageId, newUser)
+  assert.equal(human.eventId, eventId)
+  assert.equal(ledger.latestTurnId, human.turnId)
+  assert.deepEqual(bridge.ackedEvents, [eventId])
+  assert.equal(bridge.calls.filter(call => call.method === 'conversation_state_observe').length, 1)
+
+  bridge.emit('event', {
+    eventId: `human-transition:${record.id}:${oldUser}:10000000-0000-4000-8000-000000000099`,
+    type: 'human_turn_transition', conversationId: record.id,
+    previousUserMessageId: oldUser, userMessageId: '10000000-0000-4000-8000-000000000099',
+    externalUrl: target, observedAt: new Date().toISOString()
+  })
+  await delay(5)
+  assert.equal((await store.read(record.id)).events.filter(event => event.type === 'human_turn_observed').length, 1)
+})
+
 test('external human fact and null Watchdog lineage survive owner restart', async t => {
   const { host, bridge, store } = await fixture(t)
   await host.observationByTarget(target)
@@ -120,6 +161,27 @@ test('stale, unreadable, wrong-target or unpersisted identity cannot create a ne
       assert.equal((await store.read(record.id)).events.some(event => event.type === 'human_turn_observed'), false)
     })
   }
+})
+
+test('durable transition proof cannot advance a delivery-uncertain ledger', async t => {
+  const { host, bridge, store, record } = await fixture(t)
+  bridge.current = { userMessageId: oldUser, assistantMessageId: assistant, assistantText: 'old partial',
+    readable: true, generating: true, terminal: false, body: 'incomplete', humanGate: false }
+  await host.observationByTarget(target)
+  await store.append(record.id, { type: 'delivery_uncertain', turnId: 'old-review-turn', requestId: 'old-review-intent' })
+  assert.equal((await store.read(record.id)).status, 'delivery_uncertain')
+  const eventId = `human-transition:${record.id}:${oldUser}:${newUser}`
+  bridge.emit('event', {
+    eventId, type: 'human_turn_transition', conversationId: record.id,
+    previousUserMessageId: oldUser, userMessageId: newUser,
+    externalUrl: target, observedAt: new Date().toISOString()
+  })
+  await delay(5)
+  const ledger = await store.read(record.id)
+  assert.equal(ledger.status, 'delivery_uncertain')
+  assert.equal(ledger.latestTurnId, 'old-review-turn')
+  assert.equal(ledger.events.some(event => event.type === 'human_turn_observed'), false)
+  assert.deepEqual(bridge.ackedEvents, [eventId])
 })
 
 test('automatic observation stays fail-closed across delivery-uncertain state', async t => {

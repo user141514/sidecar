@@ -8,6 +8,10 @@ const retireModeDocument = () => { modeDocumentRetired = true }
 const modeFenceInstalled = typeof globalThis.addEventListener === 'function'
 if (modeFenceInstalled) globalThis.addEventListener('pagehide', retireModeDocument)
 let preparedSend = null
+let humanTransitionContext = null
+let humanTransitionObserver = null
+let humanTransitionScanScheduled = false
+const emittedHumanTransitions = new Set()
 const contentBuildId = globalThis.__sidecarBuildId ?? 'unversioned'
 const contentEffects = globalThis.__sidecarContentEffects ??= { documentId: null, tabId: null, operations: new Map(), completed: new Map() }
 const journaledMethods = new Set(['conversation_mode_select', 'conversation_prepare', 'conversation_submit', 'conversation_stop', 'webgpt_shift_test', 'project_open', 'project_create'])
@@ -16,8 +20,12 @@ globalThis.__sidecarContentRuntime = {
   monitorTurn,
   getComposerMode,
   readTurnObservation,
+  scanHumanTurnTransition,
   dispose() {
     contentDisposed = true
+    humanTransitionObserver?.disconnect?.()
+    humanTransitionObserver = null
+    humanTransitionContext = null
     globalThis.removeEventListener?.('pagehide', retireModeDocument)
     chrome.runtime.onMessage.removeListener?.(onSidecarMessage)
   }
@@ -926,6 +934,52 @@ function messagesForRole(role) {
 function assistantMessages() { return messagesForRole('assistant') }
 function userMessages() { return messagesForRole('user') }
 
+function persistentUserMessageId(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+}
+
+function scheduleHumanTurnTransitionScan() {
+  if (contentDisposed || humanTransitionScanScheduled) return
+  humanTransitionScanScheduled = true
+  setTimeout(() => {
+    humanTransitionScanScheduled = false
+    void scanHumanTurnTransition()
+  }, 50)
+}
+
+function armHumanTurnTransition(conversationId, expectedUserMessageId) {
+  if (typeof conversationId !== 'string' || !conversationId || !persistentUserMessageId(expectedUserMessageId)) return
+  humanTransitionContext = { conversationId, expectedUserMessageId, externalUrl: location.href }
+  if (!humanTransitionObserver && typeof MutationObserver === 'function' && document.documentElement) {
+    humanTransitionObserver = new MutationObserver(scheduleHumanTurnTransitionScan)
+    humanTransitionObserver.observe(document.documentElement, { childList: true, subtree: true })
+  }
+  scheduleHumanTurnTransitionScan()
+}
+
+async function scanHumanTurnTransition() {
+  const context = humanTransitionContext
+  if (contentDisposed || !context) return false
+  const collection = messageCollection()
+  if (collection.unreadable) return false
+  const users = collection.messages.filter(message => message.role === 'user')
+  const previous = users.find(user => user.id === context.expectedUserMessageId) ?? null
+  const latest = users.at(-1) ?? null
+  if (!previous || !latest || latest === previous || !persistentUserMessageId(latest.id)) return false
+  const relation = previous.node?.compareDocumentPosition?.(latest.node)
+  if (typeof relation !== 'number' || (relation & 4) === 0 || (relation & 1) !== 0) return false
+  const proofKey = `${context.conversationId}:${context.expectedUserMessageId}:${latest.id}`
+  if (emittedHumanTransitions.has(proofKey)) return false
+  emittedHumanTransitions.add(proofKey)
+  const durable = await emitConversationEvent({
+    type: 'human_turn_transition', conversationId: context.conversationId,
+    previousUserMessageId: context.expectedUserMessageId, userMessageId: latest.id,
+    externalUrl: location.href, observedAt: new Date(Date.now()).toISOString()
+  })
+  if (!durable) emittedHumanTransitions.delete(proofKey)
+  return durable
+}
+
 function followsUser(anchor, assistant) {
   const relation = anchor?.compareDocumentPosition?.(assistant)
   if (typeof relation !== 'number' || (relation & 5) !== 4) return false
@@ -1062,7 +1116,8 @@ function readTurnObservation({ baselineAssistantCount = 0, promptText = '' } = {
   }
 }
 
-function readConversationStateObservation(expectedUserMessageId, allowLatestUser = false) {
+function readConversationStateObservation(expectedUserMessageId, allowLatestUser = false, conversationId = null) {
+  if (allowLatestUser) armHumanTurnTransition(conversationId, expectedUserMessageId)
   const users = userMessages()
   const assistants = assistantMessages()
   const expectedAnchor = typeof expectedUserMessageId === 'string' && expectedUserMessageId
@@ -1246,7 +1301,7 @@ function getComposerMode() {
   return draft ? 'DRAFT_READY' : 'IDLE_EMPTY'
 }
 
-async function emitTerminalEvent(event) {
+async function emitConversationEvent(event) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const response = await chrome.runtime.sendMessage({ kind: 'conversation_event', event })
@@ -1275,7 +1330,7 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
 
       const mode = getComposerMode()
       if (mode === 'ERROR') {
-        const durable = await emitTerminalEvent({
+        const durable = await emitConversationEvent({
           type: 'error',
           conversationId,
           turnId,
@@ -1367,12 +1422,12 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
                 : 'assistant_body_incomplete',
             externalUrl: location.href
           }
-      const durable = await emitTerminalEvent(event)
+      const durable = await emitConversationEvent(event)
       if (durable) return
       stableSnapshotSince = now
     }
     if (contentDisposed) return
-    await emitTerminalEvent({
+    await emitConversationEvent({
       type: 'error',
       conversationId,
       turnId,
@@ -1381,7 +1436,7 @@ async function monitorTurn({ conversationId, turnId, baselineAssistantCount, pro
       externalUrl: location.href
     })
   } catch (error) {
-    await emitTerminalEvent({
+    await emitConversationEvent({
       type: 'error',
       conversationId,
       turnId,
@@ -1603,7 +1658,7 @@ function dispatchSidecarMessage(message, _sender, sendResponse) {
   }
 
   if (message?.type === 'conversation_state_observe') {
-    sendResponse(readConversationStateObservation(message.expectedUserMessageId, message.allowLatestUser === true))
+    sendResponse(readConversationStateObservation(message.expectedUserMessageId, message.allowLatestUser === true, message.conversationId))
     return
   }
 

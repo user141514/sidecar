@@ -324,8 +324,20 @@ export class ChatGptConversationHost {
       externalUrl: identity.target, writerEpoch: this.writer.epoch
     })
     if (current?.found !== true || canonicalTarget(current.url) !== canonicalTarget(identity.target) ||
-        current.readable !== true || current.userMessageId !== userMessageId) {
+        current.readable !== true) {
       return { accepted: false, reason: current?.reason || 'binding_identity_mismatch' }
+    }
+    if (current.userMessageId !== userMessageId) {
+      // Registry bind/rebind is explicit operator authority. If the previously
+      // owned turn has left the live DOM, reuse the existing adoption contract
+      // to advance the same ledger to the current persistent human turn. Normal
+      // polling remains fail-closed and never guesses a replacement anchor.
+      return this.adoptExistingConversation({
+        target: identity.target,
+        expectedUserMessageId: current.userMessageId,
+        expectedWriterEpoch: this.writer.epoch,
+        source: 'human'
+      })
     }
     const requestId = createHash('sha256').update(JSON.stringify([
       'watchdog-restore/v1', identity.registrationId, this.writer.epoch, record.id,
@@ -1227,6 +1239,35 @@ export class ChatGptConversationHost {
     if (!conversation) return false
     if (typeof event.eventId === 'string' && conversation.events?.some((item) => item.eventId === event.eventId)) {
       return true
+    }
+
+    if (event.type === 'human_turn_transition') {
+      const previousUserMessageId = event.previousUserMessageId
+      const userMessageId = event.userMessageId
+      const expectedEventId = `human-transition:${conversationId}:${previousUserMessageId}:${userMessageId}`
+      let sameTarget = false
+      try {
+        sameTarget = canonicalTarget(event.externalUrl) === canonicalTarget(conversation.externalUrl)
+      } catch {}
+      if (event.eventId !== expectedEventId || !sameTarget ||
+          !PERSISTENT_UUID.test(previousUserMessageId ?? '') || !PERSISTENT_UUID.test(userMessageId ?? '') ||
+          previousUserMessageId === userMessageId || !Number.isFinite(Date.parse(event.observedAt ?? ''))) {
+        return true
+      }
+      if (this.activeSends.has(conversationId) || ['sending', 'submitted', 'delivery_uncertain'].includes(conversation.status)) {
+        return true
+      }
+      const durableState = reduceConversationProjection({ ledger: conversation, observations: [], writer: this.writer }).state
+      if (!durableState.turn.turnId || durableState.turn.userMessageId !== previousUserMessageId) return true
+      const observed = await this.store.recordHumanObservation(conversationId, durableState.turn.turnId, {
+        eventId: event.eventId,
+        target: event.externalUrl,
+        userMessageId,
+        assistantMessageId: null,
+        observedAt: event.observedAt,
+        generating: false
+      })
+      return observed.accepted === true || ['turn_changed', 'historical_user_identity'].includes(observed.reason)
     }
 
     if (event.type === 'response_completed') {

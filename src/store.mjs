@@ -269,6 +269,7 @@ export class ConversationStore {
         canonicalTarget(observation.target), observation.userMessageId
       ])).digest('hex')
       const event = { at: now(), type: 'human_turn_observed', source: 'browser', turnId,
+        ...(typeof observation.eventId === 'string' && observation.eventId ? { eventId: observation.eventId } : {}),
         previousTurnId: expectedTurnId, userMessageId: observation.userMessageId,
         assistantMessageId: observation.assistantMessageId, externalUrl: observation.target,
         observedAt: observation.observedAt, generating: observation.generating === true }

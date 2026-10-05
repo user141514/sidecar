@@ -118,6 +118,56 @@ test('actual malformed modern submission cannot create a native receipt or repla
   }
 })
 
+test('human turn transition is durable in the existing outbox without clearing pending turn state', async () => {
+  const conversationId = 'conv-human-transition'
+  const previousUserMessageId = MODERN_USER_ID
+  const userMessageId = '11111111-1111-4111-8111-111111111111'
+  const target = MODERN_THREAD_URL
+  const pending = { conversationId, turnId: 'old-turn', phase: 'submitted', tabId: 20, monitorVersion: 1 }
+  const h = makeHarness({
+    storage: {
+      [`conversation:${conversationId}`]: { tabId: 20, windowId: 10, url: target },
+      [`pending:${conversationId}`]: pending
+    },
+    tabs: [{ id: 20, windowId: 10, url: target }],
+    windows: [{ id: 10 }]
+  })
+  const event = {
+    type: 'human_turn_transition', conversationId, previousUserMessageId, userMessageId,
+    externalUrl: target, observedAt: '2026-10-05T12:00:00.000Z'
+  }
+  const response = await h.emitRuntimeMessage({ kind: 'conversation_event', event }, {
+    id: 'cfifihieaffhniimpimnfmignbbdaalb', tab: { id: 20, windowId: 10, url: target }, frameId: 0,
+    documentId: '30000000000040008000000000000020'
+  })
+  assert.equal(response?.durable, true)
+  const eventId = `human-transition:${conversationId}:${previousUserMessageId}:${userMessageId}`
+  assert.deepEqual(h.storageState[`pending:${conversationId}`], pending)
+  assert.equal(h.storageState[`outbox:${eventId}`]?.event.type, 'human_turn_transition')
+  assert.equal(h.storageState[`outbox:${eventId}`]?.event.previousUserMessageId, previousUserMessageId)
+  assert.ok(h.nativeMessages.some(message => message.kind === 'event' && message.eventId === eventId))
+  await h.sendNativeMessage({ kind: 'event_ack', eventId })
+  assert.equal(h.storageState[`outbox:${eventId}`], undefined)
+})
+
+test('human turn transition rejects the wrong tab before durable publication', async () => {
+  const conversationId = 'conv-human-transition-wrong-tab'
+  const target = MODERN_THREAD_URL
+  const h = makeHarness({
+    storage: { [`conversation:${conversationId}`]: { tabId: 20, windowId: 10, url: target } },
+    tabs: [{ id: 20, windowId: 10, url: target }, { id: 21, windowId: 10, url: target }],
+    windows: [{ id: 10 }]
+  })
+  const response = await h.emitRuntimeMessage({ kind: 'conversation_event', event: {
+    type: 'human_turn_transition', conversationId, previousUserMessageId: MODERN_USER_ID,
+    userMessageId: '11111111-1111-4111-8111-111111111111', externalUrl: target,
+    observedAt: '2026-10-05T12:00:00.000Z'
+  } }, { id: 'cfifihieaffhniimpimnfmignbbdaalb', tab: { id: 21, windowId: 10, url: target }, frameId: 0,
+    documentId: '30000000000040008000000000000021' })
+  assert.notEqual(response?.durable, true)
+  assert.equal(Object.keys(h.storageState).some(key => key.startsWith('outbox:human-transition:')), false)
+})
+
 test('startup durably settles only pre-submit turns whose tabs are gone', async () => {
   const storage = {}
   for (const [id, phase, tabId] of [
