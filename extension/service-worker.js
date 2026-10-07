@@ -1226,38 +1226,35 @@ async function createConversation(params) {
   if (projectUrl) {
     await waitForContentScript(tab.id)
     let opened = null
-    try {
-      opened = await boundedMessage(tab.id, { type: 'project_open', projectUrl }, 15_000, undefined, params)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (/message (?:channel|port) closed.*response/i.test(message)) {
-        // The click may already have navigated the exact tab. The draft-surface
-        // readback below proves the resulting Project identity before any
-        // further effect.
-      } else if (/receiving end does not exist/i.test(message)) {
-        // A successful readiness ping can race a same-Project document
-        // replacement before project_open is dispatched. "Receiving end does
-        // not exist" proves this message was not delivered, so one bounded
-        // retry is safe after revalidating the exact tab and receiver.
-        let current = await chrome.tabs.get(tab.id)
-        let currentUrl = tabPageUrl(current)
-        const expectedProjectIdentity = projectIdentity(projectUrl)
-        const sameProject = value =>
-          expectedProjectIdentity !== null && projectIdentity(value) === expectedProjectIdentity
-        if (!sameProject(currentUrl)) throw new Error('Project draft target changed')
-        if (chatGptPageUrl(currentUrl) !== chatGptPageUrl(projectUrl)) {
-          await waitForContentScript(tab.id)
-          current = await chrome.tabs.get(tab.id)
-          currentUrl = tabPageUrl(current)
-          if (!sameProject(currentUrl)) throw new Error('Project draft target changed')
-          if (chatGptPageUrl(currentUrl) !== chatGptPageUrl(projectUrl)) {
-            opened = await boundedMessage(
-              tab.id, { type: 'project_open', projectUrl }, 15_000, undefined, params
-            )
-          }
+    const expectedProjectIdentity = projectIdentity(projectUrl)
+    const sameProject = value =>
+      expectedProjectIdentity !== null && projectIdentity(value) === expectedProjectIdentity
+    const projectOpenDeadline = Date.now() + 20_000
+    while (Date.now() < projectOpenDeadline) {
+      try {
+        opened = await boundedMessage(
+          tab.id, { type: 'project_open', projectUrl }, 15_000, undefined, params
+        )
+        break
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (/message (?:channel|port) closed.*response/i.test(message)) {
+          // The click may already have navigated the exact tab. The draft-surface
+          // readback below proves the resulting Project identity before any
+          // further effect.
+          break
         }
-      } else {
-        throw error
+        if (!/receiving end does not exist/i.test(message)) throw error
+
+        // ChatGPT can replace the same-Project document more than once while a
+        // newly-created seed tab settles. This error proves project_open was not
+        // delivered, so retry only while the exact Project identity is preserved.
+        const current = await chrome.tabs.get(tab.id)
+        const currentUrl = tabPageUrl(current)
+        if (!sameProject(currentUrl)) throw new Error('Project draft target changed')
+        if (chatGptPageUrl(currentUrl) === chatGptPageUrl(projectUrl)) break
+        if (Date.now() >= projectOpenDeadline) throw error
+        await waitForContentScript(tab.id, 20)
       }
     }
     if (opened && opened.accepted !== true) {
