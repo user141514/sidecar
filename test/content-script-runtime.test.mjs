@@ -76,6 +76,16 @@ test('draft expected composer mode fails closed for unavailable ambiguous or inv
   }
 })
 
+test('composer mode accepts a zero-width group when both mode buttons are visibly rendered', async t => {
+  const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())
+  const controls = addComposerMode(fixture, { selected: 'chat' })
+  controls.group.getClientRects = () => [{ width: 0, height: 36 }]
+  const selected = await callComposerMode(fixture, { mode: 'chat' })
+  assert.equal(selected.selected, true)
+  assert.equal(selected.mode, 'chat')
+  assert.equal(controls.clicks, 0)
+})
+
 test('draft expected composer mode permits matching Chat and Work without clicking their selectors', async t => {
   for (const mode of ['chat', 'work']) {
     const fixture = nativeContentFixture({ submitted: false }); t.after(() => fixture.dispose())

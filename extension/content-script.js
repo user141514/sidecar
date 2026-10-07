@@ -138,7 +138,8 @@ function elementLabel(node) {
 function findComposerModeControls() {
   const groups = [...document.querySelectorAll(
     '[role="group"][aria-label="撰写器模式"], [role="group"][aria-label="Composer mode"]'
-  )].filter(visibleNode)
+  )].filter(group => [...group.querySelectorAll('button[type="button"][aria-pressed]')]
+    .some(button => button.getAttribute('role') !== 'tab' && visibleNode(button)))
   if (!groups.length) return null
   if (groups.length !== 1) throw new Error('Composer mode group is ambiguous')
   const group = groups[0]
