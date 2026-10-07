@@ -1256,7 +1256,7 @@ test('real host ledger and native retirement compose for legacy pending without 
   assert.equal(h.createdTabs.length + h.createdWindows.length + h.reloadedTabs.length + h.sentToTabs.length, 0)
 })
 
-function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, modeSelectChannelClosesAfterNavigation = false, modeSelectReplacement = null, loseModeSelectCompletion = false, modeSelectError = null, onModeObservation = null, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null, fastConversationUrlClock = false, onSubmittedTabGet = null, submitPendingUrl = null, submitUserMessageId = '00000000-0000-4000-8000-000000000001', contentMessageProvider = null, submitResponseUrl = null, submitNewTabs = [], ...retirementFaults } = {}) {
+function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScriptTabIds = [], projectOpenChannelClosesAfterNavigation = false, projectOpenReceiverMissingOnce = false, modeSelectChannelClosesAfterNavigation = false, modeSelectReplacement = null, loseModeSelectCompletion = false, modeSelectError = null, onModeObservation = null, projectOpenRejectOnRoot = false, projectDraftRequiresReload = false, submitTransportFailure = false, submitNavigatesTo = null, prepareTransportFailure = false, prepareRejected = false, expirePrepare = false, prepareGate = null, deferReloadTimer = false, failAcceptedResponsePostOnce = false, hangWebGptShift = false, fastWebGptShiftTimeout = false, webGptDiagnostic = null, reloadTransportFailure = false, refreshAdmissionTabChanges = null, failRevocationStorage = false, stopGate = null, fastStopTimeout = false, loseContentCompletion = false, failContentEffectStorage = false, failContentEffectClear = false, onContentDocumentProbe = null, onStateObservation = null, completedEffectOnPing = null, projectOpenInvalidatesContent = false, onContentScriptInjection = null, onMissingContentPing = null, fastProjectDraftClock = false, contentPingProvider = null, fastConversationUrlClock = false, onSubmittedTabGet = null, submitPendingUrl = null, submitUserMessageId = '00000000-0000-4000-8000-000000000001', contentMessageProvider = null, submitResponseUrl = null, submitNewTabs = [], ...retirementFaults } = {}) {
   // Chrome's storage dictionary roundtrip does not preserve object insertion order.
   const storageRoundTrip = value => retirementFaults.sortStorageKeys
     ? JSON.parse(JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
@@ -1282,6 +1282,7 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
   let failNativeEventPosts = false
   let nextTabId = 1000
   let nextWindowId = 2000
+  let projectOpenReceiverMisses = 0
   const deferredReloadTimers = []
   let runtimeReloadCount = 0
   let requestSequence = 0
@@ -1499,6 +1500,9 @@ function makeHarness({ storage = {}, windows = [], tabs = [], staleContentScript
           }
         }
         if (message.type === 'project_open') {
+          if (projectOpenReceiverMissingOnce && projectOpenReceiverMisses++ === 0) {
+            throw new Error('Could not establish connection. Receiving end does not exist.')
+          }
           if (projectOpenRejectOnRoot && tab.url === 'https://chatgpt.com/') {
             return { accepted: false, error: 'ChatGPT Project anchor was not found' }
           }
@@ -2561,6 +2565,27 @@ test('conversation_create reuses a persisted same-Project conversation when no m
   assert.equal(harness.createdTabs.length, 1)
   assert.equal(harness.createdTabs[0].url, seedThreadUrl)
   assert.equal(response.result.url, projectUrl)
+})
+
+test('conversation_create retries one missing Project seed receiver before any navigation effect', async () => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/project'
+  const seedThreadUrl = 'https://chatgpt.com/g/g-p-6a983ccfa9148191b42da3db5412f946-subagents/c/10000000-0000-4000-8000-000000000016'
+  const harness = makeHarness({
+    storage: { window0: { windowId: 10 } },
+    windows: [{ id: 10 }],
+    tabs: [{ id: 20, windowId: 10, url: seedThreadUrl }],
+    projectOpenReceiverMissingOnce: true
+  })
+
+  const response = await harness.request('conversation_create', {
+    conversationId: 'conv_project_receiver_race',
+    url: projectUrl
+  })
+
+  assert.equal(response.ok, true, JSON.stringify(response))
+  assert.equal(response.result.url, projectUrl)
+  assert.equal(harness.createdTabs.length, 1)
+  assert.equal(harness.sentToTabs.filter(({ message }) => message.type === 'project_open').length, 2)
 })
 
 test('conversation_create accepts Project navigation when the message channel closes after link click', async () => {
